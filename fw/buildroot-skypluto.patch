@@ -1,0 +1,186 @@
+diff --git a/buildroot/board/pluto/S21misc b/buildroot/board/pluto/S21misc
+index 28c5739ff..5d6a56b0c 100755
+--- a/buildroot/board/pluto/S21misc
++++ b/buildroot/board/pluto/S21misc
+@@ -14,6 +14,62 @@ xo_correction() {
+ }
+ 
+ 
++tx_quiesce() {
++
++	# Quiet the transmitter before anything has streamed.
++	#
++	# The AD9361 comes up in ENSM 'fdd' with the TX chain biased and only
++	# 10 dB of attenuation (adi,tx-attenuation-mdB), so the TX port emits LO
++	# leakage from power-on with nothing in the DAC DMA. There is no device
++	# tree property that fixes this, so set it here.
++	#
++	# Attenuation ONLY - deliberately not the TX LO. From here on the kernel
++	# owns TX muting (see patches/0004): it unmutes when a TX DMA buffer
++	# starts and re-mutes when it stops. Powering the synthesiser down here
++	# would leave a later stream transmitting into a dead LO, silently.
++	#
++	# Set tx_quiesce=0 in the U-Boot environment to skip this:
++	#   fw_setenv tx_quiesce 0
++
++	[ "`fw_printenv -n tx_quiesce 2> /dev/null`" = "0" ] && return
++
++	for dev in /sys/bus/iio/devices/*; do
++		[ `cat ${dev}/name` == "ad9361-phy" ] && PHY_DEV=${dev}
++	done
++	[ -z "${PHY_DEV}" ] && return
++
++	for f in ${PHY_DEV}/out_voltage0_hardwaregain ${PHY_DEV}/out_voltage1_hardwaregain; do
++		[ -w "${f}" ] && echo -89.75 > ${f}
++	done
++}
++
++
++tx_led() {
++
++	# Point the USER LED at the transmitter.
++	#
++	# The kernel registers a "tx-active" LED trigger (see patches/0012) that
++	# follows the AD9361's attenuators: lit whenever either transmit chain is
++	# out of full attenuation, dark when both are muted. That covers a DMA
++	# stream AND an attenuation raised with no buffer open - the case a
++	# stream-only indicator would miss.
++	#
++	# Selected here rather than in the device tree, which asks for
++	# "heartbeat" and is kept byte-for-byte identical to the factory one.
++	#
++	# Set tx_led=0 in the U-Boot environment to keep the heartbeat:
++	#   fw_setenv tx_led 0
++
++	[ "`fw_printenv -n tx_led 2> /dev/null`" = "0" ] && return
++
++	LED=/sys/class/leds/led0:green
++	[ -w "${LED}/trigger" ] || return
++	grep -q tx-active "${LED}/trigger" || return
++
++	echo tx-active > ${LED}/trigger
++}
++
++
+ case "$1" in
+ 	start|"")
+ 		echo -n "Starting miscellaneous setup: "
+@@ -22,6 +78,8 @@ case "$1" in
+ 		[[ -d /mnt/jffs2/etc/dropbear ]] && cd /mnt/jffs2/etc/dropbear && md5sum -s -c keys.md5 && cp dropbear* /etc/dropbear/
+ 		[[ -d /mnt/jffs2/root/.ssh ]] && cd /mnt/jffs2/root/.ssh && md5sum -s -c keys.md5 && mkdir /root/.ssh && cp authorized_keys /root/.ssh
+ 		xo_correction
++		tx_quiesce
++		tx_led
+ 		MAX_BS=`fw_printenv -n iio_max_block_size 2> /dev/null || echo 67108864`
+ 		echo ${MAX_BS} > /sys/module/industrialio_buffer_dma/parameters/max_block_size
+ 		[ $? = 0 ] && echo "OK" || echo "FAIL"
+diff --git a/buildroot/board/pluto/S23udc b/buildroot/board/pluto/S23udc
+index 091afe679..1de0a00da 100755
+--- a/buildroot/board/pluto/S23udc
++++ b/buildroot/board/pluto/S23udc
+@@ -47,7 +47,7 @@ create_iiod_context_attributes() {
+ 	fi
+ 
+ 	echo -e "hw_serial=$serial\n" >> /etc/libiio.ini
+-	echo "fw_version=v0.38" >> /etc/libiio.ini
++	echo "fw_version=`grep device-fw /opt/VERSIONS | cut -d ' ' -f 2`" >> /etc/libiio.ini
+ 	if [ "$USBPID" == "0xb673" ]; then
+ 		echo ad9361-phy,xo_correction=`cat /sys/bus/iio/devices/${DEV_NAME}/xo_correction` >> /etc/libiio.ini
+ 		echo ad9361-phy,model=$AD936X_TYPE >> /etc/libiio.ini
+@@ -69,12 +69,38 @@ case "$1" in
+ 	model_variant=`dmesg | grep m25p80 | grep Kbytes | cut -d ' ' -f 3`
+ 
+ 	serial=`dmesg | grep SPI-NOR-UniqueID`
+-	serial=104473023196000bf5ff1a00aae12c3ca8
++	serial=${serial#*SPI-NOR-UniqueID }
++
++	# The USB gadget MACs below are sha1($serial). Seed them from the
++	# ORIGINAL value, so substituting a fallback serial cannot change them -
++	# a changed MAC renames the host's network interface (enx<mac>) and
++	# silently breaks any static IP or NetworkManager profile bound to it.
++	mac_seed="$serial"
++
++	if [ -z "$serial" ]; then
++		# This board's flash is a Winbond W25Q128, and only Micron parts
++		# make the kernel print SPI-NOR-UniqueID, so the lookup above
++		# finds nothing and hw_serial ends up empty. Anything that
++		# identifies a Pluto by serial then cannot open it at all -
++		# SDRangel reports "open serial TBD failed" and offers no device.
++		#
++		# This SoC exposes no unique hardware id (no device-tree
++		# serial-number, no DNA, no efuse), so mint one once and keep it
++		# in the persistent jffs2 store, which is mounted by S21misc
++		# before this script runs.
++		serial_file=/mnt/jffs2/hw_serial
++		if [ -s "$serial_file" ]; then
++			serial=`cat "$serial_file"`
++		else
++			serial=`head -c 16 /dev/urandom | hexdump -v -e '/1 "%02x"'`
++			echo "$serial" > "$serial_file" 2>/dev/null
++		fi
++	fi
+ 
+ 	create_iiod_context_attributes "$model" "$serial" "$model_variant"
+ 
+ 	echo $serial > /etc/serial
+-	sha1=`echo $serial | sha1sum`
++	sha1=`echo $mac_seed | sha1sum`
+ 
+ 	echo 0x0456 > $GADGET/idVendor
+ 	echo $USBPID > $GADGET/idProduct
+diff --git a/buildroot/board/pluto/S40network b/buildroot/board/pluto/S40network
+index 067bbdc01..cafced066 100755
+--- a/buildroot/board/pluto/S40network
++++ b/buildroot/board/pluto/S40network
+@@ -22,6 +22,7 @@ create_system_files () {
+ 
+ 	ETH_IPADDR=`fw_printenv -n ipaddr_eth 2> /dev/null`
+ 	ETH_NETMASK=`fw_printenv -n netmask_eth 2> /dev/null || echo 255.255.255.0`
++	ETHADDR=`fw_printenv -n ethaddr 2> /dev/null`
+ 
+ 	WLAN_SSID=`fw_printenv -n ssid_wlan 2> /dev/null`
+ 	WLAN_PWD=`fw_printenv -n pwd_wlan 2> /dev/null`
+@@ -47,10 +48,20 @@ create_system_files () {
+ 	if [ -n "$ETH_IPADDR" ]
+ 	then
+ 		echo -e "iface eth0 inet static" >> $IFAC
+-		echo -e "\taddress $ETH_IPADDR\n""\tnetmask $ETH_NETMASK\n" >> $IFAC
++		echo -e "\taddress $ETH_IPADDR\n""\tnetmask $ETH_NETMASK" >> $IFAC
+ 	else
+-		echo -e "iface eth0 inet dhcp\n" >> $IFAC
++		echo -e "iface eth0 inet dhcp" >> $IFAC
++		# Send a hostname in the DHCP request (option 12). Without it a router
++		# has no name to show and lists the board by MAC address.
++		echo -e "\thostname $HOSTNAME" >> $IFAC
+ 	fi
++	# The macb driver finds no MAC in the device tree - it logs "invalid hw
++	# address, using random" - so eth0 gets a NEW random MAC every boot. The
++	# router then sees a different device each time, hands out a different
++	# lease, and a DHCP reservation is impossible. U-Boot already has a MAC in
++	# its environment; use the same one so the board keeps one identity.
++	[ -n "$ETHADDR" ] && echo -e "\thwaddress ether $ETHADDR" >> $IFAC
++	echo "" >> $IFAC
+ 
+ 	### /etc/wpa.conf ###
+ 	if [ -n "$WLAN_SSID" ]
+diff --git a/buildroot/configs/zynq_pluto_defconfig b/buildroot/configs/zynq_pluto_defconfig
+index 6203766e0..4e5477f76 100755
+--- a/buildroot/configs/zynq_pluto_defconfig
++++ b/buildroot/configs/zynq_pluto_defconfig
+@@ -6,7 +6,7 @@ BR2_ARM_FPU_NEON=y
+ BR2_TOOLCHAIN_EXTERNAL=y
+ BR2_TOOLCHAIN_EXTERNAL_LINARO_ARM=y
+ BR2_OPTIMIZE_2=y
+-BR2_TARGET_GENERIC_HOSTNAME="pluto"
++BR2_TARGET_GENERIC_HOSTNAME="fishball"
+ BR2_TARGET_GENERIC_ISSUE="Welcome to Pluto"
+ BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y
+ BR2_TARGET_GENERIC_ROOT_PASSWD="analog"
+@@ -45,6 +45,7 @@ BR2_PACKAGE_LIBGPIOD_TOOLS=y
+ BR2_PACKAGE_LIBIIO_IIOD_USBD=y
+ BR2_PACKAGE_LIBIIO_TESTS=y
+ BR2_PACKAGE_LIBINI=y
++BR2_PACKAGE_IPERF=y
+ BR2_PACKAGE_AVAHI=y
+ BR2_PACKAGE_AVAHI_DAEMON=y
+ BR2_PACKAGE_AVAHI_LIBDNSSD_COMPATIBILITY=y

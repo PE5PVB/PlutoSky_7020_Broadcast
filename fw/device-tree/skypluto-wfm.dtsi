@@ -1,0 +1,35 @@
+/*
+ * skypluto-wfm.dtsi - device-tree fragment voor de WFM-exciter registers
+ *
+ * Voeg toe aan zynq-pluto-sdr.dtsi (in de 'linux'-submodule), als kind van
+ * de PL-bus (fpga_axi). Het basisadres MOET matchen met wat system_bd.tcl /
+ * de adres-editor aan skypluto_wfm_exciter/s_axi toewijst.
+ *
+ * NB: de besturings-CLI (scripts/skypluto-wfm.sh) gebruikt 'devmem' op het
+ * fysieke adres en heeft GEEN driver nodig. De uio-node hieronder is optioneel
+ * en handig als je de registers vanuit userspace wilt mmappen.
+ */
+
+&fpga_axi {
+	skypluto_wfm_regs: skypluto-wfm@7c700000 {
+		compatible = "generic-uio";
+		reg = <0x7c700000 0x1000>;
+		/* geen interrupts nodig */
+	};
+};
+
+/*
+ * Optioneel (Option A, AXIS + ALSA-route): als je later de audio ook in Linux
+ * wilt, gebruik dan de ADI axi_i2s-core i.p.v. de fabric-I2S-RX:
+ *
+ * &fpga_axi {
+ *     axi_i2s_0: axi-i2s@77600000 {
+ *         compatible = "adi,axi-i2s-1.00.a";
+ *         reg = <0x77600000 0x1000>;
+ *         clocks = <&clkc 15>, <&audio_ref_clk>;
+ *         clock-names = "axi", "ref";
+ *         dmas = <&dmac_s 0 &dmac_s 1>;
+ *         dma-names = "tx", "rx";
+ *     };
+ * };
+ */

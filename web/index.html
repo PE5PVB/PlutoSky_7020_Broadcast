@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Pluto WFM Broadcast</title>
+<style>/*@@CSS@@*/
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}.tabs button{font:inherit;font-size:14px;border:0;border-radius:999px;padding:5px 14px;background:var(--card);color:var(--tx);cursor:pointer}.tabs button[aria-selected=true]{background:var(--ac);color:#fff}
+section.tab{display:none}section.tab.on{display:block}
+.hero .big{font-size:48px}.sub{color:var(--tx2);margin-top:6px;font-variant-numeric:tabular-nums}
+.pill.on i{background:var(--ok)}.pill.off i{background:var(--bad)}.pill.wait i{background:var(--warn)}
+.dm{background:#19212d;color:#dfe6ef;border-radius:18px;padding:14px 16px 8px;margin-top:8px}.dm canvas{width:100%;height:84px;display:block}.dmt{display:flex;justify-content:space-between;flex-wrap:wrap;gap:2px 12px;font-size:13px;font-weight:600;margin-bottom:4px}.dmt span+span{color:#8d9aad;font-weight:400;font-size:12px}
+.seg{display:inline-flex;border-radius:9px;overflow:hidden;background:var(--in)}.seg button{font:inherit;border:0;padding:7px 14px;background:transparent;color:var(--tx);cursor:pointer}.seg button.on{background:var(--ac);color:#fff}
+.go{font:inherit;border:0;border-radius:9px;padding:7px 14px;background:var(--ac);color:#fff;cursor:pointer}.go.alt{background:var(--in);color:var(--tx)}.go:disabled{opacity:.5}
+.warnnote{color:var(--warn);font-size:13px;margin:4px 16px 0}.badnote{color:var(--bad);font-size:13px;margin:4px 16px 0}
+#toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:var(--card);color:var(--tx);border-radius:12px;padding:10px 16px;box-shadow:0 4px 24px rgba(0,0,0,.35);font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;max-width:90vw}#toast.on{opacity:1}
+#con{background:#19212d;color:#dfe6ef;border-radius:14px;padding:12px;font:13px/1.45 ui-monospace,Menlo,Consolas,monospace;height:300px;overflow:auto;white-space:pre-wrap;word-break:break-all}#con b{color:#8fd1ff;font-weight:600}#con .e{color:#ff8a80}
+.mm{background:var(--card);border-radius:14px;padding:8px 12px;margin-top:8px;position:relative}.mm canvas{width:100%;height:170px;display:block}
+.cw{background:var(--card);border-radius:14px;padding:8px 12px;margin-top:8px}.cw canvas{width:100%;height:190px;display:block}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.chip.good{color:var(--ok)}.chip.badc{color:var(--bad)}.chip.warnc{color:var(--warn)}
+#login{max-width:340px;margin:60px auto}
+</style></head><body>
+<header><div class="ttl"><h1>Pluto WFM Broadcast</h1><span class="pill" id="st"><i aria-hidden="true"></i><span id="stt">connecting</span></span></div>
+<div class="tabs" role="tablist"><button data-t="ov" aria-selected="true">Overview</button><button data-t="ct" aria-selected="false">Control</button><button data-t="ms" aria-selected="false">Measure</button><button data-t="cn" aria-selected="false">Console</button></div>
+<div class="chips" id="chips"></div>
+<p id="lpw" role="alert" style="display:none;background:var(--card);border-radius:12px;padding:10px 14px;margin:10px 0 0;color:var(--bad);font-weight:600">&#9888; No loopback signal on RX2 — check the cable between TX2 and RX2. The SM.1268-5 mask measurement is not valid until the loop is restored.</p>
+<p id="err" role="alert" style="display:none;color:var(--bad)">No connection to the exciter. The page retries every second.</p></header>
+<main>
+<div id="login" style="display:none"><div class="g"><div class="f"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password"></div></div><button class="btn" id="lg">Log in</button><p class="note" id="lgm"></p></div>
+
+<section class="tab on" id="t-ov">
+<section class="hero"><div class="lbl">Carrier</div><div class="big" id="freq">–<small>MHz</small></div><div class="sub" id="sub"></div></section>
+<section class="hero" id="pwrbox" style="display:none;margin-top:12px"><div class="lbl">Output power <span id="pwrunit" style="cursor:pointer;color:var(--ac);margin-left:8px" title="Switch between dBm and watts">[dBm / W]</span></div><div class="big" id="pwrbig">–</div><div class="sub" id="pwrsub"></div><div class="badnote" id="pwrwarn" style="display:none;margin:8px 0 0"></div></section>
+<h2>Deviation</h2><section class="dm"><div class="dmt"><span id="dmt1">Peak deviation</span><span id="dmt2"></span></div><canvas id="dmc"></canvas></section>
+<h2>SM.1268-5 mask</h2><div class="mm" id="mkbox"><button type="button" id="mkreset" class="btn" style="position:absolute;right:12px;top:8px;width:auto;margin:0;padding:3px 10px;font-size:12px;z-index:2" title="Forget the max-hold and start the measurement afresh">Reset</button><canvas id="mkc"></canvas></div>
+<div class="chips" id="mkchips"></div>
+<h2>Exciter</h2><div class="g"><div id="rows"></div><details><summary>Raw replies</summary><div id="raw" class="note" style="white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;margin:0 0 12px"></div></details></div>
+</section>
+
+<section class="tab" id="t-ct">
+<p class="note">Changes apply immediately and are <b>not stored</b>. The PicoAudio controller re-sends E / F / P / K / B / H at every link resync and then overrides what you set here.</p>
+<h2>Transmitter</h2><div class="g">
+<div class="f"><label>RF output</label><span class="seg" id="sg_e"><button data-v="0">Off</button><button data-v="1">On</button></span></div>
+<div class="f"><label for="i_f">Carrier (MHz)</label><span><input id="i_f" type="number" step="0.001" min="70" max="6000"> <button class="go" data-set="f">Set</button></span></div>
+<div class="f"><label for="i_p">Output level (dBm)</label><span><input id="i_p" type="number" step="0.25" min="-84.75" max="-5"> <button class="go" data-set="p">Set</button></span></div></div>
+<p class="note">The transmitter stays closed after power-up until a valid carrier (F) has been received.</p>
+<h2>Modulation</h2><div class="g">
+<div class="f"><label for="i_k">Deviation range kdev <small id="kinfo" style="color:var(--tx2)"></small></label><span><input id="i_k" type="number" step="1" min="10" max="250"> <button class="go" data-set="k">Set</button></span></div>
+<div class="f"><label>FPGA peak limiter</label><span class="seg" id="sg_b"><button data-v="0">Off</button><button data-v="1">On</button></span></div>
+<div class="f"><label for="i_h">Limiter ceiling, maximum (kHz)</label><span><input id="i_h" type="number" step="0.5" min="20" max="100"> <button class="go" data-set="h">Set</button></span></div>
+<div class="f"><label>Mask guard <small style="color:var(--tx2)">(lowers the ceiling automatically when the 5-minute mask margin drops below +3.5 dB)</small></label><span class="seg" id="sg_g"><button data-v="0">Off</button><button data-v="1">On</button></span></div></div>
+<div class="warnnote" id="hwarn" style="display:none">Above about 60 kHz the SM.1268-5 mask margin can fall below the required +3 dB. Watch the mask margin on the Overview.</div>
+<h2>Mask monitor</h2><div class="g"><div class="f"><label>5-minute max-hold</label><button class="go alt" id="b_x">Reset</button></div></div>
+<h2>Power meter (RX1)</h2><div class="g">
+<div class="f"><label>Meter</label><span class="seg" id="sg_q"><button data-v="0">Off</button><button data-v="1">On</button></span></div>
+<div class="f"><label for="i_qa">External attenuator (dB)</label><span><input id="i_qa" type="number" step="0.01" min="0" max="120"> <button class="go" data-set="qa">Set</button></span></div>
+<div class="f"><label for="i_qk">Calibrate: known output power (dBm)</label><span><input id="i_qk" type="number" step="0.1" min="-60" max="60"> <button class="go" data-set="qk">Calibrate</button></span></div>
+<div class="r"><span class="k">Calibration offset</span><span class="v" id="qcal">–</span></div></div>
+<p class="note">Measuring bridge only (nothing is controlled by it): connect the transmitter output through an external attenuator to RX1 and enter its attenuation above. <b style="color:var(--warn)">The AD9361 RX input is damaged above about +2.5 dBm: keep the level at RX1 below −10 dBm (the meter shows a warning above that).</b> The nominal calibration is an estimate (about ±2 dB); calibrate once against a known power for an accurate reading.</p>
+</section>
+
+<section class="tab" id="t-ms">
+<h2>Audio tone meter</h2><div class="g"><div class="r"><span class="k">Strongest tone</span><span class="v" id="tf">–</span></div><div class="r"><span class="k">Deviation</span><span class="v" id="td">–</span></div></div>
+<p class="note">Demodulates the own transmission (TX2 twin → RX2). Frequency and deviation of the strongest audio tone, one value per 0.25 s. Use it with the encoder's test generator for level sweeps.</p>
+<h2>End-to-end impulse response</h2><div class="g">
+<div class="f"><label for="j_s">Duration (s)</label><input id="j_s" type="number" min="5" max="600" value="120"></div>
+<div class="f"><label for="j_p">Detection threshold (% FS)</label><input id="j_p" type="number" min="1" max="90" value="12"></div>
+<div class="f"><label>Measurement</label><span><button class="go" id="j_go">Start</button></span></div>
+<div class="r"><span class="k">Status</span><span class="v" id="j_st">idle</span></div></div>
+<p class="note">Start the encoder's impulse mode first (one frame of 20–40 % full scale per second, otherwise silent or pilot only). The mask monitor pauses meanwhile. The result is the response from I2S frame to the demodulated RX2 signal: magnitude relative to 1 kHz, phase and group delay.</p>
+<div class="cw" id="jbox" style="display:none"><div class="lbl" id="jtitle"></div><canvas id="jc"></canvas><p class="note" style="margin:6px 0 0"><a id="jdl" href="/api/ir.csv" download="pluto_end2end.csv">Download CSV</a></p></div>
+</section>
+
+<section class="tab" id="t-cn">
+<p class="note">The same commands as on the serial line (docs/serial-protocol.md): E, F, P, K, B, H, X, J and the queries ?T ?S ?P ?E ?V ?M ?L ?W ?N ?D ?G ?A ?B ?J.</p>
+<div id="con" role="log" aria-live="polite"></div>
+<div class="g" style="margin-top:8px"><div class="f"><input id="cmd" type="text" placeholder="?S" autocomplete="off" spellcheck="false" style="width:100%"><button class="go" id="csend">Send</button></div></div>
+<div class="chips" id="quick"></div>
+</section>
+</main>
+<div id="toast" role="status"></div>
+<script>/*@@MASKJS@@*/</script>
+<script>
+const $=id=>document.getElementById(id);
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+function kv(s){const o={};(s||'').trim().split(/\s+/).forEach(t=>{const i=t.indexOf('=');if(i>0)o[t.slice(0,i)]=t.slice(i+1);});return o;}
+function val(s){const i=(s||'').indexOf('=');return i<0?'':s.slice(i+1).trim();}
+let toastT=0;function toast(m){const t=$('toast');t.textContent=m;t.classList.add('on');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('on'),2500);}
+let authNeeded=false;
+async function api(path,opt){const r=await fetch(path,Object.assign({cache:'no-store',credentials:'same-origin'},opt||{}));if(r.status===401){authNeeded=true;$('login').style.display='block';throw new Error('401');}return r;}
+async function cmd(c){const r=await api('/api/cmd',{method:'POST',headers:{'X-Requested-With':'skypluto','Content-Type':'text/plain'},body:c});return (await r.text()).trim();}
+async function setcmd(c){try{const a=await cmd(c);toast(c+' → '+a);log(c,a);return a;}catch(e){toast('No connection');return '';}}
+// ---------------- tabs ----------------
+let tab='ov';
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{tab=b.dataset.t;document.querySelectorAll('.tabs button').forEach(x=>x.setAttribute('aria-selected',x===b));document.querySelectorAll('section.tab').forEach(s=>s.classList.toggle('on',s.id==='t-'+tab));if(tab==='ct')fillControl(true);if(tab==='ms')loadIR();poll();});
+document.querySelectorAll('.tabs button').forEach(b=>{const o=b.onclick;b.onclick=()=>{o();history.replaceState(null,'','#'+b.dataset.t);};});
+// ---------------- state ----------------
+let st_O='',pwUnit=(function(){try{return localStorage.getItem('pwu')||'dbm';}catch(e){return 'dbm';}})(),S={},E={},M={},D={},J={},ST=null,gv=[],gq=-1,peak=0,peakT=0,Lcur='',Wcur='',Ncur='',mkH=[];
+function fmtUp(s){s=+s||0;const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+'d ':'')+(h?h+'h ':'')+m+'m';}
+function chip(t,c){return '<span class="chip '+(c||'')+'">'+esc(t)+'</span>';}
+function render(st){
+ ST=st;st_O=st.O||'';S=kv(st.S);E=kv(st.E);M=kv(st.M);D=kv(st.D);
+ const tx=S.tx==='on',en=S.en==='1';
+ const pill=$('st');pill.className='pill '+(tx?'on':(S.tx?'off':''));$('stt').textContent=tx?'Transmitting':(S.tx?'RF off':'connecting');
+ const f=+S.f/1e6;$('freq').innerHTML=(S.f>0?f.toFixed(3):'–')+'<small>MHz</small>';
+ $('sub').textContent=tx?('Output '+(+S.p).toFixed(1)+' dBm · attenuation '+(+S.att).toFixed(2)+' dB · kdev '+S.kdev+' (0 dBFS = ±'+(0.75*S.kdev).toFixed(1)+' kHz)'):('RF output closed'+(S.f>0?'':' — waiting for the carrier (F) from the controller'));
+ const age=st.link&&st.link.age>=0?st.link.age:-1,linkTxt=age<0?'no controller yet':(age<5?'controller active':'controller idle '+Math.round(age)+' s');
+ $('chips').innerHTML=chip(st.T?('Die '+val(st.T).trim()+' °C'):'')+chip('Up '+fmtUp(S.up))+chip(esc(kv(st.V).fw||'')+' · '+(st.id||''))+chip(linkTxt,age>=0&&age<5?'good':'warnc')+(E.i2s&&E.i2s!=='0/0'?chip('I2S '+E.i2s.split('/')[0]+'-bit (slot '+E.i2s.split('/')[1]+')'):'')+(st.link&&st.link.boot?chip('Boot: '+st.link.boot):'');
+ const O=kv(st.O),pbox=$('pwrbox');
+ if(O.st&&O.st!=='off'){pbox.style.display='block';const po=parseFloat(O.o),pw=parseFloat(O.w);
+  const fw=x=>x>=1?x.toFixed(2)+' W':x>=1e-3?(x*1e3).toFixed(2)+' mW':x>=1e-6?(x*1e6).toFixed(2)+' µW':(x*1e9).toFixed(1)+' nW';
+  $('pwrbig').innerHTML=(isNaN(po)||O.st==='low'||O.st==='nosig')?'–':(pwUnit==='w'?fw(pw):po.toFixed(1)+'<small>dBm</small>');
+  $('pwrsub').textContent=(isNaN(po)||O.st==='nosig')?'No signal on RX1':(O.st==='low')?('Below range · attenuator '+O.att+' dB · RX1 gain '+O.g+' dB'):((pwUnit==='w'?po.toFixed(1)+' dBm':fw(pw))+' · RX1 '+O['in']+' dBm · attenuator '+O.att+' dB · RX1 gain '+O.g+' dB');
+  const wn=$('pwrwarn');wn.style.display=(O.st==='ok')?'none':'block';wn.textContent=O.st==='high'?'RX1 input level too high (above -10 dBm): increase the external attenuator to protect the receiver!':O.st==='low'?'Signal below the measurable range of RX1.':'No signal on RX1 (transmitter closed or nothing connected).';}
+ else pbox.style.display='none';
+ const mm=(M.m&&M.m!=='na')?M:null,w=mm?parseFloat(M.w):NaN;
+ const rows=[['Limiter',(E.bg==='on'?'on':E.bg==='off'?'off':'n/a')+(E.ceil&&E.ceil!=='off'?' · ceiling '+E.ceil+' kHz':'')],['Mask guard',E.gd==='act'?'ACTIVE: ceiling lowered from '+E.cmax+' to '+E.ceil+' kHz':(E.gd==='on'?'on (ceiling at the chosen maximum '+E.cmax+' kHz)':E.gd==='off'?(E.bg==='off'?'off (limiter is off: no protection)':'off'):E.gd==='init'?'initialising (collecting mask data, ~1 min)':'–')],['Gain reduction',(E.lim||'–')+' dB (last 10 s)'],['Limited samples',E.limn||'–'],['Input peak',(E.pk||'–')+' % FS'],['I2S dropouts',E.uf||'–'],['FIFO under / overflow',(E.unf||'0')+' / '+(E.ovf||'0')],['Peak deviation (0.25 s)',(D.d?D.d+' kHz':'–')],['Mask margin now / 5 min',mm?(M.m+' / '+M.w+' dB'):'–']];
+ $('rows').innerHTML=rows.map(r=>'<div class="r"><span class="k">'+esc(r[0])+'</span><span class="v">'+esc(r[1])+'</span></div>').join('');
+ $('raw').textContent=['S','E','M','D','P','B','J','V','T','R','O'].map(k=>'?'+k+'  '+(st[k]||'')).join('\n');
+ let mc=chip(mm?('now '+M.m+' dB'):'now –')+chip(mm?('5 min '+M.w+' dB'):'5 min –',isNaN(w)?'':(w>=3?'good':'badc'));
+ if(mm)mc+=chip('shoulder '+M.sh+' dB')+chip('floor '+M.fl+' dB')+chip('est. dev '+M.dev+' kHz')+chip('n '+M.n);
+ $('mkchips').innerHTML=mc;
+ J=kv((st.J||'').replace(/^j=(\S+)\s+(\S+)/,'j=$1 x=$2'));
+ const jt=(st.J||'').replace(/^j=/,'');$('j_st').textContent=jt;$('j_go').disabled=/^run/.test(jt);
+ if(/^ok/.test(jt)&&!jDone){jDone=true;loadIR();}
+ if(/^run/.test(jt))jDone=false;
+ const R=kv(st.R);$('lpw').style.display=(R.r==='missing')?'block':'none';$('mkbox').dataset.lp=R.r||'';
+ drawMaskBox();drawDev();
+}
+let jDone=false;
+// ---------------- deviation meter ----------------
+function drawDev(){const c=$('dmc'),dpr=devicePixelRatio||1,W=c.clientWidth,H=84;if(!W)return;if(c.width!=W*dpr||c.height!=H*dpr){c.width=W*dpr;c.height=H*dpr;}const g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+ const L=34,R=W-8,max=Math.max(100,Math.ceil(Math.max(peak,+E.ceil||0)/10)*10+10),X=v=>L+v/max*(R-L);
+ g.font='10px system-ui';g.textAlign='center';g.fillStyle='#8d9aad';g.strokeStyle='#2b3647';
+ for(let v=0;v<=max;v+=10){g.beginPath();g.moveTo(X(v),30);g.lineTo(X(v),H-14);g.stroke();if(v%20===0)g.fillText(v,X(v),H-3);}
+ g.textAlign='right';g.fillText('kHz',L-6,H-3);
+ // scope: last 25 windows of 20 ms
+ const n=gv.length;if(n){g.strokeStyle='#3cc4ff';g.lineWidth=1;g.beginPath();gv.forEach((v,i)=>{const x=L+(i+0.5)/n*(R-L),y=H-14-(Math.min(v,max)/max)*(H-14-30);i?g.lineTo(x,y):g.moveTo(x,y);});g.stroke();}
+ // bar of the peak in the last half second
+ const cur=n?Math.max.apply(null,gv):(+D.d||0);
+ const grd=g.createLinearGradient(L,0,R,0);grd.addColorStop(0,'#3ddc84');grd.addColorStop(.6,'#ffd23f');grd.addColorStop(1,'#ff4d4d');
+ g.fillStyle=grd;g.fillRect(L,10,Math.max(0,X(cur)-L),12);g.fillStyle='#10161f';g.fillRect(X(cur),10,R-X(cur),12);
+ const now=Date.now();if(cur>=peak||now-peakT>3000){if(cur>=peak)peakT=now;peak=cur>=peak?cur:Math.max(cur,peak*0.97);}
+ g.fillStyle='#fff';g.fillRect(X(peak)-1,8,2,16);
+ const cl=+E.ceil;if(cl>0&&E.ceil!=='off'){g.strokeStyle='#ff4d4d';g.setLineDash([4,3]);g.beginPath();g.moveTo(X(cl),6);g.lineTo(X(cl),H-14);g.stroke();g.setLineDash([]);g.fillStyle='#ff4d4d';g.textAlign='left';g.fillText('ceiling '+cl,X(cl)+3,12);}
+ const fs=0.75*(+S.kdev||0);if(fs>0){g.strokeStyle='#8d9aad';g.setLineDash([2,3]);g.beginPath();g.moveTo(X(fs),22);g.lineTo(X(fs),H-14);g.stroke();g.setLineDash([]);}
+ $('dmt1').textContent='Peak deviation '+cur.toFixed(1)+' kHz';$('dmt2').textContent='hold '+peak.toFixed(1)+' kHz · 0.25 s max '+(D.d||'–')+' kHz · scope = last 0.5 s (20 ms windows)';}
+// ---------------- mask ----------------
+function drawMaskBox(){const c=$('mkc');const x={sp:Wcur,nf:Ncur,sl:Lcur};if(!x.sp||x.sp.length<57||($('mkbox').dataset.lp==='missing')){$('mkbox').style.opacity=.35;if($('mkbox').dataset.lp==='missing')return;return;}$('mkbox').style.opacity=1;
+ const dpr=devicePixelRatio||1,W=c.clientWidth,H=170;if(!W)return;if(c.width!=W*dpr||c.height!=H*dpr){c.width=W*dpr;c.height=H*dpr;}const g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);
+ drawMaskCore(g,W,H,x,{w:M.w},mkH.length?mkH:[Lcur||Wcur],{tx:css('--tx'),tx2:css('--tx2'),sep:css('--sep')});}
+$('pwrunit').onclick=()=>{pwUnit=pwUnit==='w'?'dbm':'w';try{localStorage.setItem('pwu',pwUnit);}catch(e){}if(ST)render(ST);};
+$('mkreset').onclick=async()=>{await setcmd('X');mkH=[];Lcur=Wcur=Ncur='';};
+// ---------------- control ----------------
+let ctlFilled=false;
+function fillControl(force){if(!ST)return;if(ctlFilled&&!force)return;ctlFilled=true;const act=document.activeElement&&document.activeElement.tagName==='INPUT'&&document.activeElement.closest('#t-ct');if(act&&!force)return;
+ if(S.f>0)$('i_f').value=(S.f/1e6).toFixed(3);if(S.p)$('i_p').value=(+S.p).toFixed(2);if(S.kdev)$('i_k').value=S.kdev;if(E.ceil&&E.ceil!=='off')$('i_h').value=E.ceil;
+ const O=kv(st_O);seg('sg_q',O.st==='off'?'0':'1');if(O.att!==undefined)$('i_qa').value=O.att;$('qcal').textContent=(O.cal!==undefined?(+O.cal>=0?'+':'')+O.cal+' dB':'–');seg('sg_e',S.tx==='on'||S.en==='1'?'1':'0');seg('sg_b',E.bg==='off'?'0':'1');seg('sg_g',E.gd==='off'?'0':'1');if(E.cmax)$('i_h').value=E.cmax;kinfo();hw();}
+function seg(id,v){document.querySelectorAll('#'+id+' button').forEach(b=>b.classList.toggle('on',b.dataset.v===v));}
+function kinfo(){const k=+$('i_k').value;$('kinfo').textContent=k>0?'(0 dBFS = ±'+(0.75*k).toFixed(1)+' kHz)':'';}
+function hw(){$('hwarn').style.display=(+$('i_h').value>60)?'block':'none';}
+$('i_k').oninput=kinfo;$('i_h').oninput=hw;
+document.querySelectorAll('#sg_e button').forEach(b=>b.onclick=async()=>{await setcmd('E '+b.dataset.v);await poll();ctlFilled=false;fillControl(true);});
+document.querySelectorAll('#sg_b button').forEach(b=>b.onclick=async()=>{await setcmd('B '+b.dataset.v);await poll();ctlFilled=false;fillControl(true);});
+document.querySelectorAll('#sg_q button').forEach(b=>b.onclick=async()=>{await setcmd('QM '+b.dataset.v);await poll();ctlFilled=false;fillControl(true);});
+document.querySelectorAll('#sg_g button').forEach(b=>b.onclick=async()=>{await setcmd('G '+b.dataset.v);await poll();ctlFilled=false;fillControl(true);});
+document.querySelectorAll('button[data-set]').forEach(b=>b.onclick=async()=>{const k=b.dataset.set;let c='';
+ if(k==='f')c='F '+Math.round(+$('i_f').value*1e6);else if(k==='p')c='P '+(+$('i_p').value).toFixed(2);else if(k==='k')c='K '+Math.round(+$('i_k').value);else if(k==='h')c='H '+(+$('i_h').value).toFixed(1);else if(k==='qa')c='Q '+(+$('i_qa').value).toFixed(2);else if(k==='qk')c='QK '+(+$('i_qk').value).toFixed(2);
+ await setcmd(c);await poll();});
+$('b_x').onclick=()=>setcmd('X');
+// ---------------- measure ----------------
+$('j_go').onclick=async()=>{const s=Math.round(+$('j_s').value),p=Math.round(+$('j_p').value);$('jbox').style.display='none';jDone=false;await setcmd('J '+s+' '+p);await poll();};
+async function loadIR(){try{const r=await api('/api/ir.csv');if(!r.ok)return;const t=await r.text(),rows=t.split('\n').filter(l=>/^\d/.test(l)).map(l=>l.split(',').map(Number)),hd=t.split('\n').filter(l=>l[0]==='#')[0]||'';if(rows.length<10)return;
+ $('jbox').style.display='block';$('jtitle').textContent=hd.replace(/^#\s*/,'');drawIR(rows);}catch(e){}}
+function drawIR(rows){const c=$('jc'),dpr=devicePixelRatio||1,W=c.clientWidth,H=190;if(!W)return;c.width=W*dpr;c.height=H*dpr;const g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);
+ const L=40,R=W-40,T=10,B=H-20,fm=Math.max.apply(null,rows.map(r=>r[0])),X=f=>L+f/fm*(R-L);
+ const mags=rows.map(r=>r[1]),gds=rows.map(r=>r[3]);const mmin=-6,mmax=6;const Y1=v=>T+(1-(Math.max(mmin,Math.min(mmax,v))-mmin)/(mmax-mmin))*(B-T);
+ const med=gds.slice().sort((a,b)=>a-b)[gds.length>>1],gmin=med-200,gmax=med+200,Y2=v=>T+(1-(Math.max(gmin,Math.min(gmax,v))-gmin)/(gmax-gmin))*(B-T);
+ g.font='10px system-ui';g.strokeStyle=css('--sep');g.fillStyle=css('--tx2');g.lineWidth=1;g.textAlign='center';
+ for(let f=0;f<=fm;f+=5000){g.beginPath();g.moveTo(X(f),T);g.lineTo(X(f),B);g.stroke();g.fillText((f/1000)+'k',X(f),H-6);}
+ g.textAlign='right';for(let v=mmin;v<=mmax;v+=3){g.beginPath();g.moveTo(L,Y1(v));g.lineTo(R,Y1(v));g.stroke();g.fillText(v+' dB',L-4,Y1(v)+3);}
+ g.textAlign='left';g.fillText(Math.round(gmax)+' µs',R+3,T+8);g.fillText(Math.round(med)+' µs',R+3,Y2(med)+3);g.fillText(Math.round(gmin)+' µs',R+3,B);
+ g.lineWidth=1.6;g.strokeStyle=css('--ac');g.beginPath();rows.forEach((r,i)=>{i?g.lineTo(X(r[0]),Y1(r[1])):g.moveTo(X(r[0]),Y1(r[1]));});g.stroke();
+ g.strokeStyle=css('--warn');g.beginPath();rows.forEach((r,i)=>{i?g.lineTo(X(r[0]),Y2(r[3])):g.moveTo(X(r[0]),Y2(r[3]));});g.stroke();
+ g.fillStyle=css('--ac');g.textAlign='left';g.fillText('magnitude (dB, rel. 1 kHz)',L+4,T+9);g.fillStyle=css('--warn');g.fillText('group delay (µs)',L+150,T+9);}
+// ---------------- console ----------------
+const hist=[];let hp=0;
+function log(c,a){const d=$('con');d.insertAdjacentHTML('beforeend','<b>&gt; '+esc(c)+'</b>\n'+(/^ERR/.test(a)?'<span class="e">':'<span>')+esc(a)+'</span>\n');d.scrollTop=d.scrollHeight;}
+async function send(){const i=$('cmd'),c=i.value.trim();if(!c)return;hist.push(c);hp=hist.length;i.value='';try{log(c,await cmd(c));}catch(e){log(c,'(no connection)');}}
+$('csend').onclick=send;$('cmd').onkeydown=e=>{if(e.key==='Enter')send();else if(e.key==='ArrowUp'&&hp>0){$('cmd').value=hist[--hp];e.preventDefault();}else if(e.key==='ArrowDown'&&hp<hist.length-1){$('cmd').value=hist[++hp];e.preventDefault();}};
+$('quick').innerHTML=['?S','?E','?M','?D','?G','?A','?B','?J','?V','?T','?P','?O','?R'].map(q=>'<span class="chip bit" style="cursor:pointer" data-q="'+q+'">'+q+'</span>').join('');
+document.querySelectorAll('#quick .chip').forEach(c=>c.onclick=()=>{$('cmd').value=c.dataset.q;send();});
+// ---------------- login ----------------
+$('lg').onclick=async()=>{const r=await fetch('/login',{method:'POST',body:$('pw').value,headers:{'X-Requested-With':'skypluto'}});if(r.ok){authNeeded=false;$('login').style.display='none';poll();}else $('lgm').textContent='Incorrect password.';};
+// ---------------- polling ----------------
+let busy=false,errN=0;
+async function poll(){if(busy)return;busy=true;try{const st=await (await api('/api/state')).json();errN=0;$('err').style.display='none';render(st);fillControl(false);}catch(e){if(!authNeeded&&++errN>1)$('err').style.display='block';}busy=false;}
+async function pollMask(){if(authNeeded||tab!=='ov')return;try{const m=await (await api('/api/mask')).json();Lcur=val(m.L).split(' ')[0]||'';Wcur=val(m.W)||'';Ncur=val(m.N)||'';if(Wcur==='na')Wcur='';if(Ncur==='na')Ncur='';if(Lcur==='na')Lcur='';if(Lcur&&mkH[mkH.length-1]!==Lcur){mkH.push(Lcur);if(mkH.length>24)mkH.shift();}drawMaskBox();}catch(e){}}
+async function pollG(){if(authNeeded||(tab!=='ov'))return;try{const r=await (await api('/api/g')).json();const s=val(r.G);if(!s||s==='na')return;const p=s.split(' ').filter(t=>!/^q=/.test(t)).map(Number);if(p.length&&!p.some(isNaN)){gv=p;drawDev();}}catch(e){}}
+async function pollTone(){if(authNeeded||tab!=='ms')return;try{const r=await (await api('/api/tone')).json();const s=val(r.A);if(!s||s==='na'){$('tf').textContent='–';$('td').textContent='–';return;}const p=s.split(' ');$('tf').textContent=(+p[0]).toFixed(1)+' Hz';$('td').textContent=(+p[1]).toFixed(3)+' kHz  ('+(20*Math.log10(+p[1]/(0.75*(+S.kdev||100)))).toFixed(1)+' dBFS)';}catch(e){}}
+if(location.hash.length>1){const tb=document.querySelector('.tabs button[data-t="'+location.hash.slice(1)+'"]');if(tb)tb.click();}
+setInterval(poll,1000);setInterval(pollMask,1000);setInterval(pollG,250);setInterval(pollTone,400);poll();pollMask();
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll();});
+</script></body></html>
