@@ -155,6 +155,8 @@ that is connected re-sends its own configuration at every re-sync (so its stored
 
 ### Serial protocol (encoder → Pluto)
 
+The complete reference (all commands, queries, error codes, web API and configuration files) is in [`docs/serial-protocol.md`](docs/serial-protocol.md).
+
 **Physical layer:** one wire, half duplex, 3.3 V, idle high (external 4.7 kΩ pull-up), **115200 baud 8N1**, JP5 pin 9. The encoder is the master:
 it sends one line and waits at most 300 ms for the answer. The Pluto does not hear its own answer; the encoder hears its own bytes (echo) and has to discard them.
 
