@@ -264,6 +264,19 @@ A release consists of:
 | `skypluto-ctl`, `skypluto-mask` | the control daemon and the mask tool (ARM binaries) | Pluto flash (`/mnt/jffs2`) via the installer |
 | `scripts/install_on_pluto.sh` and `scripts/*.sh` | start-up scripts | installed with the binaries |
 
+### 0. Check the BOOT switch (once)
+
+The board has a two-position **`BOOT`** DIP switch (next to the `RST` button, between the `USB2.0` and `DEBUG` ports) that selects where it boots from. It is sampled at
+power-on, so change it only with the power off:
+
+| Mode | SW1 | SW2 |
+|------|-----|-----|
+| **SD card (needed for this firmware)** | `0` (GND) | `0` (GND) |
+| QSPI flash (the board's own firmware) | `1` | `0` |
+| JTAG | `1` | `1` |
+
+In QSPI mode the board **ignores the SD card completely** and starts the firmware that is in its flash, which looks exactly like "the new files have no effect".
+
 ### 1. Copy the boot files to the SD card
 
 The Pluto boots from the **FAT32 partition** of the micro-SD card (the first partition).
@@ -318,6 +331,14 @@ ssh root@<pluto-ip> '/mnt/jffs2/skypluto-ctl -c "?E"'     # ... i2s=24/32 al=i2s
 
 Open `http://<pluto-ip>/`. Power-cycle the Pluto once and check that the web interface comes back and the carrier
 stays closed until the encoder tunes.
+
+**Nothing changes after copying the files?**
+
+- The `BOOT` switch is in QSPI mode (see step 0): set it to SD (`0 0`) and power-cycle.
+- The files must be in the **root** of the card's first FAT32 partition (not in a sub-folder), all from the same release. After copying, eject the card properly.
+- The `DONE` LED lights when the FPGA bitstream (`BOOT.bin`) has been loaded. Check the running build with `ssh root@<ip> devmem 0x7C440014` (this firmware answers `0x57464D32`) and
+  `ssh root@<ip> /mnt/jffs2/skypluto-ctl -c "?V"`.
+- Seeing the board's original web page instead of this web interface means the **control software** is not installed yet (it is not on the SD card): run step 2.
 
 **Going back:** put `BOOT.bin.good` back as `BOOT.bin`.
 
