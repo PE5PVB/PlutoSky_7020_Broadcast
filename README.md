@@ -262,7 +262,7 @@ A release consists of:
 | `BOOT.bin` | FSBL + **FPGA bitstream (the exciter)** + U-Boot | **SD card** |
 | `uImage`, `devicetree.dtb`, `uramdisk.image.gz`, `uEnv.txt` | Linux kernel, device tree, root file system, U-Boot environment | **SD card** |
 | `skypluto-ctl`, `skypluto-mask` | the control daemon and the mask tool (ARM binaries) | Pluto flash (`/mnt/jffs2`) via the installer |
-| `scripts/install_on_pluto.sh` and `scripts/*.sh` | start-up scripts | installed with the binaries |
+| `install_on_pluto.bat` / `install_on_pluto.sh`, `activate.sh`, `autorun.sh`, `skypluto-*.sh` | installers and start-up scripts | the installers copy them to `/mnt/jffs2` |
 
 ### 0. Check the BOOT switch (once)
 
@@ -310,18 +310,26 @@ ssh root@<pluto-ip> 'umount /mnt/sd; reboot'
 
 Compare the printed md5 with `md5sum BOOT.bin` on your computer before rebooting.
 
-### 2. Install the control software (daemon, mask tool, scripts)
+### 2. Install the control software (daemon, mask tool, scripts) — always required
 
-The control software lives in the board's persistent flash and is installed over the network. Put the two release
-binaries in a folder and run, from this repository's `scripts/` directory (needs `ssh` and `sshpass`):
+The control software (the daemon with the web interface, the mask tool and the start-up scripts) is **not** on the SD card: it lives in the Pluto's persistent flash
+(`/mnt/jffs2`) and is installed once over the network. Without it the Pluto still shows its original web page and ignores the encoder
+(`/mnt/jffs2/skypluto-ctl: not found` is the symptom).
+
+Download the **`pluto`** folder of the release (it holds `skypluto-ctl`, `skypluto-mask`, the scripts and the installers) and connect the Pluto to the network.
+
+**Windows** (Windows 10/11 has the needed `ssh` and `tar` built in): double-click **`install_on_pluto.bat`** in that folder, enter the Pluto's IP address and, when asked, the
+password (`analog`). Or from a command prompt in the folder: `install_on_pluto.bat <ip-address>`.
+
+**Linux / macOS / WSL** (needs `ssh` and `sshpass`): in that folder run
 
 ```bash
-./install_on_pluto.sh <pluto-ip> <folder-with-skypluto-ctl-and-skypluto-mask>
+chmod +x install_on_pluto.sh
+./install_on_pluto.sh <ip-address> .
 ```
 
-This copies the daemon, the mask tool and the start-up scripts to `/mnt/jffs2`, restarts the supervisor and the daemon, and
-prints the version line. The Pluto starts everything automatically at every power-up from then on
-(`/etc/init.d/S98autostart` runs `/mnt/jffs2/autorun.sh`).
+Both copy the files to `/mnt/jffs2`, stop the board's own web server, restart the daemon and print its version line. Running them again simply updates. The Pluto starts everything
+automatically at every power-up from then on (`/etc/init.d/S98autostart` runs `/mnt/jffs2/autorun.sh`).
 
 ### 3. Check
 
