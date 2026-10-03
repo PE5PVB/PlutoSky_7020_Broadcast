@@ -246,11 +246,11 @@ tools in `scripts/` and `src/skypluto-mask.c`. The figures come from the encoder
 | ![Phase and group delay](docs/figures/10-audio-phase.png) | ![Stereo balance](docs/figures/11-stereo-balance.png) |
 | **Fig. 3** Phase and group delay (encoder + Pluto, measured with impulses) | **Fig. 4** L+R and L−R path level and phase |
 | ![Stereo separation](docs/figures/12-stereo-separation.png) | ![LO leakage](docs/figures/13-lo-leakage.png) |
-| **Fig. 5** Stereo separation (tone on L only) | **Fig. 6** LO leakage, carrier-null method |
+| **Fig. 5** Stereo separation (tone on L only), this release without any trim against the earlier build | **Fig. 6** LO leakage, carrier-null method |
 
 ![Mask margin against maximum deviation](docs/figures/14-mask-vs-level.png)
 
-**Fig. 7** SM.1268-5 mask margin against the maximum deviation (1 kHz tone at 0 dBFS, mask guard off).
+**Fig. 7** SM.1268-5 mask margin against the maximum deviation (1 kHz tone at 0 dBFS, limiter on, mask guard off; the bold line is this release, the others are earlier builds).
 
 ---
 
