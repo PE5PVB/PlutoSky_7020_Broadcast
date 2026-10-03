@@ -83,6 +83,7 @@
 #define R_FMT        0x50              // I2S format (ro): [17:16] alignment (0 I2S, 1 LJ, 2 RJ), [15:8] slot length (BCLKs per WS half period), [7:0] word width
 #define R_I2SCTRL    0x54              // manual I2S format (rw): [0] on, [2:1] alignment, [15:8] word width; 0 = automatic
 #define TCP_PORT     5555              // TCP console (localhost)
+#define SW_VERSION   "1.02"            // software version of this release (also in ?V, the SD-card image and the README)
 #define R_DBG        0x3C              // write: select diagnostic word 0..31; read: that word (only in bitstreams with a 6-bit register address)
 #define LIMCONF      "/mnt/jffs2/skypluto-lim.conf"   // kdev=, ceil_khz=, ceil_max_khz=, guard=0|1
 #define LIM_POLL     10.0              // s between readouts (and clears) of the limiter statistics
@@ -938,7 +939,8 @@ static void handle(char *line){
     // ---------- queries ----------
     if (cmd[0]=='?'){
         if (!strcmp(cmd,"?V")){
-            snprintf(buf,sizeof buf,"magic=%08X fw=PlutoSky_7020_Broadcast-1.02 proto=2\n", rd(R_MAGIC));
+            char bid[16] = "-"; if (has_dbg) snprintf(bid, sizeof bid, "%08X", dbg_rd(12));
+            snprintf(buf,sizeof buf,"magic=%08X fw=PlutoSky_7020_Broadcast-" SW_VERSION " proto=2 ver=" SW_VERSION " bit=%s\n", rd(R_MAGIC), bid);
             tx_str(buf); return;
         }
         if (!strcmp(cmd,"?S")){
@@ -1527,7 +1529,7 @@ int main(int argc, char **argv){
     // If bind fails (e.g. still busy), it is retried every 5 s.
     int lfd = -1, cfd = -1; char cline[192]; int cidx = 0; double lfd_retry = 0.0;
 
-    bs_t0 = mono(); bs_next = bs_t0 + 0.4; bs_phase = 0; bs_set(55, "Besturing start");
+    bs_t0 = mono(); bs_next = bs_t0 + 0.4; bs_phase = 0; bs_set(55, "Besturing v" SW_VERSION);
     for (int i = 0; i < 4; i++) wc[i].fd = -1;
     char line[192]; int idx = 0;
     for (;;){
@@ -1582,7 +1584,7 @@ int main(int argc, char **argv){
         if (bs_phase < 3 && now - bs_t0 >= (bs_phase == 0 ? 0.4 : bs_phase == 1 ? 1.4 : 2.4)){
             bs_phase++;
             if (bs_phase == 2) bs_set(60, "Wacht op tune");
-            if (bs_phase == 3) bs_set(100, "Gereed");
+            if (bs_phase == 3) bs_set(100, "Gereed v" SW_VERSION);
             bs_next = 0.0;                                         // step change: send immediately
         }
         if (bs_active && bs_phase >= 1 && now >= bs_next){ bs_next = now + 1.0; bs_send(); }

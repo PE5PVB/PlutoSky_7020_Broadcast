@@ -27,7 +27,7 @@ does hear its own bytes (echo) and must discard them.
 ### Boot status (Pluto → encoder, unsolicited)
 
 During start-up the Pluto sends lines `#B <pct 0-100> <text ≤24 characters>` for the status bar of the encoder's splash screen: `#B 10 Linux gestart` ('Linux started'),
-`#B 30 Radio-chip klaar` ('radio chip ready'), `#B 45 Zender dicht` ('transmitter closed') (from `autorun.sh`), then from the daemon `#B 55 Besturing start` ('control starting'), `#B 60 Wacht op tune` ('waiting for tune') and `#B 100 Gereed` ('ready').
+`#B 30 Radio-chip klaar` ('radio chip ready'), `#B 45 Zender dicht` ('transmitter closed') (from `autorun.sh`), then from the daemon `#B 55 Besturing v1.02` ('control, version 1.02'), `#B 60 Wacht op tune` ('waiting for tune') and `#B 100 Gereed v1.02` ('ready, version 1.02'). The text of the 55 and 100 lines therefore carries the software version, so that the encoder's splash screen shows it without any extra query; `?V` (`ver=`) gives it at any time.
 The daemon repeats the last line every second until it itself receives a byte from the encoder (the encoder is master; the line is half-duplex, so the Pluto falls silent
 as soon as the encoder speaks) and it first listens for 0.4 s before sending the first line. The encoder stays silent during the boot phase until `#B 100` (or 45 s after its own start) and
 then begins the normal sync. Lines starting with `#` do not count as "link is up". Before Linux is running (~15–20 s after power-on) the line is silent.
@@ -101,7 +101,7 @@ off. The **control** itself (see §5) is accurate in relative terms.
 | `?S` | `en=1 f=107999998 p=-15.00 att=20.00 tx=on up=312 kdev=92` |
 | `?P` | `set=-15.00 out=-15.10 att=20.00 trim=0.00 alc=hold` |
 | `?E` | `unf=0 ovf=0 lim=0.0 limn=0 uf=0 pk=0 bg=on ceil=63.0 cmax=75.0 gd=act i2s=24/32 al=i2s cal=ok` — modulator and limiter status; `bg=` = FPGA limiter: `on` / `off` (by `B 0`) / `na` (not present in the bitstream); `ceil=` = limiter ceiling that applies NOW in kHz (or `off`); `cmax=` = the chosen maximum (`H`); `gd=` = mask protection `off` (also when the limiter is off: the guard only works with the limiter on) / `init` (initialising: still too little mask data, about 60 s after start, transmitter open, `X` or `G 1`; the guard does not make decisions yet) / `on` / `act` (ceiling has been lowered); `i2s=<bits>/<slot>` = automatically detected I2S format (word width / BCLKs per WS half period, e.g. `24/32`, `16/16`) and `al=i2s|lj|rj` = detected alignment. In full the reply ends with `... gd=<off|init|on|act> i2s=<bits>/<slot> al=<i2s|lj|rj> cal=<ok|run|fail>`; `cal=` is the TX calibration of the AD9361 (LO leakage, image): `run` while a tune, an opening of the transmitter or a temperature recalibration is in progress (the output is muted, about 2 s), `fail` when it failed three times (the transmitter stays closed until the next `F` or `E`). |
-| `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.02 proto=2` — identification |
+| `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.02 proto=2 ver=1.02 bit=B1D00017` — identification: `ver=` is the software version of the release (show this one), `bit=` the build id of the FPGA bitstream (`-` if the bitstream has no diagnostics) |
 | `?C` | `cal=auto` |
 | `?M` | `m=+7.3 w=+5.8 sh=-48.7 fl=-71.7 dev=72 n=1180 age=0 tw=1 c=1 seq=5231 ams=180` — mask monitor (see §4a) |
 | `?L` | `l=<57 characters> q=<n>` — spectrum of the **latest** measurement (~250 ms); `q` = sequence number (equal to the previous reply = repeat), `l=na` without a measurement |
