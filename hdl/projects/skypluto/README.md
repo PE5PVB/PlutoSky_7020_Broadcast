@@ -20,5 +20,4 @@ scripts/build/clean_rebuild.sh   # clean HDL build (--hdl-only); result: firmwar
 ```
 
 The firmware's buildroot changes are in `fw/buildroot-skypluto.patch` (`git apply` in `firmware/src`).
-Flashing: `scripts/build/flash_and_verify.sh`; deploying the daemon and scripts: `scripts/build/deploy_boot.sh`.
-The scripts contain path names of the development environment (WSL, `/home/pe5pvb`); adapt them for another machine.
+The scripts use `DK` for the devkit checkout (default `~/fishball7020-fpga-devkit`). Flashing the result: see the main README, "Installing a release".

@@ -504,10 +504,15 @@ static void ir_finish(void){
     if (ir_kind == 1) wr(R_IMPC, 0);                          // RX1 back to pass-through
     unlink("/tmp/skypluto.hold");
 }
+// TX calibration of the AD9361 (LO leakage = rf_dc_offs, image = tx_quad). The chip's calibration is only valid for the LO frequency it ran at, so it is repeated in a child process
+// after every tune and every time the transmitter opens (the temperature-driven recalibration is done by skypluto-autocal.sh).
+static int    cal_pending = 0;
+static pid_t  cal_pid = -1;
+static double cal_due = 0.0, cal_t0 = 0.0;
 static void tx_set_state(int off){
     if (off == tx_off) return;
     tx_off = off;
-    if (!tx_off){ tx_lo_power(1); guard_init = 1; }
+    if (!tx_off){ tx_lo_power(1); guard_init = 1; cal_pending = 1; cal_due = mono() + 2.0; }
     apply_current();
     if (tx_off) tx_lo_power(0);
     // Remember whether the transmitter is open (in /tmp = RAM: gone after a power loss, so a cold start stays CLOSED until the tune); a restart of the daemon alone
@@ -887,7 +892,7 @@ static void handle(char *line){
     // ---------- queries ----------
     if (cmd[0]=='?'){
         if (!strcmp(cmd,"?V")){
-            snprintf(buf,sizeof buf,"magic=%08X fw=PlutoSky_7020_Broadcast-1.00 proto=2\n", rd(R_MAGIC));
+            snprintf(buf,sizeof buf,"magic=%08X fw=PlutoSky_7020_Broadcast-1.01 proto=2\n", rd(R_MAGIC));
             tx_str(buf); return;
         }
         if (!strcmp(cmd,"?S")){
@@ -1050,7 +1055,7 @@ static void handle(char *line){
         }
         tx_str("OK\n");                                 // reply first; a failed retune is logged and becomes visible through the next command/?S
         if (system(c)==0){
-            last_f = hz; alc_reset(3.0);
+            last_f = hz; alc_reset(3.0); cal_pending = 1; cal_due = mono() + 1.5;
             fprintf(stderr,"   -> F toegepast (LO-hertune) %lld\n", hz); fflush(stderr);
         } else { fprintf(stderr,"   !! F %lld MISLUKT (iio_attr)\n", hz); fflush(stderr); }
         return;
@@ -1404,7 +1409,7 @@ int main(int argc, char **argv){
     if (fd < 0){ perror("open /dev/mem"); return 1; }
     g_map = mmap(NULL, MAP_LEN, PROT_READ|PROT_WRITE, MAP_SHARED, fd, MAP_BASE);
     if (g_map == MAP_FAILED){ perror("mmap"); return 1; }
-    fprintf(stderr,"skypluto-ctl 1.00: WFM magic=%08X (verwacht 57464D32)\n", rd(R_MAGIC));
+    fprintf(stderr,"skypluto-ctl 1.01: WFM magic=%08X (verwacht 57464D32)\n", rd(R_MAGIC));
 
     // fixed modulation settings
     wr(R_LEVEL, LEVEL_FIXED); wr(R_OFFSET, 0);
@@ -1533,7 +1538,7 @@ int main(int argc, char **argv){
                     double pp, kk; if (sscanf(pw_buf, "PWR p=%lf pk=%lf", &pp, &kk) == 2) pw_feed(pp, kk);
                     close(pw_fd); pw_fd = -1; pw_pid = -1; pw_blen = 0; pw_next = now + 0.5;
                 }
-            } else if (pw_inited && !tx_off && last_f > 0 && m_pid <= 0 && ir_pid <= 0 && now >= pw_next && now - lvl_change_t > 1.0){
+            } else if (pw_inited && !tx_off && last_f > 0 && m_pid <= 0 && cal_pid <= 0 && ir_pid <= 0 && now >= pw_next && now - lvl_change_t > 1.0){
                 int pf[2];
                 if (pipe(pf) == 0){
                     char a1[32]; snprintf(a1, sizeof a1, "%lld", last_f);
@@ -1549,10 +1554,27 @@ int main(int argc, char **argv){
             fprintf(stderr, "   -> impulsmeting klaar (rc %d)\n", ir_rc); fflush(stderr); } else if (mono() - ir_t0 > ir_secs * 1.5 + 120.0){ kill(ir_pid, SIGKILL); } }
         if (now >= lim_next){ lim_next = now + LIM_POLL; lim_conf_read(); lim_apply(); lim_poll(); }
         { static double dev_next = 0.0; if (has_dbg && now >= dev_next){ dev_next = now + 0.08; dev_poll(); } }   // fetch the peak-deviation windows ~12x per second (8 x 20 ms history)
-        if (m_pid <= 0 && !tx_off && last_f > 0 && now >= m_next) measure_start();
+        if (cal_pid > 0){
+            int stc; pid_t cw = waitpid(cal_pid, &stc, WNOHANG);
+            if (cw == cal_pid || now - cal_t0 > 15.0){
+                if (cw != cal_pid){ kill(cal_pid, SIGKILL); waitpid(cal_pid, &stc, 0); }
+                cal_pid = -1; alc_reset(ALC_SETTLE);
+                fprintf(stderr, "   -> TX-kalibratie (LO-lek, beeld) klaar na %.1f s\n", now - cal_t0); fflush(stderr);
+            }
+        } else if (cal_pending && !tx_off && last_f > 0 && ir_pid <= 0 && pw_pid <= 0 && now >= cal_due){
+            if (m_pid > 0) measure_finish();                      // the running mask/ALC measurement uses the RX path and would see the calibration: stop it, it restarts afterwards
+            pid_t cp = fork();
+            if (cp == 0){
+                execl("/bin/sh", "sh", "-c", "iio_attr -d -q ad9361-phy calib_mode rf_dc_offs >/dev/null 2>&1; iio_attr -d -q ad9361-phy calib_mode tx_quad >/dev/null 2>&1", (char *)NULL);
+                _exit(127);
+            }
+            if (cp > 0){ cal_pid = cp; cal_t0 = now; cal_pending = 0; fprintf(stderr, "   -> TX-kalibratie gestart (f=%lld)\n", last_f); fflush(stderr); }
+            else cal_due = now + 5.0;
+        }
+        if (m_pid <= 0 && cal_pid <= 0 && !tx_off && last_f > 0 && now >= m_next) measure_start();
         // mask monitor: only if no ALC measurement is running and the level/frequency has been stable for ~4 s. NOT dependent on an ALC reference:
         // at low TX levels (high attenuation) the TX_MONITOR is too weak for the ALC, and the mask monitor would otherwise never start.
-        if (m_pid <= 0 && !tx_off && last_f > 0 && now - lvl_change_t >= 4.0 && now >= mask_next){
+        if (m_pid <= 0 && cal_pid <= 0 && !cal_pending && !tx_off && last_f > 0 && now - lvl_change_t >= 4.0 && now >= mask_next){
             if (!mask_start()) mask_next = now + MASK_PERIOD;
         }
         if (!got) usleep(1000);

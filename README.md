@@ -1,4 +1,4 @@
-# PlutoSky 7020 Broadcast v1.00 — an FM broadcast exciter on the PlutoSky (Zynq-7020 + AD9361)
+# PlutoSky 7020 Broadcast v1.01 — an FM broadcast exciter on the PlutoSky (Zynq-7020 + AD9361)
 
 SkyPluto WFM turns a **PlutoSky / "7020-SDR"** board (Xilinx Zynq XC7Z020 + Analog Devices AD9361) into a
 **wideband-FM broadcast exciter** that tunes anywhere in the AD9361's range, **70 MHz – 6 GHz** (the usual
@@ -183,7 +183,7 @@ for the encoder's splash screen. The encoder stays silent until `#B 100`. `?B` r
 
 | Query | Answer |
 |-------|--------|
-| `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.00 proto=2` |
+| `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.01 proto=2` |
 | `?S` | `en=1 f=107999998 p=-29.00 att=34.00 tx=on up=312 kdev=100` — state, frequency, level, attenuation, uptime |
 | `?P` | `set=-29.00 out=-29.00 att=34.00 trim=0.00 alc=hold` — set point and the automatic level control |
 | `?T` | `temp=39.5` — board temperature (°C) |
@@ -255,14 +255,17 @@ tools in `scripts/` and `src/skypluto-mask.c`. The figures come from the encoder
 
 ## Installing a release
 
-A release consists of:
+A release is **one folder for the SD card** (`sdcard`) and, optionally, a folder for updating the control software over the network (`pluto`).
 
-| File | What | Goes to |
-|------|------|---------|
-| `BOOT.bin` | FSBL + **FPGA bitstream (the exciter)** + U-Boot | **SD card** |
-| `uImage`, `devicetree.dtb`, `uramdisk.image.gz`, `uEnv.txt` | Linux kernel, device tree, root file system, U-Boot environment | **SD card** |
-| `skypluto-ctl`, `skypluto-mask` | the control daemon and the mask tool (ARM binaries) | Pluto flash (`/mnt/jffs2`) via the installer |
-| `install_on_pluto.bat` / `install_on_pluto.sh`, `activate.sh`, `autorun.sh`, `skypluto-*.sh` | installers and start-up scripts | the installers copy them to `/mnt/jffs2` |
+| File (folder `sdcard`) | What |
+|------|------|
+| `BOOT.bin` | FSBL + **FPGA bitstream (the exciter)** + U-Boot |
+| `uImage`, `devicetree.dtb`, `uEnv.txt` | Linux kernel, device tree, U-Boot environment |
+| `uramdisk.image.gz` | root file system, **including the control software** (daemon with the web interface, mask tool, start-up scripts) |
+
+**Copying these five files to the SD card is the complete installation.** At boot the root file system installs the bundled control software into the Pluto's
+persistent flash (`/mnt/jffs2`) when it is missing or a different version, so a new release is installed by replacing the files on the SD card — nothing else is needed. The settings
+kept in `/mnt/jffs2` (`skypluto-*.conf`) are not touched.
 
 ### 0. Check the BOOT switch (once)
 
@@ -310,13 +313,10 @@ ssh root@<pluto-ip> 'umount /mnt/sd; reboot'
 
 Compare the printed md5 with `md5sum BOOT.bin` on your computer before rebooting.
 
-### 2. Install the control software (daemon, mask tool, scripts) — always required
+### 2. Optional: update the control software over the network
 
-The control software (the daemon with the web interface, the mask tool and the start-up scripts) is **not** on the SD card: it lives in the Pluto's persistent flash
-(`/mnt/jffs2`) and is installed once over the network. Without it the Pluto still shows its original web page and ignores the encoder
-(`/mnt/jffs2/skypluto-ctl: not found` is the symptom).
-
-Download the **`pluto`** folder of the release (it holds `skypluto-ctl`, `skypluto-mask`, the scripts and the installers) and connect the Pluto to the network.
+The control software is already on the SD card (inside `uramdisk.image.gz`) and is installed automatically at boot. The folder `pluto` of a release is only for updating the
+software of a running Pluto **without** replacing the SD-card files (for example a new daemon between two full releases). It holds `skypluto-ctl`, `skypluto-mask`, the scripts and the installers.
 
 **Windows** (Windows 10/11 has the needed `ssh` and `tar` built in): double-click **`install_on_pluto.bat`** in that folder, enter the Pluto's IP address and, when asked, the
 password (`analog`). Or from a command prompt in the folder: `install_on_pluto.bat <ip-address>`.
@@ -328,8 +328,8 @@ chmod +x install_on_pluto.sh
 ./install_on_pluto.sh <ip-address> .
 ```
 
-Both copy the files to `/mnt/jffs2`, stop the board's own web server, restart the daemon and print its version line. Running them again simply updates. The Pluto starts everything
-automatically at every power-up from then on (`/etc/init.d/S98autostart` runs `/mnt/jffs2/autorun.sh`).
+Both copy the files to `/mnt/jffs2`, stop the board's own web server and restart the daemon. Note: the next boot with an SD card that carries a *different* bundled version installs that version again, so
+update the SD card as well when you keep a Pluto for a long time.
 
 ### 3. Check
 
@@ -346,7 +346,8 @@ stays closed until the encoder tunes.
 - The files must be in the **root** of the card's first FAT32 partition (not in a sub-folder), all from the same release. After copying, eject the card properly.
 - The `DONE` LED lights when the FPGA bitstream (`BOOT.bin`) has been loaded. Check the running build with `ssh root@<ip> devmem 0x7C440014` (this firmware answers `0x57464D32`) and
   `ssh root@<ip> /mnt/jffs2/skypluto-ctl -c "?V"`.
-- Seeing the board's original web page instead of this web interface means the **control software** is not installed yet (it is not on the SD card): run step 2.
+- Seeing the board's original web page instead of this web interface means the control software was not installed at boot: check that `uramdisk.image.gz` on the card is the one of this release
+  (`/usr/share/skypluto/VERSION` on the Pluto shows what it carries), or run the installer of step 2.
 
 **Going back:** put `BOOT.bin.good` back as `BOOT.bin`.
 
@@ -369,7 +370,7 @@ and runs it for you in a container), `git`, `make`, Python 3 and plenty of disk 
 
 ```bash
 git clone https://github.com/matsvandamme/fishball7020-fpga-devkit.git
-git clone <this repository> SkyPluto_WFM
+git clone https://github.com/PE5PVB/PlutoSky_7020_Broadcast.git
 cd fishball7020-fpga-devkit && git checkout edbde76 && ./devkit setup && cd ..   # clones the upstream sources, applies the devkit patches
 ```
 
@@ -379,16 +380,16 @@ cd fishball7020-fpga-devkit && git checkout edbde76 && ./devkit setup && cd ..  
 DK=$PWD/fishball7020-fpga-devkit
 # the RTL library (the I2S receiver, conditioner, interpolator, modulator, registers, UART …)
 mkdir -p $DK/firmware/src/hdl/library/skypluto_wfm/data
-cp SkyPluto_WFM/hdl/library/skypluto_wfm/*.v $DK/firmware/src/hdl/library/skypluto_wfm/
-cp SkyPluto_WFM/hdl/library/skypluto_wfm/data/* $DK/firmware/src/hdl/library/skypluto_wfm/data/
+cp PlutoSky_7020_Broadcast/hdl/library/skypluto_wfm/*.v $DK/firmware/src/hdl/library/skypluto_wfm/
+cp PlutoSky_7020_Broadcast/hdl/library/skypluto_wfm/data/* $DK/firmware/src/hdl/library/skypluto_wfm/data/
 # the project files (block design, pins, constraints)
-cp SkyPluto_WFM/hdl/projects/skypluto/{system_bd.tcl,system_constr.xdc,system_project.tcl,system_top.v,skypluto_late.xdc,build_hdl.tcl,set_bitstream_compress.tcl} \
+cp PlutoSky_7020_Broadcast/hdl/projects/skypluto/{system_bd.tcl,system_constr.xdc,system_project.tcl,system_top.v,skypluto_late.xdc,build_hdl.tcl,set_bitstream_compress.tcl} \
    $DK/firmware/src/hdl/projects/pluto/
 # firmware (root file system) changes: transmitter quiesce at boot, etc.
-cd $DK/firmware/src && git apply /path/to/SkyPluto_WFM/fw/buildroot-skypluto.patch
+cd $DK/firmware/src && git apply /path/to/PlutoSky_7020_Broadcast/fw/buildroot-skypluto.patch
 ```
 
-`scripts/build/sync_hdl.sh` does the copy of the RTL library (edit the paths at its top for your machine).
+`scripts/build/sync_hdl.sh` does the copy of the RTL library (it uses `DK`, the devkit checkout, default `~/fishball7020-fpga-devkit`).
 
 ### 4. Build the bitstream and `BOOT.bin`
 
@@ -408,14 +409,23 @@ The daemon and the tool are plain C, built with the devkit's ARM cross-compiler:
 
 ```bash
 GCC=$DK/firmware/src/buildroot/output/host/bin/arm-linux-gnueabihf-gcc
-$GCC -O2 -Wall -o skypluto-ctl  SkyPluto_WFM/src/skypluto-ctl.c  -lm
-$GCC -O3 -mcpu=cortex-a9 -mfpu=neon -ffast-math -Wall -o skypluto-mask SkyPluto_WFM/src/skypluto-mask.c -lm -lpthread
+$GCC -O2 -Wall -o skypluto-ctl  PlutoSky_7020_Broadcast/src/skypluto-ctl.c  -lm
+$GCC -O3 -mcpu=cortex-a9 -mfpu=neon -ffast-math -Wall -o skypluto-mask PlutoSky_7020_Broadcast/src/skypluto-mask.c -lm -lpthread
 ```
 
-(`scripts/build/build_daemon.sh` does the same with the author's paths.) The web page is compiled into the daemon:
+(`scripts/build/build_daemon.sh` does the same and writes `out/build/skypluto-ctl` and `out/build/skypluto-mask`; set `DK` and `OUT` to change the paths.) The web page is compiled into the daemon:
 after editing `web/index.html` run `python scripts/gen_web.py` to regenerate `src/web_index.h`.
 
-Then follow [Installing a release](#installing-a-release) with your own `BOOT.bin`, `skypluto-ctl` and `skypluto-mask`.
+### 6. Bundle the control software into the SD-card image
+
+Put `skypluto-ctl`, `skypluto-mask` and the scripts (`scripts/autorun.sh`, `skypluto-supervise.sh`, `skypluto-autocal.sh`, `skypluto-wfm.sh`, `skypluto-cmd.sh`) in one folder and run
+
+```bash
+python3 scripts/build/make_ramdisk.py $DK/firmware/output/uramdisk.image.gz  <that folder>  uramdisk.image.gz
+```
+
+The result is the `uramdisk.image.gz` of the release: the devkit's root file system plus `/usr/share/skypluto` and an `S98autostart` that installs it at boot. Together with your own
+`BOOT.bin`, `uImage`, `devicetree.dtb` and `uEnv.txt` it is the SD card of [Installing a release](#installing-a-release).
 
 ---
 

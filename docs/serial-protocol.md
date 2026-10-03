@@ -1,4 +1,4 @@
-# PlutoSky 7020 Broadcast v1.00 — serial control protocol
+# PlutoSky 7020 Broadcast v1.01 — serial control protocol
 
 Control and telemetry link between the **PicoAudio encoder** (master) and the
 **PlutoSky 7020 Broadcast exciter** (slave, "the Pluto"), alongside the I2S composite link.
@@ -100,7 +100,7 @@ off. The **control** itself (see §5) is accurate in relative terms.
 | `?S` | `en=1 f=107999998 p=-15.00 att=20.00 tx=on up=312 kdev=92` |
 | `?P` | `set=-15.00 out=-15.10 att=20.00 trim=0.00 alc=hold` |
 | `?E` | `unf=0 ovf=0 lim=0.0 limn=0 uf=0 pk=0 bg=on ceil=63.0 cmax=75.0 gd=act i2s=24/32 al=i2s` — modulator and limiter status; `bg=` = FPGA limiter: `on` / `off` (by `B 0`) / `na` (not present in the bitstream); `ceil=` = limiter ceiling that applies NOW in kHz (or `off`); `cmax=` = the chosen maximum (`H`); `gd=` = mask protection `off` (also when the limiter is off: the guard only works with the limiter on) / `init` (initialising: still too little mask data, about 60 s after start, transmitter open, `X` or `G 1`; the guard does not make decisions yet) / `on` / `act` (ceiling has been lowered); `i2s=<bits>/<slot>` = automatically detected I2S format (word width / BCLKs per WS half period, e.g. `24/32`, `16/16`) and `al=i2s|lj|rj` = detected alignment. In full the reply ends with `... gd=<off|init|on|act> i2s=<bits>/<slot> al=<i2s|lj|rj>`. |
-| `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.00 proto=2` — identification |
+| `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.01 proto=2` — identification |
 | `?C` | `cal=auto` |
 | `?M` | `m=+7.3 w=+5.8 sh=-48.7 fl=-71.7 dev=72 n=1180 age=0 tw=1 c=1 seq=5231 ams=180` — mask monitor (see §4a) |
 | `?L` | `l=<57 characters> q=<n>` — spectrum of the **latest** measurement (~250 ms); `q` = sequence number (equal to the previous reply = repeat), `l=na` without a measurement |
@@ -193,7 +193,7 @@ so this is a relative control, not an absolute dBm measurement.
 ## 6. Example session
 
 ```
-Encoder → ?V             Pluto → magic=57464D32 fw=PlutoSky_7020_Broadcast-1.00 proto=2
+Encoder → ?V             Pluto → magic=57464D32 fw=PlutoSky_7020_Broadcast-1.01 proto=2
 Encoder → F 108000000    Pluto → OK
 Encoder → P -15.00       Pluto → OK
 Encoder → E 1            Pluto → OK
