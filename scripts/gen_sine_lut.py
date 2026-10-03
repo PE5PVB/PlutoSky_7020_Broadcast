@@ -7,7 +7,7 @@ Two's complement, 'width' bits per entry, 'depth' entries (depth = 2^ADDR_W).
 Output: 1 hex word per line, suitable for $readmemh.
 
 Example:
-    python3 gen_sine_lut.py --depth 4096 --width 16 \
+    python3 gen_sine_lut.py --depth 16384 --width 16 \
             --out ../hdl/library/skypluto_wfm/data/sine_lut.mem
 """
 import argparse
@@ -17,7 +17,7 @@ import os
 
 def main():
     ap = argparse.ArgumentParser(description="Sinus-LUT generator (.mem hex)")
-    ap.add_argument("--depth", type=int, default=4096,
+    ap.add_argument("--depth", type=int, default=16384,
                     help="aantal entries (= 2^ADDR_W), default 4096")
     ap.add_argument("--width", type=int, default=16,
                     help="bits per entry (signed), default 16")

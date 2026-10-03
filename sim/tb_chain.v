@@ -61,7 +61,7 @@ module tb_chain;
     reg mod_rst = 1'b1;
     wire signed [15:0] i_out, q_out; wire iq_valid;
     skypluto_fm_modulator #(.COMP_W(DW), .KDEV_W(18), .KSHIFT(13), .PHASE_W(24),
-                            .LUT_ADDR_W(12), .OUT_W(16), .LVL_W(16), .DC_W(12),
+                            .LUT_ADDR_W(14), .OUT_W(16), .LVL_W(16), .DC_W(12),
                             .LUT_FILE("data/sine_lut.mem")) u_mod (
         .clk(rd_clk), .rst(mod_rst), .en(1'b1),
         .kdev(18'sd100), .offset_inc(24'sd0), .level(16'd65535),

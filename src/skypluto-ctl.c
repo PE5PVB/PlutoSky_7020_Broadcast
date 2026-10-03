@@ -938,7 +938,7 @@ static void handle(char *line){
     // ---------- queries ----------
     if (cmd[0]=='?'){
         if (!strcmp(cmd,"?V")){
-            snprintf(buf,sizeof buf,"magic=%08X fw=PlutoSky_7020_Broadcast-1.01 proto=2\n", rd(R_MAGIC));
+            snprintf(buf,sizeof buf,"magic=%08X fw=PlutoSky_7020_Broadcast-1.02 proto=2\n", rd(R_MAGIC));
             tx_str(buf); return;
         }
         if (!strcmp(cmd,"?S")){
@@ -1464,7 +1464,7 @@ int main(int argc, char **argv){
     if (fd < 0){ perror("open /dev/mem"); return 1; }
     g_map = mmap(NULL, MAP_LEN, PROT_READ|PROT_WRITE, MAP_SHARED, fd, MAP_BASE);
     if (g_map == MAP_FAILED){ perror("mmap"); return 1; }
-    fprintf(stderr,"skypluto-ctl 1.01: WFM magic=%08X (verwacht 57464D32)\n", rd(R_MAGIC));
+    fprintf(stderr,"skypluto-ctl 1.02: WFM magic=%08X (verwacht 57464D32)\n", rd(R_MAGIC));
 
     // fixed modulation settings
     wr(R_LEVEL, LEVEL_FIXED); wr(R_OFFSET, 0);

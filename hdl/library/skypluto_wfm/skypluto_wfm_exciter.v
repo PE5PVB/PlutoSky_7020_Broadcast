@@ -283,7 +283,7 @@ module skypluto_wfm_exciter #(
         w_seq, {8'd0, w_out_q}, {8'd0, w_out_c},                             // 21 = window sequence number, 20 = peak after limiter (q), 19 = peak at modulator input (comp), 20 ms
         sc_dbg_wd, sc_dbg_state, ups_dbg_state,                              // 18 = watchdog {wd_idle,wd_fsm}, 17 = conditioner state, 16 = interp state
         ups_ovf, ups_take, d_hb,                                             // 15 = interp overflow pulses, 14 = samples taken, 13 = l_clk heartbeat
-        32'hB1D00014,                                                        // 12 = build id (identifies the bitstream)
+        32'hB1D00017,                                                        // 12 = build id (identifies the bitstream)
         ups_sat,                {8'd0, d_pk_comp},                           // 11 = FIR saturations, 10 = peak |interp output|
         {8'd0, d_pk_q},         sc_dbg_nz,                                   // 9 = peak |conditioner output|, 8 = x_new != 0 (count)
         sc_dbg_pops,            sc_dbg_pulls,                                // 7 = FIFO pops, 6 = pulls

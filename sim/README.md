@@ -7,7 +7,7 @@ Run from the **repo root** so that the path to `data/sine_lut.mem` is correct.
 
 ```bash
 # generate the LUT first (if not yet present):
-python3 scripts/gen_sine_lut.py --depth 4096 --width 16 \
+python3 scripts/gen_sine_lut.py --depth 16384 --width 16 \
         --out hdl/library/skypluto_wfm/data/sine_lut.mem
 
 # I2S-RX

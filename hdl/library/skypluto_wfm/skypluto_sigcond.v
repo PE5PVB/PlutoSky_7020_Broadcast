@@ -13,11 +13,15 @@
 //   (stale) FIFO data is discarded, so that the interpolator starts at the correct occupancy after recovery.
 //   The fade runs at 1/2^FADE_SHIFT per sample (10 => ~5.3 ms).
 //
-// LIMITER (feed-forward, smooth, with exact guarantee), on xf
-//   g_req[n] = min(1, CEIL/|xf[n]|)                            (Q16, restoring divider, 16 iterations)
+// TRUE-PEAK DETECTION. The interpolator that follows (x4 FIR + linear stage) reconstructs the waveform between the 192 kHz samples, and the reconstruction can exceed the
+//   sample peak by 15 % and more (measured: x1.15 on noise-like multiplex, x1.6 on a hard-clipped composite). The limiter therefore also looks at the MIDPOINTS between
+//   neighbouring samples, estimated with the cubic (Catmull-Rom) formula  m = (9 (b + c) - (a + d)) / 16 , and limits on the largest of the sample and its two midpoints.
+//   This needs two samples of look-ahead, so the sample that is limited (and written into the delay line) is xf delayed by 2 samples (xh2): the total delay is 258 samples.
+// LIMITER (feed-forward, smooth, with exact guarantee), on the delayed sample c = xh2 and its midpoints
+//   g_req[n] = min(1, CEIL/max(|c|, |m(c-1,c)|, |m(c,c+1)|))   (Q16, restoring divider, 16 iterations)
 //   bm[j]    = minimum of g_req over block j (16 samples);  W[j] = min(bm[j-15..j])  (256 samples, incl. the current block)
 //   g_s      = average of W[j-15..j] (16 values), computed afresh once per block (no running sum, no gain memory)
-//   y[n-256] = xf[n-256] * g_s   (g_s takes effect at a block boundary, after the multiplication of the last sample of the block)
+//   y[n-258] = xf[n-258] * g_s   (g_s takes effect at a block boundary, after the multiplication of the last sample of the block)
 //   Guarantee: for m in block B, W[j] <= bm[B] <= g_req[m] for all j in [B, B+15], hence g_s <= g_req[m] and |y| <= CEIL.
 //   Below the ceiling g_s is exactly 1.0 and (at fade = 1) the output is bit-exact the delayed input.
 //   Note: changing ceil/lim_en while the 256-sample delay line is filled gives no guarantee for up to 512 samples for the samples already in the line.
@@ -101,7 +105,12 @@ module skypluto_sigcond #(
     (* dont_touch = "true" *) reg signed [DW-1:0] x_new;               // input chosen for this pull (dont_touch: do not absorb into the DSP A register; the FIFO memory path to it would otherwise be too long)
     reg signed [DW+17:0] xfp;                // x_new * fade
     reg signed [DW-1:0] xf;                  // after fade
-    reg [DW:0]  ax;                          // |xf|
+    reg [DW:0]  ax;                          // largest of |c|, |midpoint before c|, |midpoint after c| (c = xh2)
+    reg signed [DW-1:0] xh1, xh2, xh3, xh4;  // the last four samples after the fade (xh1 = newest before xf): neighbours for the midpoints
+    reg signed [DW:0]   ps_a, ps_b, ps_c, ps_d;
+    reg signed [DW+4:0] pm_a, pm_b;
+    reg [DW+4:0]        am_a, am_b;
+    reg [DW:0]          axa;
     reg [16:0]  greq;
     reg [16:0]  gs;                          // gain applied to x_old at this moment (<= 65536 = 1.0)
     reg signed [DW+17:0] yprod;
@@ -113,7 +122,7 @@ module skypluto_sigcond #(
 
     localparam [6:0] TGT7 = TGT;
     localparam [4:0] S_IDLE = 0, S_FETCH = 1, S_FM0 = 2, S_FM1 = 3, S_FM2 = 4, S_ABS = 5, S_CMP = 6, S_DIV = 7, S_GREQ = 8,
-                     S_BLK = 9, S_AVG0 = 13,
+                     S_BLK = 9, S_MA = 10, S_MB = 11, S_MC = 12, S_AVG0 = 13,
                      S_MUL0 = 15, S_MUL1 = 16, S_MUL2 = 17, S_OUT = 18;
     reg [4:0]  st;
 
@@ -147,6 +156,7 @@ module skypluto_sigcond #(
             cm <= 17'd65536; cmf <= 17'd65536; sc <= 0; cb <= 0; gs_next <= 17'd65536; blk_done <= 1'b0;
             bg_start <= 1'b0; bg_run <= 1'b0; bi <= 0; pmin <= 17'd65536; pacc <= 17'd65536; ssum <= 21'hF0000; sacc <= 0;
             fade <= 0; ufc <= 0; wr_prev <= 0; alive <= 0; x_last <= 0; x_new <= 0; xfp <= 0; xf <= 0; ax <= 0;
+            xh1 <= 0; xh2 <= 0; xh3 <= 0; xh4 <= 0; ps_a <= 0; ps_b <= 0; ps_c <= 0; ps_d <= 0; pm_a <= 0; pm_b <= 0; am_a <= 0; am_b <= 0; axa <= 0;
             greq <= 17'd65536; gs <= 17'd65536; yprod <= 0;
             rem <= 0; quo <= 0; it <= 0; st <= S_IDLE;
             wdc <= 0; idc <= 0; idc_flag <= 1'b0; wd_fsm <= 0; wd_idle <= 0;
@@ -201,12 +211,28 @@ module skypluto_sigcond #(
             S_FM0: begin xfp <= x_new * $signed({1'b0, fade}); st <= S_FM1; if (x_new != 0) dbg_nz <= dbg_nz + 1'b1; end     // x_new and fade are valid here
             S_FM1: st <= S_FM2;
             S_FM2: begin xf <= xfp[DW+15:16]; st <= S_ABS; end
-            S_ABS: begin
-                ax <= xf[DW-1] ? (~{xf[DW-1], xf} + 1'b1) : {1'b0, xf};       // |xf| in DW+1 bits
+            S_ABS: begin                                                      // sums for the two cubic midpoints around c = xh2 (m = (9(b+c) - (a+d))/16)
+                ps_a <= xh3 + xh2;  ps_b <= xh4 + xh1;                       // midpoint between xh3 and xh2:  neighbours xh4 and xh1
+                ps_c <= xh2 + xh1;  ps_d <= xh3 + xf;                        // midpoint between xh2 and xh1:  neighbours xh3 and xf
+                axa  <= xh2[DW-1] ? (~{xh2[DW-1], xh2} + 1'b1) : {1'b0, xh2};   // |c|
+                st <= S_MA;
+            end
+            S_MA: begin
+                pm_a <= (ps_a <<< 3) + ps_a - ps_b;                          // 16 x midpoint
+                pm_b <= (ps_c <<< 3) + ps_c - ps_d;
+                st <= S_MB;
+            end
+            S_MB: begin
+                am_a <= pm_a[DW+4] ? (~pm_a + 1'b1) : pm_a;                  // 16 x |midpoint|
+                am_b <= pm_b[DW+4] ? (~pm_b + 1'b1) : pm_b;
+                st <= S_MC;
+            end
+            S_MC: begin
+                ax <= (axa >= am_a[DW+4:4] && axa >= am_b[DW+4:4]) ? axa : (am_a >= am_b) ? am_a[DW+4:4] : am_b[DW+4:4];   // the largest of the three
                 st <= S_CMP;
             end
             S_CMP: begin
-                if (ax[DW-1:0] > inpeak) inpeak <= ax[DW-1:0];
+                if (ax > {1'b0, inpeak}) inpeak <= ax[DW] ? {DW{1'b1}} : ax[DW-1:0];
                 if (lim_en && (ax > {1'b0, ceil})) begin
                     rem <= {2'b00, ceil}; quo <= 0; it <= 5'd0; st <= S_DIV;
                 end else begin
@@ -234,7 +260,8 @@ module skypluto_sigcond #(
             end
             // --- block boundary: update bm/W and prepare the next gain (takes effect only after the multiplication, in S_OUT) ---
             S_AVG0: begin
-                xd[p] <= xf;
+                xd[p] <= xh2;                    // the limited (delayed) sample c
+                xh4 <= xh3; xh3 <= xh2; xh2 <= xh1; xh1 <= xf;
                 p <= p + 1'b1;
                 if (sc == 4'd15) begin
                     bm[cb]  <= cmf;

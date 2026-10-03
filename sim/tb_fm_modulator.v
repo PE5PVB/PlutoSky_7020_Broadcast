@@ -16,7 +16,7 @@ module tb_fm_modulator;
     localparam integer COMP_W  = 24;
     localparam integer OUT_W   = 16;
     localparam integer PHASE_W = 24;
-    localparam integer LUTAW   = 12;
+    localparam integer LUTAW   = 14;
     localparam integer KDEV_W  = 18;
     localparam integer LVL_W   = 16;
 

@@ -43,6 +43,8 @@ module skypluto_fm_modulator #(
     localparam signed [OUT_W:0] MAXO =  (1 << (OUT_W-1)) - 1;
     localparam signed [OUT_W:0] MINO = -(1 << (OUT_W-1));
 
+    // s0: input register: the multiplier input gets a register of its own, placed next to the DSP (the interpolator's output register fans out widely: a timing path otherwise)
+    reg signed [COMP_W-1:0]  comp_r = 0;  reg cv_r = 0;
     // s1: kdev*comp
     reg signed [PROD_W-1:0]  prod_r = 0;  reg v1 = 0;
     // s2: phase_inc
@@ -66,12 +68,13 @@ module skypluto_fm_modulator #(
 
     always @(posedge clk) begin
         if (rst) begin
-            prod_r<=0; phase_inc_r<=0; phase<=0; cos_r<=0; sin_r<=0; level_r<=0;
+            comp_r<=0; cv_r<=0; prod_r<=0; phase_inc_r<=0; phase<=0; cos_r<=0; sin_r<=0; level_r<=0;
             i_sc<=0; q_sc<=0; i_sum<=0; q_sum<=0;
             v1<=0; v2<=0; v3<=0; v4<=0; v4b<=0; v5<=0; v6<=0;
             i_out<=0; q_out<=0; iq_valid<=0;
         end else begin
-            prod_r      <= kdev * comp;                       v1  <= comp_valid & en;
+            comp_r      <= comp;                              cv_r <= comp_valid & en;
+            prod_r      <= kdev * comp_r;                     v1  <= cv_r;
             phase_inc_r <= prod_sh[PHASE_W-1:0] + offset_inc; v2  <= v1;
             if (v2) phase <= phase + phase_inc_r;             v3  <= v2;
             v4  <= v3;

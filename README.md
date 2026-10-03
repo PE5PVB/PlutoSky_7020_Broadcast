@@ -1,4 +1,4 @@
-# PlutoSky 7020 Broadcast v1.01 — an FM broadcast exciter on the PlutoSky (Zynq-7020 + AD9361)
+# PlutoSky 7020 Broadcast v1.02 — an FM broadcast exciter on the PlutoSky (Zynq-7020 + AD9361)
 
 SkyPluto WFM turns a **PlutoSky / "7020-SDR"** board (Xilinx Zynq XC7Z020 + Analog Devices AD9361) into a
 **wideband-FM broadcast exciter** that tunes anywhere in the AD9361's range, **70 MHz – 6 GHz** (the usual
@@ -50,10 +50,11 @@ and put it on the air** — with a small FPGA-only signal path (no ARM, no DMA, 
   24 bit, so the deviation is identical for every format. A manual override register exists.
 - **Adaptive clock-domain crossing**: an asynchronous FIFO whose read rate is steered by a loop, so that the
   encoder's clock and the Pluto's TCXO never over- or underrun the FIFO.
-- **Signal conditioner / limiter** with a 256-sample look-ahead: a hard guarantee that the instantaneous
-  deviation never exceeds the configured ceiling, plus a **soft fade-in/out** when the I2S stream disappears or returns
-  (no clicks, no splatter).
-- **Polyphase interpolator** from 192 kHz to the 3.072 MSPS baseband rate with saturation (never wrap-around).
+- **Signal conditioner / limiter** with a 258-sample (1.34 ms) look-ahead and **true-peak detection**: the limiter looks at the samples *and* at the cubic
+  midpoints between them, so the waveform that the interpolator reconstructs stays under the ceiling too. A hard guarantee that the deviation never exceeds the configured
+  ceiling, plus a **soft fade-in/out** when the I2S stream disappears or returns (no clicks, no splatter).
+- **Polyphase interpolator** from 192 kHz to the 3.072 MSPS baseband rate: a 96-tap x4 FIR (image rejection ≥ 79 dB above 116 kHz) whose passband is pre-compensated for the
+  linear stage behind it, so the whole chain is **flat within ±0.002 dB up to 76 kHz** (multiplex, pilot, RDS and RDS2 included). Saturation, never wrap-around.
 - **FM modulator**: phase accumulator + a 14-bit, 16384-entry sine/cosine ROM. Deviation = `kdev × 0.75 kHz`
   at 0 dBFS (`kdev 100` = ±75 kHz).
 - **TX2 twin**: TX2 transmits the identical modulation. It is looped back into RX2 so the transmitter can measure its
@@ -183,7 +184,7 @@ for the encoder's splash screen. The encoder stays silent until `#B 100`. `?B` r
 
 | Query | Answer |
 |-------|--------|
-| `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.01 proto=2` |
+| `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.02 proto=2` |
 | `?S` | `en=1 f=107999998 p=-29.00 att=34.00 tx=on up=312 kdev=100` — state, frequency, level, attenuation, uptime |
 | `?P` | `set=-29.00 out=-29.00 att=34.00 trim=0.00 alc=hold` — set point and the automatic level control |
 | `?T` | `temp=39.5` — board temperature (°C) |
@@ -205,7 +206,7 @@ From a shell on the Pluto (`ssh root@<ip>`, default password `analog`):
 
 ## Mask protection, limiter and levels
 
-The deviation limit is enforced **in the FPGA** (a 256-sample look-ahead limiter), so the transmitted deviation can
+The deviation limit is enforced **in the FPGA** (a 258-sample look-ahead true-peak limiter), so the transmitted deviation can
 never exceed the configured ceiling. On top of that, the **mask guard** watches the spectrum (TX2 → RX2) and
 adjusts the ceiling:
 
@@ -233,10 +234,10 @@ tools in `scripts/` and `src/skypluto-mask.c`. The figures come from the encoder
 | | |
 |---|---|
 | Audio response with 50 µs pre-emphasis / de-emphasis | flat within **0.016 dB**, 200 Hz – 15 kHz (transmitter) |
-| Total delay, encoder + Pluto | 3.424 ms + 1.584 ms = **5.008 ms**, linear phase |
-| Stereo L−R path | S = M within **0.006 dB**; separation 51 … 80 dB (median 67 dB) after the 0.07 dB trim |
-| LO leakage, transmitter on | **≤ −50.6 dBc** (upper bound set by the measurement); closed ≤ −95 dBc |
-| Mask margin (1 kHz tone at 0 dBFS) | ≥ **+3 dB** from 75 kHz down (+3.6 dB at 75 kHz, +8.6 dB at 55 kHz) |
+| Total delay, encoder + Pluto | 3.424 ms + about 1.59 ms = **about 5.02 ms**, linear phase (the Pluto part was measured as 1.584 ms; the true-peak look-ahead adds 2 samples = 10 µs) |
+| Stereo L−R path | S = M within **±0.004 dB** above 2 kHz (±0.017 dB at 0.5 … 1 kHz), phase ≤ 0.13°, separation 59 … 81 dB (**median 74.5 dB**), **no L−R trim needed** (the interpolator is flat to ±0.002 dB up to 76 kHz) |
+| LO leakage, transmitter on | **≤ −45 dBc on every frequency tried** (75, 98, 108, 200, 435, 868, 1296, 2400, 3500 and 5800 MHz; carrier-null method, the figure is the floor of the method, ≤ −50.6 dBc at 108 MHz on the first null); closed ≤ −95 dBc |
+| Mask margin (1 kHz tone at 0 dBFS, limiter on, guard off) | ≥ **+4.9 dB** at every maximum deviation from 75 down to 50 kHz (5-minute margin, +6.1 dB at 75 kHz, +9.5 dB at 50 kHz) |
 
 | | |
 |:--:|:--:|
