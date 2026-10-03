@@ -451,6 +451,31 @@ static void read_conf(int *en, int *rx, char *port, size_t pn){
     fclose(f);
     mask_rx_cfg = (*rx == 2) ? 2 : 1;
 }
+// Direct sysfs access to the ad9361-phy IIO device. An iio_attr process takes ~100 ms, a sysfs write ~1 ms: the mute that starts a tune and the retune + calibration use it,
+// so the carrier that still leaks through the maximum attenuation is on the air for as short a time as possible.
+static char phy_dir[80] = "";
+static const char *phy_find(void){
+    if (phy_dir[0]) return phy_dir;
+    for (int i = 0; i < 8; i++){
+        char pth[96], nm[32] = ""; snprintf(pth, sizeof pth, "/sys/bus/iio/devices/iio:device%d/name", i);
+        FILE *f = fopen(pth, "r"); if (!f) continue;
+        if (fgets(nm, sizeof nm, f)) nm[strcspn(nm, "\r\n")] = 0;
+        fclose(f);
+        if (!strcmp(nm, "ad9361-phy")){ snprintf(phy_dir, sizeof phy_dir, "/sys/bus/iio/devices/iio:device%d", i); break; }
+    }
+    return phy_dir;
+}
+static int phy_write(const char *attr, const char *val){
+    if (!phy_find()[0]) return -1;
+    char pth[140]; snprintf(pth, sizeof pth, "%s/%s", phy_dir, attr);
+    FILE *f = fopen(pth, "w"); if (!f) return -1;
+    int rc = (fputs(val, f) < 0) ? -1 : 0;
+    if (fclose(f) != 0) rc = -1;
+    return rc;
+}
+// cal_hold: the output stays muted (maximum attenuation, TX1 and TX2) while the transmitter retunes and the AD9361 calibrates for the new LO frequency, and is released afterwards.
+static int    cal_hold = 0;
+static double cal_hold_t = 0.0;
 // TX2 (twin) follows TX1: same attenuation, never lower than TX2_MIN_ATTEN, and fully closed on E 0.
 static void twin_apply(void){
     if (!twin_enable) return;
@@ -460,7 +485,7 @@ static void twin_apply(void){
     }
     // With the transmitter on, TX2 is always at -15 dBm (attenuation TX2_MIN_ATTEN), even if TX1 is lower: the mask shoulder grows with
     // power, so TX2 at -15 dBm is conservative for lower TX1 levels, and the measurement keeps a good signal-to-noise ratio. Mute on E 0.
-    double a2 = tx_off ? ATTEN_MUTE : TX2_MIN_ATTEN;
+    double a2 = (tx_off || cal_hold) ? ATTEN_MUTE : TX2_MIN_ATTEN;
     a2 = quant(a2);
     if (fabs(a2 - applied_a2) < 0.01) return;
     char c[170];
@@ -475,7 +500,7 @@ static void apply_atten(double total){          // idempotent + smooth
     twin_apply();
 }
 static void apply_current(void){                // what should be on the chip now
-    apply_atten(tx_off ? ATTEN_MUTE : nom_a + trim);
+    apply_atten((tx_off || cal_hold) ? ATTEN_MUTE : nom_a + trim);
 }
 // TX-LO (altvoltage1) of the AD9361 off/on: E 0 = really switch the synthesizer off (no carrier leakage; maximum attenuation alone
 // still let a weak carrier through). TX1 and TX2 share the same TX-LO.  On: switch the LO on and reprogram the frequency
@@ -506,13 +531,21 @@ static void ir_finish(void){
 }
 // TX calibration of the AD9361 (LO leakage = rf_dc_offs, image = tx_quad). The chip's calibration is only valid for the LO frequency it ran at, so it is repeated in a child process
 // after every tune and every time the transmitter opens (the temperature-driven recalibration is done by skypluto-autocal.sh).
-static int    cal_pending = 0;
+static int    cal_pending = 0, cal_retune = 0;       // cal_retune: the calibration child also retunes the TX-LO to last_f (a tune while the transmitter is open)
 static pid_t  cal_pid = -1;
 static double cal_due = 0.0, cal_t0 = 0.0;
 static void tx_set_state(int off){
     if (off == tx_off) return;
     tx_off = off;
-    if (!tx_off){ tx_lo_power(1); guard_init = 1; cal_pending = 1; cal_due = mono() + 2.0; }
+    if (!tx_off){
+        cal_hold = 1; cal_hold_t = mono(); guard_init = 1; cal_pending = 1; cal_due = mono();
+        if (phy_find()[0]) cal_retune = 2;           // the child powers the LO up, tunes it and calibrates in one go
+        else { tx_lo_power(1); cal_retune = 0; }
+    }
+    else {                                            // closing: stop a running calibration, nothing is held any more
+        if (cal_pid > 0){ int stc; kill(cal_pid, SIGKILL); waitpid(cal_pid, &stc, 0); cal_pid = -1; }
+        cal_pending = 0; cal_retune = 0; cal_hold = 0;
+    }
     apply_current();
     if (tx_off) tx_lo_power(0);
     // Remember whether the transmitter is open (in /tmp = RAM: gone after a power loss, so a cold start stays CLOSED until the tune); a restart of the daemon alone
@@ -1053,11 +1086,18 @@ static void handle(char *line){
             tx_set_state(want_on ? 0 : 1);               // tx_lo_power(1) programs last_f into the LO
             return;
         }
-        tx_str("OK\n");                                 // reply first; a failed retune is logged and becomes visible through the next command/?S
-        if (system(c)==0){
-            last_f = hz; alc_reset(3.0); cal_pending = 1; cal_due = mono() + 1.5;
-            fprintf(stderr,"   -> F toegepast (LO-hertune) %lld\n", hz); fflush(stderr);
-        } else { fprintf(stderr,"   !! F %lld MISLUKT (iio_attr)\n", hz); fflush(stderr); }
+        tx_str("OK\n");                                 // reply first; the retune is done by the calibration child (below), so this command stays fast
+        if (ir_pid > 0){                                // a J/Y measurement owns the RX path: retune directly, without muting and calibrating
+            if (system(c)==0){ last_f = hz; alc_reset(3.0); fprintf(stderr,"   -> F toegepast (LO-hertune) %lld\n", hz); fflush(stderr); }
+            else { fprintf(stderr,"   !! F %lld MISLUKT (iio_attr)\n", hz); fflush(stderr); }
+            return;
+        }
+        last_f = hz; alc_reset(3.0);
+        if (!cal_hold) cal_hold_t = mono();
+        cal_hold = 1; cal_pending = 1; cal_retune = 1; cal_due = mono();
+        { char mv[16]; snprintf(mv, sizeof mv, "-%.2f", ATTEN_MUTE);
+          if (phy_write("out_voltage0_hardwaregain", mv) == 0){ applied_a = ATTEN_MUTE; phy_write("out_voltage1_hardwaregain", mv); applied_a2 = ATTEN_MUTE; } }   // mute at once
+        fprintf(stderr,"   -> F %lld ontvangen: zender dicht, hertune + kalibratie, daarna weer open\n", hz); fflush(stderr);
         return;
     }
     // X: restart the mask monitor (clear the 5-min max-hold and statistics: ?W/?N empty, ?M counts from zero).
@@ -1538,7 +1578,7 @@ int main(int argc, char **argv){
                     double pp, kk; if (sscanf(pw_buf, "PWR p=%lf pk=%lf", &pp, &kk) == 2) pw_feed(pp, kk);
                     close(pw_fd); pw_fd = -1; pw_pid = -1; pw_blen = 0; pw_next = now + 0.5;
                 }
-            } else if (pw_inited && !tx_off && last_f > 0 && m_pid <= 0 && cal_pid <= 0 && ir_pid <= 0 && now >= pw_next && now - lvl_change_t > 1.0){
+            } else if (pw_inited && !tx_off && last_f > 0 && m_pid <= 0 && cal_pid <= 0 && !cal_pending && ir_pid <= 0 && now >= pw_next && now - lvl_change_t > 1.0){
                 int pf[2];
                 if (pipe(pf) == 0){
                     char a1[32]; snprintf(a1, sizeof a1, "%lld", last_f);
@@ -1558,20 +1598,43 @@ int main(int argc, char **argv){
             int stc; pid_t cw = waitpid(cal_pid, &stc, WNOHANG);
             if (cw == cal_pid || now - cal_t0 > 15.0){
                 if (cw != cal_pid){ kill(cal_pid, SIGKILL); waitpid(cal_pid, &stc, 0); }
-                cal_pid = -1; alc_reset(ALC_SETTLE);
+                cal_pid = -1;
                 fprintf(stderr, "   -> TX-kalibratie (LO-lek, beeld) klaar na %.1f s\n", now - cal_t0); fflush(stderr);
+                { char lp[140] = ""; FILE *lf; if (phy_dir[0]) snprintf(lp, sizeof lp, "%s/out_altvoltage1_TX_LO_powerdown", phy_dir);
+                  if (!tx_off && lp[0] && (lf = fopen(lp, "r")) != NULL){ int pdv = 0; if (fscanf(lf, "%d", &pdv) != 1) pdv = 0; fclose(lf); if (pdv) tx_lo_power(1); } }   // LO still powered down: power it up
+                if (!cal_pending){ cal_hold = 0; apply_current(); alc_reset(ALC_SETTLE);
+                                   fprintf(stderr, "   -> zender weer open (atten TX1 %.2f dB, TX2 %.2f dB)\n", applied_a, applied_a2); fflush(stderr); }
             }
-        } else if (cal_pending && !tx_off && last_f > 0 && ir_pid <= 0 && pw_pid <= 0 && now >= cal_due){
-            if (m_pid > 0) measure_finish();                      // the running mask/ALC measurement uses the RX path and would see the calibration: stop it, it restarts afterwards
-            pid_t cp = fork();
-            if (cp == 0){
-                execl("/bin/sh", "sh", "-c", "iio_attr -d -q ad9361-phy calib_mode rf_dc_offs >/dev/null 2>&1; iio_attr -d -q ad9361-phy calib_mode tx_quad >/dev/null 2>&1", (char *)NULL);
-                _exit(127);
+        } else if (cal_pending && !tx_off && last_f > 0 && now >= cal_due){
+            if (ir_pid > 0){                                      // a J/Y measurement is running: skip the calibration, release the output
+                cal_pending = 0; cal_retune = 0; cal_hold = 0; apply_current();
+            } else {
+                if (m_pid > 0) measure_finish();                  // the running mask/ALC measurement uses the RX path and would see the calibration: stop it, it restarts afterwards
+                if (pw_pid > 0) kill(pw_pid, SIGKILL);            // one-shot power capture on RX1: reaped by the power-meter code below
+                char cs[900], mt[160] = "";
+                if (phy_find()[0]){                               // direct sysfs writes: no gap between the retune and the calibration
+                    if (cal_retune == 2) snprintf(mt, sizeof mt, "echo 0 > $D/out_altvoltage1_TX_LO_powerdown; ");
+                    char fq[96] = ""; if (cal_retune) snprintf(fq, sizeof fq, "echo %lld > $D/out_altvoltage1_TX_LO_frequency; ", last_f);
+                    snprintf(cs, sizeof cs, "D=%s; echo -%.2f > $D/out_voltage0_hardwaregain; echo -%.2f > $D/out_voltage1_hardwaregain; %s%secho rf_dc_offs > $D/calib_mode; echo tx_quad > $D/calib_mode",
+                             phy_dir, ATTEN_MUTE, ATTEN_MUTE, mt, fq);
+                } else {
+                    if (cal_retune) snprintf(mt, sizeof mt, "iio_attr -q -o -c ad9361-phy altvoltage1 frequency %lld >/dev/null 2>&1; ", last_f);
+                    snprintf(cs, sizeof cs,
+                             "iio_attr -q -o -c ad9361-phy voltage0 hardwaregain -- -%.2f >/dev/null 2>&1; iio_attr -q -o -c ad9361-phy voltage1 hardwaregain -- -%.2f >/dev/null 2>&1; "
+                             "%siio_attr -d -q ad9361-phy calib_mode rf_dc_offs >/dev/null 2>&1; iio_attr -d -q ad9361-phy calib_mode tx_quad >/dev/null 2>&1",
+                             ATTEN_MUTE, ATTEN_MUTE, mt);
+                }
+                pid_t cp = fork();
+                if (cp == 0){ execl("/bin/sh", "sh", "-c", cs, (char *)NULL); _exit(127); }
+                if (cp > 0){
+                    cal_pid = cp; cal_t0 = now; cal_pending = 0; if (cal_retune == 2) lo_pd = 0; cal_retune = 0;
+                    applied_a = ATTEN_MUTE; applied_a2 = ATTEN_MUTE;      // the child mutes TX1 and TX2 first
+                    fprintf(stderr, "   -> TX-kalibratie gestart (f=%lld, zender dicht)\n", last_f); fflush(stderr);
+                } else cal_due = now + 2.0;
             }
-            if (cp > 0){ cal_pid = cp; cal_t0 = now; cal_pending = 0; fprintf(stderr, "   -> TX-kalibratie gestart (f=%lld)\n", last_f); fflush(stderr); }
-            else cal_due = now + 5.0;
         }
-        if (m_pid <= 0 && cal_pid <= 0 && !tx_off && last_f > 0 && now >= m_next) measure_start();
+        if (cal_hold && cal_pid <= 0 && !cal_pending && now - cal_hold_t > 30.0){ cal_hold = 0; apply_current(); }   // safety net: never stay muted
+        if (m_pid <= 0 && cal_pid <= 0 && !cal_pending && !tx_off && last_f > 0 && now >= m_next) measure_start();
         // mask monitor: only if no ALC measurement is running and the level/frequency has been stable for ~4 s. NOT dependent on an ALC reference:
         // at low TX levels (high attenuation) the TX_MONITOR is too weak for the ALC, and the mask monitor would otherwise never start.
         if (m_pid <= 0 && cal_pid <= 0 && !cal_pending && !tx_off && last_f > 0 && now - lvl_change_t >= 4.0 && now >= mask_next){
