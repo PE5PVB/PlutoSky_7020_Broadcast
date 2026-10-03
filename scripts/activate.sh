@@ -6,14 +6,14 @@
 # =============================================================================
 cd /tmp/pkg || exit 1
 JD=/mnt/jffs2
-FILES="skypluto-ctl skypluto-mask autorun.sh skypluto-supervise.sh skypluto-autocal.sh skypluto-wfm.sh skypluto-cmd.sh"
+FILES="skypluto-ctl skypluto-mask autorun.sh skypluto-supervise.sh skypluto-wfm.sh skypluto-cmd.sh"
 
 for f in $FILES; do
     [ -f "$f" ] || { echo "missing file: $f"; exit 1; }
 done
 
 # the scripts must have Unix line endings (a Windows checkout can add CR characters)
-for f in autorun.sh skypluto-supervise.sh skypluto-autocal.sh skypluto-wfm.sh skypluto-cmd.sh; do
+for f in autorun.sh skypluto-supervise.sh skypluto-wfm.sh skypluto-cmd.sh; do
     tr -d '\r' < "$f" > "$f.n" && mv "$f.n" "$f"
 done
 chmod +x $FILES
@@ -21,7 +21,7 @@ chmod +x $FILES
 echo "stopping the running control software ..."
 for d in /proc/[0-9]*; do
     c=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)
-    case "$c" in *skypluto-supervise*) kill -9 "$(basename $d)" 2>/dev/null;; esac
+    case "$c" in *skypluto-supervise*|*skypluto-autocal*) kill -9 "$(basename $d)" 2>/dev/null;; esac    # (an older install also ran skypluto-autocal.sh)
 done
 for d in /proc/[0-9]*; do
     l=$(readlink "$d/exe" 2>/dev/null)

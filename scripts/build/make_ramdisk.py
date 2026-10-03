@@ -12,7 +12,7 @@ settings kept in /mnt/jffs2 (skypluto-*.conf) are left alone.
 """
 import gzip, hashlib, os, struct, sys, time, zlib
 
-FILES = ["skypluto-ctl", "skypluto-mask", "autorun.sh", "skypluto-supervise.sh", "skypluto-autocal.sh", "skypluto-wfm.sh", "skypluto-cmd.sh"]
+FILES = ["skypluto-ctl", "skypluto-mask", "autorun.sh", "skypluto-supervise.sh", "skypluto-wfm.sh", "skypluto-cmd.sh"]
 PRODUCT = "PlutoSky_7020_Broadcast-1.01"
 
 S98 = b"""#!/bin/sh

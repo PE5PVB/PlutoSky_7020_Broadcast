@@ -27,7 +27,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-for %%f in (skypluto-ctl skypluto-mask activate.sh autorun.sh skypluto-supervise.sh skypluto-autocal.sh skypluto-wfm.sh skypluto-cmd.sh) do (
+for %%f in (skypluto-ctl skypluto-mask activate.sh autorun.sh skypluto-supervise.sh skypluto-wfm.sh skypluto-cmd.sh) do (
     if not exist "%%f" (
         echo Missing file: %%f
         echo Put this batch file in the release's "pluto" folder, next to the other files.
@@ -45,7 +45,7 @@ if "%PLUTO%"=="" (
 )
 
 set "PKG=%TEMP%\skypluto-pkg.tar"
-tar --format ustar -cf "%PKG%" skypluto-ctl skypluto-mask activate.sh autorun.sh skypluto-supervise.sh skypluto-autocal.sh skypluto-wfm.sh skypluto-cmd.sh
+tar --format ustar -cf "%PKG%" skypluto-ctl skypluto-mask activate.sh autorun.sh skypluto-supervise.sh skypluto-wfm.sh skypluto-cmd.sh
 if errorlevel 1 (
     echo Could not create the package.
     pause

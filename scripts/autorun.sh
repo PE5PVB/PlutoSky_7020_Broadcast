@@ -7,7 +7,7 @@
 #   - full digital level, zero-IF (offset=0)
 #   - I2S input active in the fabric (T9/U10/V10 = JP5-13/11/7, 3.3V):
 #     as soon as your encoder delivers MPX, it modulates along automatically.
-#   - autonomous, temperature-tracking TX calibration
+#   - the TX calibration (LO leakage, image) is done by the daemon at every tune, with the output muted
 # Everything lives in the persistent jffs2 flash; nothing needs to be started manually.
 # =============================================================================
 CARRIER=108000000       # for bring-up only; the transmitter stays CLOSED (TX LO off, atten 89) until the Pico sends a tune (F)
@@ -26,15 +26,27 @@ while [ $i -lt 40 ]; do
     i=$((i+1)); sleep 0.5
 done
 bootmsg "30 Radio-chip klaar"
-iio_attr -q -o -c ad9361-phy altvoltage1 powerdown 1 >/dev/null 2>&1
-iio_attr -q -o -c ad9361-phy voltage0 hardwaregain -89 >/dev/null 2>&1
-iio_attr -q -o -c ad9361-phy voltage1 hardwaregain -89 >/dev/null 2>&1
+# direct sysfs writes (a few ms, checked) with the iio_attr tool as fallback; the '--' keeps a negative value from being read as an option
+PHY=""
+for d in /sys/bus/iio/devices/iio:device*; do [ "$(cat $d/name 2>/dev/null)" = "ad9361-phy" ] && PHY=$d; done
+tx_mute() {
+    if [ -n "$PHY" ]; then
+        echo -89.75 > $PHY/out_voltage0_hardwaregain 2>/dev/null
+        echo -89.75 > $PHY/out_voltage1_hardwaregain 2>/dev/null
+        echo 1 > $PHY/out_altvoltage1_TX_LO_powerdown 2>/dev/null
+    else
+        iio_attr -q -o -c ad9361-phy voltage0 hardwaregain -- -89.75 >/dev/null 2>&1
+        iio_attr -q -o -c ad9361-phy voltage1 hardwaregain -- -89.75 >/dev/null 2>&1
+        iio_attr -q -o -c ad9361-phy altvoltage1 powerdown 1 >/dev/null 2>&1
+    fi
+}
+tx_mute
 
 # 2) set up the fabric/AD9361 operating point (zero-IF; offset reg default = 0) with maximum attenuation, then switch the TX LO off again
 if [ -x $JD/skypluto-wfm.sh ]; then
     sh $JD/skypluto-wfm.sh start $CARRIER $ATTEN > /root/wfm_boot.log 2>&1
 fi
-iio_attr -q -o -c ad9361-phy altvoltage1 powerdown 1 >/dev/null 2>&1
+tx_mute
 bootmsg "45 Zender dicht"
 
 # 3) start the control/telemetry daemon (UART U9 <-> PicoAudio encoder)
@@ -61,11 +73,4 @@ if [ -x $JD/skypluto-ctl ]; then
     else
         nohup $JD/skypluto-ctl > /tmp/ctl.log 2>&1 &
     fi
-fi
-
-# 4) start the autonomous temperature-tracking calibration (debounce against carrier dropouts).
-#    NB: the Pico can override this via CE/CT; the daemon ensures that then only
-#    one autocal instance runs.
-if [ -x $JD/skypluto-autocal.sh ]; then
-    nohup $JD/skypluto-autocal.sh 8000 15 4 > /root/autocal.log 2>&1 &
 fi

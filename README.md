@@ -68,7 +68,7 @@ and put it on the air** — with a small FPGA-only signal path (no ARM, no DMA, 
   after the encoder has sent a valid frequency (tune) command.
 - **Continuous mask monitoring** (4 spectra per second, 5-minute max-hold) and an automatic **mask guard** that lowers
   the deviation ceiling when the 5-minute mask margin drops below +3.5 dB, and raises it again when there is room.
-- **Temperature-following TX calibration** (`autocal`), so LO leakage and image stay low as the board warms up.
+- **TX calibration of the AD9361** (LO leakage, image) after every tune and every time the transmitter opens, **with the output muted** until it is done (about 2 s), and again when the die temperature has drifted by 3 °C.
 - **Power meter** on RX1, used as a pure measurement bridge: you enter the attenuator value, the web interface and
   the serial protocol report dBm and watts.
 - **Watchdog / supervisor**: a crashed daemon is restarted automatically, and an open transmitter stays open.
@@ -418,7 +418,7 @@ after editing `web/index.html` run `python scripts/gen_web.py` to regenerate `sr
 
 ### 6. Bundle the control software into the SD-card image
 
-Put `skypluto-ctl`, `skypluto-mask` and the scripts (`scripts/autorun.sh`, `skypluto-supervise.sh`, `skypluto-autocal.sh`, `skypluto-wfm.sh`, `skypluto-cmd.sh`) in one folder and run
+Put `skypluto-ctl`, `skypluto-mask` and the scripts (`scripts/autorun.sh`, `skypluto-supervise.sh`, `skypluto-wfm.sh`, `skypluto-cmd.sh`) in one folder and run
 
 ```bash
 python3 scripts/build/make_ramdisk.py $DK/firmware/output/uramdisk.image.gz  <that folder>  uramdisk.image.gz

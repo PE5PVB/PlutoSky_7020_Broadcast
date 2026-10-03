@@ -25,7 +25,7 @@ SSH() { sshpass -p "$PW" ssh $O root@"$IP" "$@"; }
 for f in skypluto-ctl skypluto-mask; do
     [ -f "$REL/$f" ] || { echo "missing $REL/$f"; exit 1; }
 done
-for f in autorun.sh skypluto-supervise.sh skypluto-autocal.sh skypluto-wfm.sh skypluto-cmd.sh; do
+for f in autorun.sh skypluto-supervise.sh skypluto-wfm.sh skypluto-cmd.sh; do
     [ -f "$HERE/$f" ] || { echo "missing $HERE/$f"; exit 1; }
 done
 
@@ -39,7 +39,7 @@ pushbin() {
 echo "==> copying to /mnt/jffs2 on $IP"
 pushbin "$REL/skypluto-ctl"  skypluto-ctl
 pushbin "$REL/skypluto-mask" skypluto-mask
-for f in autorun.sh skypluto-supervise.sh skypluto-autocal.sh skypluto-wfm.sh skypluto-cmd.sh; do
+for f in autorun.sh skypluto-supervise.sh skypluto-wfm.sh skypluto-cmd.sh; do
     push "$HERE/$f" "$f"
 done
 
@@ -47,14 +47,14 @@ echo "==> activating (supervisor and daemon are restarted)"
 SSH 'sh -s' <<'REMOTE'
 for d in /proc/[0-9]*; do
     c=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)
-    case "$c" in *skypluto-supervise*) kill -9 "$(basename $d)" 2>/dev/null;; esac
+    case "$c" in *skypluto-supervise*|*skypluto-autocal*) kill -9 "$(basename $d)" 2>/dev/null;; esac
 done
 for d in /proc/[0-9]*; do
     l=$(readlink "$d/exe" 2>/dev/null)
     case "$l" in *skypluto-ctl*|*skypluto-mask*|*iio_readdev*) kill -9 "$(basename $d)" 2>/dev/null;; esac
 done
 sleep 1
-for f in skypluto-ctl skypluto-mask autorun.sh skypluto-supervise.sh skypluto-autocal.sh skypluto-wfm.sh skypluto-cmd.sh; do
+for f in skypluto-ctl skypluto-mask autorun.sh skypluto-supervise.sh skypluto-wfm.sh skypluto-cmd.sh; do
     mv /mnt/jffs2/$f.new /mnt/jffs2/$f
 done
 sync

@@ -305,6 +305,7 @@ static int tone_analyze(const int16_t *buf, long nfr, double *fo, double *dev_kh
     return 1;
 }
 static double now_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+static long g_skipped = 0;                                                       // windows dropped because the processing fell behind (reported in every MASK line)
 // margin/shoulder/spectrum from mh and fmh -> MASK/SPEC/FLOOR block (same format as the single-shot mode + jumps + cov)
 static void report_block(const double *mh, const double *fmh, int g, double dev, long jumps, double cov, double *margin_out){
     double ref = 0;
@@ -313,14 +314,14 @@ static void report_block(const double *mh, const double *fmh, int g, double dev,
     double sh_sum = 0, fl_sum = 0; int nfl = 0; double margin = 1e9, at = 0;
     for (int k = 0; k < N; k++){
         double d = (bin_freq(k) - OFFSET) / 1e3, ad = fabs(d);
-        if (ad < 80.0 || ad > 170.0) continue;
+        if (ad < 74.0 || ad > 170.0) continue;
         double rel = 10.0 * log10(mh[k] / ref + 1e-30), m = mask_db(d) - rel;
         if (m < margin){ margin = m; at = d; }
         if (ad >= 130.0){ sh_sum += rel; fl_sum += 10.0 * log10(fmh[k] / ref + 1e-30); nfl++; }
     }
     double shoulder = nfl ? sh_sum / nfl : 0, floorv = nfl ? fl_sum / nfl : 0;
-    printf("MASK conclusive=%d margin=%+.1f at=%+.0f shoulder=%.1f floor=%.1f dev=%.1f g=%d jumps=%ld cov=%.2f\n",
-           (shoulder - floorv) >= 6.0, margin, at, shoulder, floorv, dev, g, jumps, cov);
+    printf("MASK conclusive=%d margin=%+.1f at=%+.0f shoulder=%.1f floor=%.1f dev=%.1f g=%d jumps=%ld cov=%.2f skipped=%ld\n",
+           (shoulder - floorv) >= 6.0, margin, at, shoulder, floorv, dev, g, jumps, cov, g_skipped);
     char sp[GRID + 1], fp[GRID + 1];
     for (int i = 0; i < GRID; i++){
         int k = (CBIN + i - GRID / 2) & (N - 1);
@@ -361,7 +362,7 @@ static int stream_main(long long txlo, int rx, const char *port, int gain, doubl
     sh("iio_attr -i -c ad9361-phy voltage%d hardwaregain %d >/dev/null 2>&1", ch, g); usleep(100000);
     // noise floor once: RX LO 30 MHz away from the carrier
     static double fmh[N];
-    sh("iio_attr -o -c ad9361-phy altvoltage0 frequency %lld >/dev/null 2>&1", txlo + 30000000LL - (long long)OFFSET); usleep(60000);
+    sh("iio_attr -o -c ad9361-phy altvoltage0 frequency %lld >/dev/null 2>&1", ((txlo + 30000000LL <= 5950000000LL) ? txlo + 30000000LL : txlo - 30000000LL) - (long long)OFFSET); usleep(60000);
     if (capture(rx, capfr, cap)){ printf("MASK error=vloer_opname\n"); goto fail; }
     maxhold_h(cap, capfr, fmh, HOP);
     sh("iio_attr -o -c ad9361-phy altvoltage0 frequency %lld >/dev/null 2>&1", txlo - (long long)OFFSET); usleep(250000);   // let the PLL lock
@@ -386,7 +387,7 @@ static int stream_main(long long txlo, int rx, const char *port, int gain, doubl
             pthread_cond_wait(&rdc.c, &rdc.m);
         }
         if (b >= 0){
-            for (int i = 0; i < NB; i++) if (rdc.st[i] == B_READY && i != b){ rdc.st[i] = B_FREE; nskip++; }   // skip the backlog
+            for (int i = 0; i < NB; i++) if (rdc.st[i] == B_READY && i != b){ rdc.st[i] = B_FREE; nskip++; g_skipped = nskip; }   // skip the backlog
             rdc.st[b] = B_BUSY;
         }
         pthread_mutex_unlock(&rdc.m);
@@ -417,12 +418,13 @@ static int stream_main(long long txlo, int rx, const char *port, int gain, doubl
         pthread_mutex_lock(&rdc.m); rdc.st[b] = B_FREE; pthread_cond_broadcast(&rdc.c); pthread_mutex_unlock(&rdc.m);
         lastseq = seqb; nproc++;
         double dt = now_s() - t0;                                   // adapt to processing time relative to real time
-        if (dt > 0.85 * interval && hop < 1024) hop += 128;
+        if (dt > 0.85 * interval && hop < 512) hop += 128;
         else if (dt < 0.55 * interval && hop > HOP) hop -= 128;
         (void)nf;
         if (seqb >= nwin) break;                                    // enough windows processed (window 0 was skipped; the rest of the stream is still drained)
     }
     fprintf(stderr, "stream: %ld vensters verwerkt, %ld overgeslagen (te traag), hop %d\n", nproc, nskip, hop);
+    if (nproc == 0){ printf("MASK error=stream\n"); fflush(stdout); }
     pthread_join(th, NULL);       // the reader thread runs until the end of the stream (iio_readdev stops after its -s samples) and then exits
     pclose(rdc.p);
     sh("iio_attr -i -c ad9361-phy voltage%d rf_port_select A_BALANCED >/dev/null 2>&1", ch);
@@ -841,7 +843,7 @@ int main(int argc, char **argv){
     maxhold(buf, frames, mh);
 
     // noise floor: carrier outside the RX filter
-    sh("iio_attr -o -c ad9361-phy altvoltage0 frequency %lld >/dev/null 2>&1", txlo + 30000000LL - (long long)OFFSET); usleep(60000);
+    sh("iio_attr -o -c ad9361-phy altvoltage0 frequency %lld >/dev/null 2>&1", ((txlo + 30000000LL <= 5950000000LL) ? txlo + 30000000LL : txlo - 30000000LL) - (long long)OFFSET); usleep(60000);
     if (capture(rx, frames, buf)){ printf("MASK error=vloer_opname\n"); goto restore_fail; }
     maxhold(buf, frames, fmh);
 
@@ -852,7 +854,7 @@ int main(int argc, char **argv){
     double sh_sum = 0, fl_sum = 0; int nfl = 0; double margin = 1e9, at = 0;
     for (int k = 0; k < N; k++){
         double d = (bin_freq(k) - OFFSET) / 1e3, ad = fabs(d);
-        if (ad < 80.0 || ad > 170.0) continue;
+        if (ad < 74.0 || ad > 170.0) continue;
         double rel = 10.0 * log10(mh[k] / ref + 1e-30), m = mask_db(d) - rel;
         if (m < margin){ margin = m; at = d; }
         if (ad >= 130.0){ sh_sum += rel; fl_sum += 10.0 * log10(fmh[k] / ref + 1e-30); nfl++; }

@@ -36,7 +36,7 @@ TWO24=16777216                      # 2^24 (PHASE_W)
 # NB: TX channels are OUTPUT -> always '-o' (otherwise iio_attr does not find them).
 lo()    { iio_attr -q -o -c "$PHY" altvoltage1 frequency "$1" >/dev/null; }
 rate()  { iio_attr -q -o -c "$PHY" voltage0 sampling_frequency "$1" >/dev/null; }
-atten() { iio_attr -q -o -c "$PHY" voltage0 hardwaregain "-$1" >/dev/null; }
+atten() { iio_attr -q -o -c "$PHY" voltage0 hardwaregain -- "-$1" >/dev/null; }
 
 # offset in Hz -> phase increment = round(Hz * 2^24 / l_clk), 32-bit two's complement
 # (l_clk = 12.288 MHz, NOT the baseband rate - the phase accumulator runs on l_clk)
