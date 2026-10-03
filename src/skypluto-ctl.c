@@ -1207,6 +1207,16 @@ static void handle(char *line){
         fprintf(stderr, "   -> vermogensmeter gekalibreerd: cal %.2f dB (bekend %.2f dBm)\n", pw_cal, known); fflush(stderr);
         return;
     }
+    // CAL: run the TX calibration (LO leakage, image) now, with the output muted (~2 s). Needs an open transmitter (ERR off otherwise) and no J/Y/Z measurement (ERR busy).
+    if (!strcmp(cmd,"CAL")){
+        if (tx_off || last_f <= 0){ tx_str("ERR off\n"); return; }
+        if (ir_pid > 0){ tx_str("ERR busy\n"); return; }
+        tx_str("OK\n");
+        if (!cal_hold) cal_hold_t = mono();
+        cal_hold = 1; cal_pending = 1; cal_retune = 0; cal_due = mono(); cal_failed = 0; cal_fail = 0;
+        fprintf(stderr, "   -> CAL: TX-kalibratie op verzoek\n"); fflush(stderr);
+        return;
+    }
     if (!strcmp(cmd,"X")){
         mk_n = 0; mk_i = 0; cmb_conc = 0; cmb_n = 0; cmb_margin = 0; cmb_sho = 0; cmb_flo = 0; cmb_dev = 0; guard_init = 1;
         tx_str("OK\n");
