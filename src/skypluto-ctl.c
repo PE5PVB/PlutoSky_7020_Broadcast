@@ -255,14 +255,17 @@ static void pw_conf_write(void){
     fprintf(f, "enable=%d\natten_db=%.2f\ncal_db=%.2f\n", pw_en, pw_att, pw_cal);
     fclose(f);
 }
+static int phy_write(const char *attr, const char *val);                  // direct sysfs write (defined further down)
 static void pw_set_gain(int g){
     if (g < 0) g = 0;
     if (g > 70) g = 70;
+    char v[16]; snprintf(v, sizeof v, "%d", g);
     char c[160]; snprintf(c, sizeof c, "iio_attr -q -i -c ad9361-phy voltage0 hardwaregain %d >/dev/null 2>&1", g);
-    if (system(c) == 0){ pw_gain = g; pw_ring_n = 0; pw_skip = 2; }
+    if (phy_write("in_voltage0_hardwaregain", v) == 0 || system(c) == 0){ pw_gain = g; pw_ring_n = 0; pw_skip = 2; }     // sysfs (~1 ms) first: a system() call blocks the main loop for ~100 ms
 }
 static void pw_rx1_init(void){                          // RX1: port A, manual gain
-    if (system("iio_attr -q -i -c ad9361-phy voltage0 rf_port_select A_BALANCED >/dev/null 2>&1; iio_attr -q -i -c ad9361-phy voltage0 gain_control_mode manual >/dev/null 2>&1") == 0) pw_inited = 1;
+    if ((phy_write("in_voltage0_rf_port_select", "A_BALANCED") == 0 && phy_write("in_voltage0_gain_control_mode", "manual") == 0) ||
+        system("iio_attr -q -i -c ad9361-phy voltage0 rf_port_select A_BALANCED >/dev/null 2>&1; iio_attr -q -i -c ad9361-phy voltage0 gain_control_mode manual >/dev/null 2>&1") == 0) pw_inited = 1;
     pw_set_gain(pw_gain);
 }
 // process an incoming measurement (counts^2): average over ~1 s and adjust the gain
@@ -1321,7 +1324,7 @@ static void web_conf_read(void){
 static void web_send(int fd, int code, const char *ctype, const char *body, size_t n, const char *extra){
     char h[320]; const char *st = code == 200 ? "OK" : code == 400 ? "Bad Request" : code == 401 ? "Unauthorized" : code == 403 ? "Forbidden" : "Not Found";
     int hl = snprintf(h, sizeof h, "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nCache-Control: no-store\r\nConnection: close\r\n%s\r\n", code, st, ctype, n, extra ? extra : "");
-    struct timeval tv; tv.tv_sec = 1; tv.tv_usec = 0; setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 250000; setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);     // a client that does not read must not stall the main loop (UART replies) for long
     int fl = fcntl(fd, F_GETFL); fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
     send(fd, h, (size_t)hl, MSG_NOSIGNAL);
     size_t o = 0; while (o < n){ ssize_t w = send(fd, body + o, n - o, MSG_NOSIGNAL); if (w <= 0) break; o += (size_t)w; }
