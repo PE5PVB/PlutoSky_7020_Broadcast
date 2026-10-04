@@ -13,7 +13,17 @@ settings kept in /mnt/jffs2 (skypluto-*.conf) are left alone.
 import gzip, hashlib, os, struct, sys, time, zlib
 
 FILES = ["skypluto-ctl", "skypluto-mask", "autorun.sh", "skypluto-supervise.sh", "skypluto-wfm.sh", "skypluto-cmd.sh"]
-PRODUCT = "PlutoSky_7020_Broadcast-1.02"
+def _product():
+    """PlutoSky_7020_Broadcast-<SW_VERSION of the daemon source>, so the ramdisk label cannot disagree with ?V"""
+    try:
+        import re
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "skypluto-ctl.c"), encoding="utf-8", errors="replace").read()
+        return "PlutoSky_7020_Broadcast-" + re.search(r'#define\s+SW_VERSION\s+"([^"]+)"', src).group(1)
+    except Exception:
+        return "PlutoSky_7020_Broadcast-1.02"
+
+
+PRODUCT = _product()
 
 S98 = b"""#!/bin/sh
 #
@@ -29,8 +39,12 @@ install_skypluto() {
 	grep -q " $JD " /proc/mounts || { echo "skypluto: $JD is not mounted, nothing installed" > /tmp/skypluto-install.log; return; }
 	[ "`cat $SRC/VERSION`" = "`cat $JD/skypluto.version 2> /dev/null`" ] && return
 	echo "Installing the PlutoSky 7020 Broadcast control software: `cat $SRC/VERSION`"
+	# stage every file first; the running installation is only touched when all of them were written (a full flash leaves it as it was)
 	for f in `cat $SRC/FILES`; do
-		cp $SRC/$f $JD/$f.new && chmod 700 $JD/$f.new && mv $JD/$f.new $JD/$f || { echo "skypluto: cannot install $f" > /tmp/skypluto-install.log; return; }
+		cp $SRC/$f $JD/$f.new && chmod 700 $JD/$f.new || { echo "skypluto: cannot stage $f (flash full?), nothing installed" > /tmp/skypluto-install.log; rm -f $JD/*.new; return; }
+	done
+	for f in `cat $SRC/FILES`; do
+		mv $JD/$f.new $JD/$f || { echo "skypluto: cannot install $f" > /tmp/skypluto-install.log; return; }
 	done
 	cp $SRC/VERSION $JD/skypluto.version
 	sync
@@ -121,6 +135,9 @@ def main():
     version = ("%s %s\n" % (PRODUCT, digest)).encode()
 
     add = []
+    for d in ("usr", "usr/share"):                                  # the unpacker creates no parent directories: make sure they exist
+        if d not in names:
+            add.append(entry(d, 0o040755, nlink=2))
     if "usr/share/skypluto" not in names:
         add.append(entry("usr/share/skypluto", 0o040755, nlink=2))
     for f in FILES:

@@ -1,7 +1,7 @@
 #!/bin/sh
 # skypluto-supervise.sh - keeps the control daemon (skypluto-ctl) alive.
 # Started by autorun.sh. If the daemon stops (crash or kill), this script cleans up leftover measurements (which hold the RX chain) and restarts the
-# daemon after 2 s; after 5 quick crashes in a row (< 10 s) it waits 30 s. The daemon CLOSES the transmitter on every start until the Pico tunes again.
+# daemon after 2 s; after 5 quick crashes in a row (< 10 s) it waits 30 s. After a restart of the daemon alone an open transmitter stays open (the daemon adopts it from /tmp/skypluto-tuned); a power cycle starts closed.
 # It also starts DHCP on eth0 when the cable is plugged in after boot. The log (/tmp/ctl.log, in RAM) is appended to and size-limited; /tmp/ctl_restarts.log counts the restarts.
 JD=/mnt/jffs2
 
@@ -11,8 +11,13 @@ W=$JD/dhcp-watch.log; nlog=0; [ -s $W ] && cp $W $W.prev     # keep the log of t
 wlog() { [ $nlog -lt 30 ] && echo "uptime $(cut -d. -f1 /proc/uptime) s: $1" >> $W; nlog=$((nlog + 1)); }     # events only, capped: it is written to flash
 (
     : > $W; wlog "dhcp watcher started"; lastc=x; noaddr=0
+    tick=0
     while true; do
         sleep 2
+        tick=$((tick + 1))
+        if [ $((tick % 30)) -eq 0 ] && [ -f /tmp/ctl.log ] && [ "$(wc -c < /tmp/ctl.log)" -gt 600000 ]; then     # the daemon keeps /tmp/ctl.log open (append): truncate in place, no rename
+            tail -c 200000 /tmp/ctl.log > /tmp/ctl.log.new && cat /tmp/ctl.log.new > /tmp/ctl.log; rm -f /tmp/ctl.log.new
+        fi
         ip link set eth0 up 2>/dev/null     # a failed 'ifup' at boot can leave eth0 down; a down interface has no readable carrier
         c=$(cat /sys/class/net/eth0/carrier 2>/dev/null)
         [ "$c" != "$lastc" ] && { wlog "eth0 carrier '${c:-?}'"; lastc=$c; }
@@ -21,7 +26,7 @@ wlog() { [ $nlog -lt 30 ] && echo "uptime $(cut -d. -f1 /proc/uptime) s: $1" >> 
         # a link but no address for 3 checks in a row (6 s): the stock udhcpc (if still around) did not get one, so replace it
         noaddr=$((noaddr + 1)); [ $noaddr -lt 3 ] && continue
         wlog "eth0 has a link but no address; stale udhcpc processes: $(ps | grep '[u]dhcpc' | wc -l)"
-        killall udhcpc 2>/dev/null; sleep 1
+        [ -f /var/run/udhcpc.eth0.pid ] && kill "$(cat /var/run/udhcpc.eth0.pid)" 2>/dev/null; sleep 1     # only the client of eth0
         udhcpc -R -n -p /var/run/udhcpc.eth0.pid -i eth0 -x hostname:pluto >/dev/null 2>&1
         wlog "udhcpc finished, address: $(ip addr show dev eth0 | grep 'inet ' | tr -s ' ' | cut -d' ' -f3)"
         noaddr=0
@@ -35,7 +40,7 @@ while true; do
         case "$l" in *skypluto-mask*|*iio_readdev*) kill -9 "$(basename $d)" 2>/dev/null;; esac
     done
     if [ -f /tmp/ctl.log ] && [ "$(wc -c < /tmp/ctl.log)" -gt 600000 ]; then
-        tail -c 200000 /tmp/ctl.log > /tmp/ctl.log.new && mv /tmp/ctl.log.new /tmp/ctl.log
+        tail -c 200000 /tmp/ctl.log > /tmp/ctl.log.new && cat /tmp/ctl.log.new > /tmp/ctl.log; rm -f /tmp/ctl.log.new
     fi
     t0=$(cut -d. -f1 /proc/uptime)
     $JD/skypluto-ctl >> /tmp/ctl.log 2>&1

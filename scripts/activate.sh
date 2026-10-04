@@ -3,6 +3,8 @@
 # activate.sh - runs ON THE PLUTO (started by install_on_pluto.bat) from /tmp/pkg:
 # installs the control software into the persistent flash (/mnt/jffs2) and restarts it.
 # An open transmitter stays open (the daemon adopts it); a closed one stays closed.
+# The new files are staged next to the old ones FIRST; the running software is only stopped when every file is in place, and it is
+# started again in every case, so a failure never leaves the Pluto without its control software.
 # =============================================================================
 cd /tmp/pkg || exit 1
 JD=/mnt/jffs2
@@ -18,6 +20,17 @@ for f in autorun.sh skypluto-supervise.sh skypluto-wfm.sh skypluto-cmd.sh; do
 done
 chmod +x $FILES
 
+echo "staging the new files in $JD ..."
+for f in $FILES; do
+    if ! { cp "$f" "$JD/$f.new" && chmod +x "$JD/$f.new"; }; then
+        echo "cannot write $JD/$f.new (flash full?): nothing was changed"
+        for g in $FILES; do rm -f "$JD/$g.new"; done
+        rm -rf /tmp/pkg
+        exit 1
+    fi
+done
+sync
+
 echo "stopping the running control software ..."
 for d in /proc/[0-9]*; do
     c=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)
@@ -30,8 +43,9 @@ done
 sleep 1
 
 echo "installing into $JD ..."
+rc=0
 for f in $FILES; do
-    cp "$f" "$JD/$f.new" && chmod +x "$JD/$f.new" && mv "$JD/$f.new" "$JD/$f" || { echo "cannot write $JD/$f"; exit 1; }
+    mv "$JD/$f.new" "$JD/$f" || { echo "cannot replace $JD/$f"; rc=1; }
 done
 sync
 
@@ -44,5 +58,9 @@ done
 echo "starting ..."
 nohup sh "$JD/skypluto-supervise.sh" > /dev/null 2>&1 < /dev/null &
 sleep 6
-"$JD/skypluto-ctl" -c "?V" || echo "the daemon did not answer yet (give it a few more seconds)"
+if ! "$JD/skypluto-ctl" -c "?V"; then
+    echo "the daemon did not answer: check /tmp/ctl.log on the Pluto"
+    rc=1
+fi
 rm -rf /tmp/pkg
+exit $rc

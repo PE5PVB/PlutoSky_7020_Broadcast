@@ -180,12 +180,12 @@ for the encoder's splash screen. The encoder stays silent until `#B 100`. `?B` r
 | `H <kHz>` | deviation ceiling (maximum) of the limiter, 20 … 100 |
 | `G 0/1` | mask guard off/on |
 | `X` | reset the mask monitor |
-| `J <s>`, `Y`, `Z <s>` | impulse response / carrier-bin / MPX capture measurements |
+| `J <s>`, `Y <s>`, `Z <s>` | impulse response / carrier-bin / MPX capture measurements |
 | `Q <dB>`, `QK <dBm>`, `QM 0/1`, `QG <dB\|A>` | power meter: attenuator value in dB (0…120), calibrate against a known power in dBm (settled signal present), meter off/on, hold the RX1 gain manually / back to automatic |
 
 | Query | Answer |
 |-------|--------|
-| `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.02 proto=2` |
+| `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.02 proto=2 ver=1.02 bit=B1D00018` (software version and bitstream id) |
 | `?S` | `en=1 f=107999998 p=-29.00 att=34.00 tx=on up=312 kdev=100` — state, frequency, level, attenuation, uptime |
 | `?P` | `set=-29.00 out=-29.00 att=34.00 trim=0.00 alc=hold` — set point and the automatic level control |
 | `?T` | `temp=39.5` — board temperature (°C) |
