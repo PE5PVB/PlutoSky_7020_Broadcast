@@ -147,7 +147,8 @@ module skypluto_interp #(
             // Slow update (1x per 2^LP_SHIFT): only compare+mux (short path).
             lp <= lp + 1'b1;
             if (lp == {LP_SHIFT{1'b0}}) begin
-                if (isum_r >  ACC_CLAMP)      acc_i <=  ACC_CLAMP;   // anti-windup
+                if (fcnt_r < 8'd4)            acc_i <=  acc_i;       // FIFO (almost) empty = no I2S: freeze the integrator, no wind-up during a loss
+                else if (isum_r >  ACC_CLAMP) acc_i <=  ACC_CLAMP;   // anti-windup
                 else if (isum_r < -ACC_CLAMP) acc_i <= -ACC_CLAMP;
                 else                          acc_i <=  isum_r;
                 if (corr_r >  RANGE)          step_dyn <= step + RANGE[FRAC-1:0];

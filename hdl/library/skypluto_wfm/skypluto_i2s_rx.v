@@ -141,7 +141,10 @@ module skypluto_i2s_rx #(
             // manual format
             if (man_en) begin
                 f_n <= (man_bits > DATA_W) ? DATA_W : (man_bits < 8'd4 ? DATA_W : man_bits);
-                f_m <= (man_mode == 2'd0) ? 8'd1 : (man_mode == 2'd1) ? 8'd0 : (slot_l - ((man_bits > DATA_W) ? DATA_W : man_bits));
+                // right-justified: the word of man_bits bits ends at the slot's end, so it starts slot_l - man_bits bits after the edge
+                // (also when it is wider than DATA_W: the top DATA_W bits are taken)
+                f_m <= (man_mode == 2'd0) ? 8'd1 : (man_mode == 2'd1) ? 8'd0 :
+                       (slot_l > ((man_bits < 8'd4) ? DATA_W : man_bits)) ? (slot_l - ((man_bits < 8'd4) ? DATA_W : man_bits)) : 8'd0;
             end
             // a word that starts on the WS edge (left-justified): the MSB is already on the data
             if (f_m == 8'd0) shreg <= {shreg[DATA_W-2:0], sd};

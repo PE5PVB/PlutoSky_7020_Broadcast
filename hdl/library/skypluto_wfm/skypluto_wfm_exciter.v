@@ -85,7 +85,7 @@ module skypluto_wfm_exciter #(
 
     wire signed [DC_W-1:0] dci_axi, dcq_axi;
     // conditioner (limiter + fade): settings (axi domain) and status (synchronized into the axi domain)
-    wire [23:0] lim_ceil_axi; wire lim_en_axi, fade_en_axi, clr_tog_axi;
+    wire [23:0] lim_ceil_axi; wire lim_en_axi, fade_en_axi, clr_tog_axi; wire [15:0] i2s_ctrl_axi;
     wire [31:0] st_gmin_a, st_events_a, st_inpeak_a, st_state_a, st_uf_a;
     wire [4:0]  dbg_sel_a;  wire [31:0] st_dbg_a;
     wire imp_en_axi; wire [23:0] imp_thr_axi; wire [31:0] st_imp_stamp_a, st_imp_count_a; wire [31:0] st_fmt_a;
@@ -135,7 +135,7 @@ module skypluto_wfm_exciter #(
     wire signed [DW-1:0] i2s_left, i2s_right;
     wire                 i2s_valid;
     wire [7:0] i2s_fmt_slot, i2s_fmt_bits; wire [1:0] i2s_fmt_mode;
-    wire [15:0] i2s_ctrl_axi; reg [15:0] ic_b0 = 0, ic_b1 = 0;
+    reg [15:0] ic_b0 = 0, ic_b1 = 0;
     always @(posedge i2s_in_bclk) begin ic_b0 <= i2s_ctrl_axi; ic_b1 <= ic_b0; end    // static; 2 flip-flops suffice
     skypluto_i2s_rx #(.DATA_W(DW), .WS_TO_MSB(1)) u_i2s (
         .bclk(i2s_in_bclk), .ws(i2s_in_lrclk), .sd(i2s_in_data),
@@ -283,7 +283,7 @@ module skypluto_wfm_exciter #(
         w_seq, {8'd0, w_out_q}, {8'd0, w_out_c},                             // 21 = window sequence number, 20 = peak after limiter (q), 19 = peak at modulator input (comp), 20 ms
         sc_dbg_wd, sc_dbg_state, ups_dbg_state,                              // 18 = watchdog {wd_idle,wd_fsm}, 17 = conditioner state, 16 = interp state
         ups_ovf, ups_take, d_hb,                                             // 15 = interp overflow pulses, 14 = samples taken, 13 = l_clk heartbeat
-        32'hB1D00017,                                                        // 12 = build id (identifies the bitstream)
+        32'hB1D00018,                                                        // 12 = build id (identifies the bitstream)
         ups_sat,                {8'd0, d_pk_comp},                           // 11 = FIR saturations, 10 = peak |interp output|
         {8'd0, d_pk_q},         sc_dbg_nz,                                   // 9 = peak |conditioner output|, 8 = x_new != 0 (count)
         sc_dbg_pops,            sc_dbg_pulls,                                // 7 = FIFO pops, 6 = pulls
