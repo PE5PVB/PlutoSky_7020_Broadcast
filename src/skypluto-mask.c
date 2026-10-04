@@ -32,7 +32,7 @@
 
 #define FS      3072000.0
 #define N       512
-#define HOP     384                     // hop 384 = 25 % overlap (Hann): ~1 dB less peak-sensitive than 256, 1.5x faster on the ARM
+#define HOP     256                     // hop 256 = 50 % overlap (Hann): no sample ever sits in a window dip (at hop 384 a short burst in the overlap centre was read ~17 dB low)
 #define OFFSET  504000.0               // carrier in the capture (RX LO = TX LO - 504 kHz) = bin 84: bins fall on k x 6 kHz
 #define CBIN    84
 #define GRID    57                      // output grid: k = -28..+28 -> -168..+168 kHz in 6 kHz steps
@@ -136,9 +136,9 @@ static long count_jumps(const int16_t *x, long frames){
     return n;
 }
 
-// 1 char per point: index v = round(-dB / 1.25) clamped to 0..61; 'A'..'Z' = 0..25, 'a'..'z' = 26..51, '0'..'9' = 52..61
+// 1 char per point: index v = floor(-dB / 1.25) clamped to 0..61; 'A'..'Z' = 0..25, 'a'..'z' = 26..51, '0'..'9' = 52..61
 static char encdb(double db){
-    int v = (int)floor(-db / 1.25 + 0.5); if (v < 0) v = 0; if (v > 61) v = 61;
+    int v = (int)floor(-db / 1.25); if (v < 0) v = 0; if (v > 61) v = 61;       // floor: the level is rounded UP (up to 1.25 dB), never flattering the margin
     return v < 26 ? 'A' + v : v < 52 ? 'a' + (v - 26) : '0' + (v - 52);
 }
 
@@ -146,7 +146,7 @@ static char encdb(double db){
 // skypluto-mask <tx_lo> <rx> <poort> <gain> <secs_floor/gain> <interval_s> <duration_s>
 // Sets up gain + noise floor ONCE, then reads <duration_s> seconds of uninterrupted IQ (reader thread + ring of buffers, so gap-free
 // as long as processing is faster than real time) and delivers a MASK/SPEC/FLOOR block every <interval_s> seconds with the max-hold of
-// EXACTLY that interval. Processing adapts the FFT hop (384..1024) so the ARM keeps up in real time; 'cov' = fraction of the samples
+// EXACTLY that interval. Processing adapts the FFT hop (256..384) so the ARM keeps up in real time; 'cov' = fraction of the samples
 // that fall inside an FFT window (1.00 = gap-free).  The phase-jump check (jumps) also counts across the window boundary.
 #include <pthread.h>
 // Ring of NB window buffers. The reader thread keeps writing without interruption (never waits for processing); if processing falls behind,
@@ -403,7 +403,7 @@ static int stream_main(long long txlo, int rx, const char *port, int gain, doubl
         long jumps = count_jumps_f(x, win_fr, pr, pi_, consecutive);
         pr = x[2*(win_fr-1)]; pi_ = x[2*(win_fr-1)+1];
         long nf = maxhold_h(x, win_fr, mh, hop);
-        double cov = (double)N / hop; if (cov > 1.0) cov = 1.0;
+        double cov = (double)(N / 2) / hop; if (cov > 1.0) cov = 1.0;     // 1.00 = at least 50 % overlap (a burst cannot hide); 0.67 at hop 384
         double dev = est_dev(x, 12288);                             // 4 ms is enough for a deviation indication (expensive atan2 per sample, so keep it short)
         if (dev > 150.0) jumps += 1000;                             // impossible deviation (max ~+-75 kHz): capture disturbed -> the daemon ignores this window
         double margin = 99;
@@ -418,13 +418,13 @@ static int stream_main(long long txlo, int rx, const char *port, int gain, doubl
         pthread_mutex_lock(&rdc.m); rdc.st[b] = B_FREE; pthread_cond_broadcast(&rdc.c); pthread_mutex_unlock(&rdc.m);
         lastseq = seqb; nproc++;
         double dt = now_s() - t0;                                   // adapt to processing time relative to real time
-        if (dt > 0.85 * interval && hop < 512) hop += 128;
-        else if (dt < 0.55 * interval && hop > HOP) hop -= 128;
+        if (dt > 0.85 * interval && hop < 384) hop += 64;
+        else if (dt < 0.55 * interval && hop > HOP) hop -= 64;
         (void)nf;
         if (seqb >= nwin) break;                                    // enough windows processed (window 0 was skipped; the rest of the stream is still drained)
     }
     fprintf(stderr, "stream: %ld vensters verwerkt, %ld overgeslagen (te traag), hop %d\n", nproc, nskip, hop);
-    if (nproc == 0){ printf("MASK error=stream\n"); fflush(stdout); }
+    if (nproc == 0 || lastseq < nwin){ printf("MASK error=stream\n"); fflush(stdout); }     // no window at all, or the stream stopped before the end
     pthread_join(th, NULL);       // the reader thread runs until the end of the stream (iio_readdev stops after its -s samples) and then exits
     pclose(rdc.p);
     sh("iio_attr -i -c ad9361-phy voltage%d rf_port_select A_BALANCED >/dev/null 2>&1", ch);
