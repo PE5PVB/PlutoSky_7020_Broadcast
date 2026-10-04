@@ -165,6 +165,7 @@ The **running max-hold over the last 300 s (about 1200 spectra, time-based)** is
 |---|---|
 | Deviation | `kdev` is set by the encoder (`K`); `kdev=` in `/mnt/jffs2/skypluto-lim.conf` (re-read every 10 s) is only the fallback until the first `K`, default 100 (0 dBFS = 75 kHz). Without an active limiter in the bitstream kdev is limited to 100 (75 kHz). The actual peak deviation is kdev × 0.75 kHz × the encoder's composite peak (e.g. kdev 92 and a ceiling of 90 % gives ~62 kHz). |
 | Digital level | fixed full scale (65535, best DAC SNR) |
+| Green LED | owned by the daemon (the kernel's `tx-active` trigger is switched off): off = transmitter closed, blinking 2 Hz = tuning/calibrating (output muted), on = on the air (open, not calibrating, not muted). A failed calibration (`cal=fail`) leaves it off. |
 | Offset | fixed 0 (zero-IF, cleanest) |
 | Calibration | temperature-following, **fixed** threshold of 8 °C with 60 s debounce; no protocol commands. Only on sustained drift (typically once, while warming up); a calibration interrupts the carrier very briefly. |
 | **Level control (ALC)** | automatic. As soon as a level is set, the Pluto takes a **reference** via the internal TX_MONITOR and then corrects drift every ~20 s via the attenuation: max. ±3 dB, 0.25 dB steps, smooth (no carrier interruption). |

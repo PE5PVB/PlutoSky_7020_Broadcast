@@ -135,6 +135,7 @@ Notes:
    web settings are volatile; with an encoder connected, the encoder's stored settings win after every re-sync.
 4. A restart of just the daemon (an update, a crash) leaves the RF **on**; a power cycle always starts closed.
 5. The Pluto's clock has no battery: after a reboot it reads 1970. This does not affect operation.
+6. The **green LED** shows the transmitter state: **off** = closed (no RF), **blinking** (2 Hz) = tuning or calibrating (the output is muted), **on** = really on the air.
 
 ---
 
