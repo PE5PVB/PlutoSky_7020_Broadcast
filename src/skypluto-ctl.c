@@ -81,6 +81,10 @@
 #define R_IMPS       0x48              // l_clk counter at the last impulse (ro)
 #define R_IMPN       0x4C              // number of impulses (ro)
 #define R_FMT        0x50              // I2S format (ro): [17:16] alignment (0 I2S, 1 LJ, 2 RJ), [15:8] slot length (BCLKs per WS half period), [7:0] word width
+#define R_DCI        0x18              // digital DC offset on I (signed 12 bit, 16-bit sample LSBs): LO-leakage nulling
+#define R_DCQ        0x1C              // digital DC offset on Q
+#define R_QGAIN      0x58              // Q gain correction (signed 18 bit, units 2^-18) - bitstream B1D00019 and later
+#define R_QSKEW      0x5C              // I/Q phase correction (signed 18 bit, 2^-18 rad)
 #define R_I2SCTRL    0x54              // manual I2S format (rw): [0] on, [2:1] alignment, [15:8] word width; 0 = automatic
 #define TCP_PORT     5555              // TCP console (localhost)
 #define SW_VERSION   "1.02"            // software version of this release (also in ?V, the SD-card image and the README)
@@ -109,7 +113,12 @@ static inline void      wr(unsigned off,uint32_t v){ *(volatile uint32_t*)(g_map
 static double mono(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return ts.tv_sec + ts.tv_nsec*1e-9; }
 
 // ---- state ----------------------------------------------------------------
-static long long last_f   = -1;        // last applied LO (Hz)
+static long long last_f   = -1;        // the carrier frequency of the last tune (Hz); the TX LO sits lowif_khz below it
+// Low-IF: the TX LO is programmed lowif_khz BELOW the carrier and the modulator's NCO is offset by the same amount, so the carrier stays on the tuned frequency while the LO leakage (and the
+// I/Q image) move away from it. 0 = zero-IF. dc/gain/skew: digital I/Q corrections for the analog LO leakage and I/Q imbalance (gain/skew need bitstream B1D00019+). Kept in IQ_CONF.
+#define IQ_CONF "/mnt/jffs2/skypluto-iq.conf"
+static double lowif_khz = 0.0;
+static int    iq_dc_i = 0, iq_dc_q = 0, iq_gain_ppm = 0, iq_skew_ppm = 0, has_iq = 0;
 static double    applied_a= -1.0;      // attenuation that is on the chip NOW (dB)
 static double    want_dbm = 0.0;       // requested setpoint
 static double    nom_a    = 0.0;       // nominal attenuation for that setpoint
@@ -516,6 +525,45 @@ static void apply_atten(double total){          // idempotent + smooth
 static void apply_current(void){                // what should be on the chip now
     apply_atten((tx_off || cal_hold) ? ATTEN_MUTE : nom_a + trim);
 }
+static long long lowif_hz(void){ return (long long)llround(lowif_khz * 1000.0); }
+static long long lo_freq(void){ return last_f - lowif_hz(); }                   // what the TX LO has to be programmed to
+static void nco_offset_apply(void){                                              // the NCO runs at 12.288 MHz with a 24-bit phase: inc = Hz * 2^24 / 12288000
+    long long inc = (long long)llround(lowif_khz * 1000.0 * 16777216.0 / 12288000.0);
+    wr(R_OFFSET, (uint32_t)(inc & 0xFFFFFF));
+}
+static uint32_t iq_level(void){                                                   // headroom for the corrections (a clipped constant-envelope carrier would make harmonics)
+    double mag = (double)(abs(iq_dc_i) > abs(iq_dc_q) ? abs(iq_dc_i) : abs(iq_dc_q)) / 32767.0 + fabs(iq_gain_ppm) * 1e-6 + fabs(iq_skew_ppm) * 1e-6;
+    if (mag == 0.0) return 65535;
+    double lv = 65535.0 * (1.0 - 1.05 * mag - 0.002); if (lv > 65535.0) lv = 65535.0; if (lv < 50000.0) lv = 50000.0;
+    return (uint32_t)lv;
+}
+static void iq_apply(void){
+    wr(R_DCI, (uint32_t)(iq_dc_i & 0xFFF)); wr(R_DCQ, (uint32_t)(iq_dc_q & 0xFFF));
+    if (has_iq){
+        long long g = (long long)llround(iq_gain_ppm * 262144.0 / 1e6), q = (long long)llround(iq_skew_ppm * 262144.0 / 1e6);
+        wr(R_QGAIN, (uint32_t)(g & 0x3FFFF)); wr(R_QSKEW, (uint32_t)(q & 0x3FFFF));
+    }
+    wr(R_LEVEL, iq_level());
+}
+static void iq_conf_write(void){
+    FILE *f = fopen(IQ_CONF ".new", "w"); if (!f) return;
+    fprintf(f, "# digital I/Q corrections and low-IF offset (written by the DC / IQ / OFS commands)\n");
+    fprintf(f, "dc_i=%d\ndc_q=%d\nqgain_ppm=%d\nqskew_ppm=%d\nlowif_khz=%.3f\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz);
+    fclose(f); rename(IQ_CONF ".new", IQ_CONF);
+}
+static void iq_conf_read(void){
+    FILE *f = fopen(IQ_CONF, "r"); if (!f) return;
+    char ln[96];
+    while (fgets(ln, sizeof ln, f)){
+        int v; double d;
+        if (!strncmp(ln, "dc_i=", 5)){ v = atoi(ln + 5); if (v >= -2047 && v <= 2047) iq_dc_i = v; }
+        else if (!strncmp(ln, "dc_q=", 5)){ v = atoi(ln + 5); if (v >= -2047 && v <= 2047) iq_dc_q = v; }
+        else if (!strncmp(ln, "qgain_ppm=", 10)){ v = atoi(ln + 10); if (abs(v) <= 400000) iq_gain_ppm = v; }
+        else if (!strncmp(ln, "qskew_ppm=", 10)){ v = atoi(ln + 10); if (abs(v) <= 400000) iq_skew_ppm = v; }
+        else if (!strncmp(ln, "lowif_khz=", 10)){ d = atof(ln + 10); if (isfinite(d) && fabs(d) <= 250.0) lowif_khz = d; }
+    }
+    fclose(f);
+}
 // TX-LO (altvoltage1) of the AD9361 off/on: E 0 = really switch the synthesizer off (no carrier leakage; maximum attenuation alone
 // still let a weak carrier through). TX1 and TX2 share the same TX-LO.  On: switch the LO on and reprogram the frequency
 // (lets the PLL lock); the attenuation is then still at maximum and is only restored afterwards.
@@ -524,9 +572,9 @@ static void tx_lo_power(int on){
     if (on){
         if (phy_write("out_altvoltage1_TX_LO_powerdown", "0") == 0 || system("iio_attr -q -o -c ad9361-phy altvoltage1 powerdown 0 >/dev/null 2>&1") == 0) lo_pd = 0;
         if (last_f > 0){
-            char c[160], fv[24]; snprintf(fv, sizeof fv, "%lld", last_f);
-            snprintf(c, sizeof c, "iio_attr -q -o -c ad9361-phy altvoltage1 frequency %lld >/dev/null 2>&1", last_f);
-            if (phy_write("out_altvoltage1_TX_LO_frequency", fv) != 0 && system(c) != 0){ fprintf(stderr, "   !! TX-LO hertune na E 1 MISLUKT (%lld)\n", last_f); fflush(stderr); }
+            char c[160], fv[24]; snprintf(fv, sizeof fv, "%lld", lo_freq());
+            snprintf(c, sizeof c, "iio_attr -q -o -c ad9361-phy altvoltage1 frequency %lld >/dev/null 2>&1", lo_freq());
+            if (phy_write("out_altvoltage1_TX_LO_frequency", fv) != 0 && system(c) != 0){ fprintf(stderr, "   !! TX-LO hertune na E 1 MISLUKT (%lld)\n", lo_freq()); fflush(stderr); }
         }
     } else {
         if (lo_pd) return;
@@ -971,6 +1019,10 @@ static void handle(char *line){
 
     // ---------- queries ----------
     if (cmd[0]=='?'){
+        if (!strcmp(cmd,"?IQ")){
+            snprintf(buf, sizeof buf, "dci=%d dcq=%d gain=%d skew=%d ofs=%.3f lo=%lld hw=%d\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, lo_freq(), has_iq);
+            tx_str(buf); return;
+        }
         if (!strcmp(cmd,"?V")){
             char bid[16] = "-"; if (has_dbg) snprintf(bid, sizeof bid, "%08X", dbg_rd(12));
             snprintf(buf,sizeof buf,"magic=%08X fw=PlutoSky_7020_Broadcast-" SW_VERSION " proto=2 ver=" SW_VERSION " bit=%s\n", rd(R_MAGIC), bid);
@@ -1127,7 +1179,7 @@ static void handle(char *line){
         long long d = hz - last_f; if (d < 0) d = -d;
         if (tuned && last_f > 0 && d <= 10){ tx_str("OK\n"); return; }   // unchanged (PLL rounds to ~2 Hz)
         char c[160];
-        snprintf(c,sizeof c,"iio_attr -q -o -c ad9361-phy altvoltage1 frequency %lld >/dev/null 2>&1", hz);
+        snprintf(c,sizeof c,"iio_attr -q -o -c ad9361-phy altvoltage1 frequency %lld >/dev/null 2>&1", hz - lowif_hz());
         if (tx_off){                                    // transmitter closed (TX-LO off): remember; the tune opens the transmitter if the Pico wants E 1
             last_f = hz; tuned = 1; tx_str("OK\n");
             fprintf(stderr,"   -> F onthouden %lld (tune ontvangen)\n", hz); fflush(stderr);
@@ -1148,6 +1200,39 @@ static void handle(char *line){
           if (phy_write("out_voltage0_hardwaregain", mv) == 0){ applied_a = ATTEN_MUTE; phy_write("out_voltage1_hardwaregain", mv); applied_a2 = ATTEN_MUTE; } }   // mute at once
         fprintf(stderr,"   -> F %lld ontvangen: zender dicht, hertune + kalibratie, daarna weer open\n", hz); fflush(stderr);
         return;
+    }
+    // OFS <kHz>: low-IF offset (-250..250, 0 = zero-IF): the TX LO sits <kHz> below the carrier and the modulator's NCO is offset by the same amount, so the carrier stays where it is while the LO leakage and the I/Q
+    // image move away from it. While the transmitter is open the output is muted, the NCO and the LO are shifted and the TX is calibrated at the new LO (like a tune). Stored in the iq conf.
+    if (!strcmp(cmd,"OFS")){
+        char *e; double v = strtod(arg, &e);
+        if (e == arg || !isfinite(v) || v < -250.0 || v > 250.0){ tx_str("ERR range\n"); return; }
+        if (fabs(v - lowif_khz) < 0.0005){ tx_str("OK\n"); return; }
+        if (!tx_off && (ir_pid > 0 || cal_pid > 0)){ tx_str("ERR busy\n"); return; }
+        tx_str("OK\n");
+        if (!tx_off){ char mv[16]; snprintf(mv, sizeof mv, "-%.2f", ATTEN_MUTE);
+          if (phy_write("out_voltage0_hardwaregain", mv) == 0){ applied_a = ATTEN_MUTE; phy_write("out_voltage1_hardwaregain", mv); applied_a2 = ATTEN_MUTE; } }   // mute at once
+        lowif_khz = v; nco_offset_apply(); iq_conf_write();
+        if (!tx_off){
+            alc_reset(3.0);
+            if (!cal_hold) cal_hold_t = mono();
+            cal_hold = 1; cal_pending = 1; if (cal_retune < 1) cal_retune = 1; cal_due = mono(); cal_failed = 0; cal_fail = 0;
+        }
+        fprintf(stderr, "   -> low-IF offset %.3f kHz (TX-LO %lld Hz, draaggolf %lld Hz)\n", lowif_khz, lo_freq(), last_f); fflush(stderr);
+        return;
+    }
+    // DC <i> <q>: digital DC offset on I and Q in 16-bit sample LSBs (-2047..2047) to cancel the analog LO leakage. Kept in the iq conf.
+    if (!strcmp(cmd,"DC")){
+        int a, b;
+        if (sscanf(arg, "%d %d", &a, &b) != 2 || a < -2047 || a > 2047 || b < -2047 || b > 2047){ tx_str("ERR range\n"); return; }
+        iq_dc_i = a; iq_dc_q = b; iq_apply(); iq_conf_write(); tx_str("OK\n"); return;
+    }
+    // IQ <gain_ppm> <skew_ppm>: cancel the analog I/Q imbalance digitally: Q gets <gain> (parts per million, a gain error) of itself and <skew> (parts per million of a radian: the phase error) of I added.
+    // -400000..400000; needs a bitstream with the correction (B1D00019 and later, else ERR nobit). Kept in the iq conf.
+    if (!strcmp(cmd,"IQ")){
+        int g, k;
+        if (sscanf(arg, "%d %d", &g, &k) != 2 || abs(g) > 400000 || abs(k) > 400000){ tx_str("ERR range\n"); return; }
+        if (!has_iq){ tx_str("ERR nobit\n"); return; }
+        iq_gain_ppm = g; iq_skew_ppm = k; iq_apply(); iq_conf_write(); tx_str("OK\n"); return;
     }
     // X: restart the mask monitor (clear the 5-min max-hold and statistics: ?W/?N empty, ?M counts from zero).
     // J <secs> [pct]: start an impulse measurement (the mask monitor is paused). Meanwhile the Pico puts one impulse per second in the I2S stream
@@ -1421,9 +1506,9 @@ static void web_handle(struct wconn *c){
             else { const char *r = web_cmd(body); web_send(c->fd, 200, "text/plain; charset=utf-8", r, strlen(r), NULL); }
         }
         else if (!post && !strcmp(path, "/api/state")){
-            static const char *k[] = {"S","T","P","E","V","M","D","B","J","R","O"}; static const char *q[] = {"?S","?T","?P","?E","?V","?M","?D","?B","?J","?R","?O"};
+            static const char *k[] = {"S","T","P","E","V","M","D","B","J","R","O","IQ"}; static const char *q[] = {"?S","?T","?P","?E","?V","?M","?D","?B","?J","?R","?O","?IQ"};
             int n = 0; out[n++] = '{';
-            for (int i = 0; i < 11; i++){ n = jadd(out, n, (int)sizeof out, k[i], web_cmd(q[i])); out[n++] = ','; }
+            for (int i = 0; i < 12; i++){ n = jadd(out, n, (int)sizeof out, k[i], web_cmd(q[i])); out[n++] = ','; }
             char idb[16] = "-"; if (has_dbg){ snprintf(idb, sizeof idb, "%08X", dbg_rd(12)); }
             n = jadd(out, n, (int)sizeof out, "id", idb); out[n++] = ',';
             n += snprintf(out + n, sizeof out - (size_t)n, "\"link\":{\"age\":%.1f,\"cmds\":%lu,\"boot\":", pico_last_rx < 0 ? -1.0 : mono() - pico_last_rx, pico_cmds);
@@ -1518,7 +1603,9 @@ int main(int argc, char **argv){
     fprintf(stderr,"skypluto-ctl 1.02: WFM magic=%08X (verwacht 57464D32)\n", rd(R_MAGIC));
 
     // fixed modulation settings
-    wr(R_LEVEL, LEVEL_FIXED); wr(R_OFFSET, 0);
+    uint32_t off_hw = rd(R_OFFSET) & 0xFFFFFF;                         // the NCO offset a running transmitter has (the register survives a restart of the daemon)
+    { uint32_t id = has_dbg ? dbg_rd(12) : 0; has_iq = (id >= 0xB1D00019u && id <= 0xB1D000FFu); }
+    iq_conf_read(); iq_apply();
     pw_conf_read();
     lim_conf_read(); lim_probe(); lim_apply();          // kdev (from conf, without limiter never > 100) + limiter ceiling
     // The transmitter starts CLOSED (tx_off = 1): attenuation at maximum and TX-LO off, until the Pico sends a tune (F) (and E is not 0).
@@ -1540,9 +1627,11 @@ int main(int argc, char **argv){
         if (tf){ if (fscanf(tf, "%lld", &ff) != 1) ff = 0; fclose(tf); }
         if (ff >= 70000000LL && applied_a >= 0 && applied_a < ATTEN_MUTE - 1.0){
             last_f = ff; tuned = 1; want_on = 1; tx_off = 0; lo_pd = 0;
+            { int32_t inc = (off_hw & 0x800000) ? (int32_t)(off_hw | 0xFF000000u) : (int32_t)off_hw;        // the LO is where the running NCO offset says it is
+              lowif_khz = (double)inc * 12288000.0 / 16777216.0 / 1000.0; if (fabs(lowif_khz) < 0.0005) lowif_khz = 0.0; }
             fprintf(stderr, "skypluto-ctl: herstart: zender blijft OPEN (f=%lld, atten %.2f dB)\n", ff, applied_a); fflush(stderr);
             apply_current();
-        } else { apply_current(); tx_lo_power(0); }       // cold start: transmitter closed: atten max + TX-LO off (no RF until the first F from the Pico)
+        } else { nco_offset_apply(); apply_current(); tx_lo_power(0); }       // cold start: transmitter closed: atten max + TX-LO off (no RF until the first F from the Pico); the stored low-IF offset applies
     }
     find_temp_path(); refresh_temp(); temp_last = mono();
     fprintf(stderr,"skypluto-ctl: zender %s; f=%lld atten=%.2f temp=%.1f (%s)\n", tx_off ? "DICHT tot tune (F) van de Pico" : "OPEN (overgenomen)", last_f, applied_a, temp_mC/1000.0,
@@ -1694,11 +1783,11 @@ int main(int argc, char **argv){
                 char cs[900], mt[160] = "";
                 if (phy_find()[0]){                               // direct sysfs writes: no gap between the retune and the calibration; && chain: any failure shows in the exit status
                     if (cal_retune == 2) snprintf(mt, sizeof mt, "echo 0 > $D/out_altvoltage1_TX_LO_powerdown && ");
-                    char fq[96] = ""; if (cal_retune) snprintf(fq, sizeof fq, "echo %lld > $D/out_altvoltage1_TX_LO_frequency && ", last_f);
+                    char fq[96] = ""; if (cal_retune) snprintf(fq, sizeof fq, "echo %lld > $D/out_altvoltage1_TX_LO_frequency && ", lo_freq());
                     snprintf(cs, sizeof cs, "D=%s; echo -%.2f > $D/out_voltage0_hardwaregain && echo -%.2f > $D/out_voltage1_hardwaregain && %s%secho rf_dc_offs > $D/calib_mode && echo tx_quad > $D/calib_mode",
                              phy_dir, ATTEN_MUTE, ATTEN_MUTE, mt, fq);
                 } else {
-                    if (cal_retune) snprintf(mt, sizeof mt, "iio_attr -q -o -c ad9361-phy altvoltage1 frequency %lld >/dev/null 2>&1 && ", last_f);
+                    if (cal_retune) snprintf(mt, sizeof mt, "iio_attr -q -o -c ad9361-phy altvoltage1 frequency %lld >/dev/null 2>&1 && ", lo_freq());
                     snprintf(cs, sizeof cs,
                              "iio_attr -q -o -c ad9361-phy voltage0 hardwaregain -- -%.2f >/dev/null 2>&1 && iio_attr -q -o -c ad9361-phy voltage1 hardwaregain -- -%.2f >/dev/null 2>&1 && "
                              "%siio_attr -d -q ad9361-phy calib_mode rf_dc_offs >/dev/null 2>&1 && iio_attr -d -q ad9361-phy calib_mode tx_quad >/dev/null 2>&1",
@@ -1707,7 +1796,7 @@ int main(int argc, char **argv){
                 pid_t cp = fork();
                 if (cp == 0){ prctl(PR_SET_PDEATHSIG, SIGKILL); execl("/bin/sh", "sh", "-c", cs, (char *)NULL); _exit(127); }
                 if (cp > 0){
-                    cal_pid = cp; cal_t0 = now; cal_pending = 0; cal_try = 0; cal_expect_f = cal_retune ? last_f : 0; if (cal_retune == 2) lo_pd = 0; cal_retune = 0;
+                    cal_pid = cp; cal_t0 = now; cal_pending = 0; cal_try = 0; cal_expect_f = cal_retune ? lo_freq() : 0; if (cal_retune == 2) lo_pd = 0; cal_retune = 0;
                     applied_a = ATTEN_MUTE; applied_a2 = ATTEN_MUTE;      // the child mutes TX1 and TX2 first
                     fprintf(stderr, "   -> TX-kalibratie gestart (f=%lld, zender dicht)\n", last_f); fflush(stderr);
                 } else if (++cal_try <= 3) cal_due = now + 2.0;
