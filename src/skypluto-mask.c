@@ -726,7 +726,7 @@ static int lo_main(long long txlo, int rx, const char *port, double secs, const 
     long remaining = (long)(FS * secs);
     while (remaining > 0){
         long frames = remaining > (long)(FS * LO_SEG_S) ? (long)(FS * LO_SEG_S) : remaining; remaining -= frames;
-        char c[200]; snprintf(c, sizeof c, "iio_readdev -b 65536 -s %ld cf-ad9361-lpc voltage2 voltage3 2>/dev/null", frames);
+        char c[200]; snprintf(c, sizeof c, "iio_readdev -b 65536 -s %ld cf-ad9361-lpc voltage%d voltage%d 2>/dev/null", frames, rx == 2 ? 2 : 0, rx == 2 ? 3 : 1);   // the RX the measurement is set up on
         FILE *p = popen(c, "r"); if (!p) break;
         for (;;){
             size_t got = fread(w, 2 * sizeof(int16_t), (size_t)wf, p);
