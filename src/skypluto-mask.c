@@ -696,7 +696,7 @@ static int ir_main(long long txlo, int rx, const char *port, double secs, const 
 #define LO_SPAN     1600             // bins on either side of the carrier in the spectrum files (+-150 kHz)
 #define LO_SEG_S    150.0            // maximum duration per iio_readdev (2 channels: 12.3 MB/s -> 4 GiB after ~350 s)
 static int lo_main(long long txlo, int rx, const char *port, double secs, const char *prefix, int fixgain){
-    if (rx != 2){ fprintf(stderr, "lo: alleen rx=2\n"); return 2; }
+    if (rx != 1 && rx != 2){ fprintf(stderr, "lo: rx=1 (e.g. port TX_MONITOR1 = TX1) or rx=2\n"); return 2; }
     int ch = rx - 1;
     sh("iio_attr -i -c ad9361-phy voltage%d rf_port_select %s >/dev/null 2>&1", ch, port);
     sh("iio_attr -i -c ad9361-phy voltage%d gain_control_mode manual >/dev/null 2>&1", ch);
