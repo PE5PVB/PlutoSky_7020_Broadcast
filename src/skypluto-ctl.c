@@ -834,6 +834,25 @@ static void mask_drain(void){
         break;
     }
 }
+// Green LED (led0:green): off = transmitter closed, blinking (2 Hz) = tuning / calibrating (output muted), on = really on the air.
+// The kernel's 'tx-active' trigger is switched off at the first call so that the daemon owns the LED.
+static void led_poll(double now){
+    static int fd = -2, last = -1;
+    if (fd == -2){
+        int tf = open("/sys/class/leds/led0:green/trigger", O_WRONLY);
+        if (tf >= 0){ if (write(tf, "none", 4) < 0){} close(tf); }
+        fd = open("/sys/class/leds/led0:green/brightness", O_WRONLY);
+    }
+    if (fd < 0) return;
+    int busy = cal_hold || cal_pending || cal_pid > 0;
+    int on;
+    if (tx_off) on = 0;
+    else if (busy) on = ((long)(now * 4.0)) & 1;
+    else if (cal_failed || applied_a >= ATTEN_MUTE - 0.1) on = 0;       // the output stays muted: not on the air
+    else on = 1;
+    if (on != last){ if (write(fd, on ? "1" : "0", 1) < 0){} last = on; }
+}
+
 static void measure_poll(void){
     if (m_pid <= 0) return;
     for (;;){
@@ -1596,6 +1615,7 @@ int main(int argc, char **argv){
           if (now - h_log >= 60.0){ h_log = now; fprintf(stderr,"   .. max verwerkingstijd tot nu: %.1f ms\n", h_max*1000.0); fflush(stderr); } }
         measure_poll();
         web_poll();
+        led_poll(now);
         ceil_ramp();
         if (pw_en){                                                        // power meter: initialise RX1; without a mask stream a short capture of its own
             if (!pw_inited && now >= pw_next){ pw_next = now + 5.0; pw_rx1_init(); }
