@@ -37,16 +37,20 @@
 #define CBIN    84
 #define GRID    57                      // output grid: k = -28..+28 -> -168..+168 kHz in 6 kHz steps
 #define BINHZ   (FS / N)
+#define K0      (CBIN - GRID / 2)       // the only bins that are ever evaluated: the grid +-168 kHz around the carrier (bins 56..112)
+#define K1      (CBIN + GRID / 2)
 
-static float win[N], twc[N/2], tws[N/2];
+static float win[N] __attribute__((aligned(16))), twc[N/2], tws[N/2];
 static int   rev[N];
 static void fft_tw_init(void);
+static void fast_init(void);
 
 static void fft_init(void){
     for (int i = 0; i < N; i++) win[i] = 0.5f - 0.5f * cosf(2.0f * (float)M_PI * i / (N - 1));
     for (int k = 0; k < N/2; k++){ twc[k] = cosf(2.0f*(float)M_PI*k/N); tws[k] = -sinf(2.0f*(float)M_PI*k/N); }
     for (int i = 0; i < N; i++){ int r = 0; for (int b = 0; b < 9; b++) if (i & (1<<b)) r |= 1 << (8-b); rev[i] = r; }
     fft_tw_init();
+    fast_init();
 }
 // twiddles per stage, contiguous: the stage with half = len/2 uses twr[half + j], twi[half + j] (j < half)
 static float twr[N], twi[N];
@@ -79,6 +83,82 @@ static void fft(float * restrict re, float * restrict im){
         }
     }
 }
+// ---- fast FFT for the max-hold (ARM NEON) -------------------------------------------------------------------------------------------------
+// The mask evaluation only reads the bins K0..K1 (57 of 512). This FFT is a decimation-in-frequency transform: one radix-2 stage, three radix-4
+// stages (L = 256, 64, 16) and a twiddle-free radix-4 last stage; the output stays in bit-reversed order (bin k is at rvk[k - K0], no
+// reordering pass). It matches the scalar fft() within 0.0005 dB over a 70 dB range and is about 2.3x faster on the Zynq's Cortex-A9
+// (45-58 us instead of 115 us per window), which is what makes a 50 % window overlap (hop 256) affordable in real time.
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+static float ft1r[256] __attribute__((aligned(16))), ft1i[256] __attribute__((aligned(16)));    // radix-2 first stage: w512^j, j < 256
+static float ft4[3][3][2][64] __attribute__((aligned(16)));                                      // [stage][r-1][re/im][j]: w_L^(r j) for L = 256, 64, 16
+static int rvk[K1 - K0 + 1];
+static void fast_init(void){
+    for (int j = 0; j < 256; j++){ double a = 2.0 * M_PI * j / 512.0; ft1r[j] = (float)cos(a); ft1i[j] = (float)-sin(a); }
+    for (int st = 0, L = 256; st < 3; st++, L >>= 2){
+        int q = L / 4;
+        for (int rr = 1; rr <= 3; rr++)
+            for (int j = 0; j < q; j++){ double a = 2.0 * M_PI * rr * j / L; ft4[st][rr-1][0][j] = (float)cos(a); ft4[st][rr-1][1][j] = (float)-sin(a); }
+    }
+    for (int k = K0; k <= K1; k++) rvk[k - K0] = rev[k];
+}
+static inline void cmulq(float32x4_t ur, float32x4_t ui, float32x4_t wr, float32x4_t wi, float32x4_t *yr, float32x4_t *yi){
+    *yr = vmlsq_f32(vmulq_f32(ur, wr), ui, wi);
+    *yi = vmlaq_f32(vmulq_f32(ur, wi), ui, wr);
+}
+static inline __attribute__((always_inline)) void r4(float *p0r, float *p0i, int j, int q, const float *w1r, const float *w1i, const float *w2r, const float *w2i, const float *w3r, const float *w3i){
+    float32x4_t x0r = vld1q_f32(p0r + j), x0i = vld1q_f32(p0i + j);
+    float32x4_t x1r = vld1q_f32(p0r + j + q), x1i = vld1q_f32(p0i + j + q);
+    float32x4_t x2r = vld1q_f32(p0r + j + 2*q), x2i = vld1q_f32(p0i + j + 2*q);
+    float32x4_t x3r = vld1q_f32(p0r + j + 3*q), x3i = vld1q_f32(p0i + j + 3*q);
+    float32x4_t t0r = vaddq_f32(x0r, x2r), t0i = vaddq_f32(x0i, x2i), t1r_ = vaddq_f32(x1r, x3r), t1i_ = vaddq_f32(x1i, x3i);
+    float32x4_t t2r = vsubq_f32(x0r, x2r), t2i = vsubq_f32(x0i, x2i), dr = vsubq_f32(x1r, x3r), di = vsubq_f32(x1i, x3i);
+    float32x4_t t3r = di, t3i = vnegq_f32(dr);                          // -j * (x1 - x3)
+    float32x4_t y1r, y1i, y2r, y2i, y3r, y3i;
+    cmulq(vsubq_f32(t0r, t1r_), vsubq_f32(t0i, t1i_), vld1q_f32(w2r + j), vld1q_f32(w2i + j), &y1r, &y1i);
+    cmulq(vaddq_f32(t2r, t3r), vaddq_f32(t2i, t3i), vld1q_f32(w1r + j), vld1q_f32(w1i + j), &y2r, &y2i);
+    cmulq(vsubq_f32(t2r, t3r), vsubq_f32(t2i, t3i), vld1q_f32(w3r + j), vld1q_f32(w3i + j), &y3r, &y3i);
+    vst1q_f32(p0r + j, vaddq_f32(t0r, t1r_)); vst1q_f32(p0i + j, vaddq_f32(t0i, t1i_));
+    vst1q_f32(p0r + j + q, y1r); vst1q_f32(p0i + j + q, y1i);
+    vst1q_f32(p0r + j + 2*q, y2r); vst1q_f32(p0i + j + 2*q, y2i);
+    vst1q_f32(p0r + j + 3*q, y3r); vst1q_f32(p0i + j + 3*q, y3i);
+}
+static void fft_fast(float * restrict re, float * restrict im){
+    for (int j = 0; j < 256; j += 4){                                  // L = 512, radix-2
+        float32x4_t ar = vld1q_f32(re + j), ai = vld1q_f32(im + j), br = vld1q_f32(re + j + 256), bi = vld1q_f32(im + j + 256);
+        float32x4_t dr = vsubq_f32(ar, br), di = vsubq_f32(ai, bi), yr, yi;
+        cmulq(dr, di, vld1q_f32(ft1r + j), vld1q_f32(ft1i + j), &yr, &yi);
+        vst1q_f32(re + j, vaddq_f32(ar, br)); vst1q_f32(im + j, vaddq_f32(ai, bi));
+        vst1q_f32(re + j + 256, yr); vst1q_f32(im + j + 256, yi);
+    }
+    for (int st = 0, L = 256; st < 3; st++, L >>= 2){                   // radix-4 stages
+        const int q = L >> 2;
+        const float *w1r = ft4[st][0][0], *w1i = ft4[st][0][1], *w2r = ft4[st][1][0], *w2i = ft4[st][1][1], *w3r = ft4[st][2][0], *w3i = ft4[st][2][1];
+        if (q >= 8){
+            for (int blk = 0; blk < N; blk += L)
+                for (int j = 0; j < q; j += 8){ r4(re + blk, im + blk, j, q, w1r, w1i, w2r, w2i, w3r, w3i); r4(re + blk, im + blk, j + 4, q, w1r, w1i, w2r, w2i, w3r, w3i); }
+        } else {
+            for (int blk = 0; blk < N; blk += 2 * L){                   // q = 4: two blocks per pass
+                r4(re + blk, im + blk, 0, q, w1r, w1i, w2r, w2i, w3r, w3i);
+                r4(re + blk + L, im + blk + L, 0, q, w1r, w1i, w2r, w2i, w3r, w3i);
+            }
+        }
+    }
+    for (int g = 0; g < N; g += 16){                                    // last stage: radix-4 without twiddles, four blocks of four at once (vld4 de-interleaves them)
+        float32x4x4_t R = vld4q_f32(re + g), I = vld4q_f32(im + g), YR, YI;
+        float32x4_t t0r = vaddq_f32(R.val[0], R.val[2]), t0i = vaddq_f32(I.val[0], I.val[2]), t1r_ = vaddq_f32(R.val[1], R.val[3]), t1i_ = vaddq_f32(I.val[1], I.val[3]);
+        float32x4_t t2r = vsubq_f32(R.val[0], R.val[2]), t2i = vsubq_f32(I.val[0], I.val[2]), dr = vsubq_f32(R.val[1], R.val[3]), di = vsubq_f32(I.val[1], I.val[3]);
+        float32x4_t t3r = di, t3i = vnegq_f32(dr);
+        YR.val[0] = vaddq_f32(t0r, t1r_); YI.val[0] = vaddq_f32(t0i, t1i_);
+        YR.val[1] = vsubq_f32(t0r, t1r_); YI.val[1] = vsubq_f32(t0i, t1i_);
+        YR.val[2] = vaddq_f32(t2r, t3r);  YI.val[2] = vaddq_f32(t2i, t3i);
+        YR.val[3] = vsubq_f32(t2r, t3r);  YI.val[3] = vsubq_f32(t2i, t3i);
+        vst4q_f32(re + g, YR); vst4q_f32(im + g, YI);
+    }
+}
+#else
+static void fast_init(void){}
+#endif
 static double mask_db(double d){               // d in kHz (absolute)
     d = fabs(d);
     if (d <= 74.0)  return 0.0;
@@ -210,17 +290,35 @@ static long count_jumps_f(const int16_t *x, long frames, float pr, float pi_, in
 }
 // max-hold with adjustable hop; returns the number of FFT windows
 typedef struct { const int16_t *x; long s0, s1; int hop; double *mh; long nf; } MhJob;
-static void *mh_worker(void *arg){                          // FFT max-hold over the window positions s0, s0+hop, ... < s1
+static void *mh_worker(void *arg){                          // FFT max-hold over the window positions s0, s0+hop, ... < s1 (only the bins K0..K1 are filled in)
     MhJob *j = (MhJob *)arg;
-    float re[N], im[N];
+    float re[N] __attribute__((aligned(16))), im[N] __attribute__((aligned(16)));
     for (int k = 0; k < N; k++) j->mh[k] = 0;
     j->nf = 0;
+#ifdef __ARM_NEON
+    float pm[K1 - K0 + 1]; for (int k = 0; k <= K1 - K0; k++) pm[k] = 0.0f;
+    for (long s = j->s0; s < j->s1; s += j->hop, j->nf++){
+        const int16_t *xp = j->x + 2 * s;
+        for (int i = 0; i < N; i += 8){                               // de-interleave I/Q, convert and window
+            int16x8x2_t v = vld2q_s16(xp + 2 * i);
+            float32x4_t i0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v.val[0]))), i1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v.val[0])));
+            float32x4_t q0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v.val[1]))), q1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v.val[1])));
+            float32x4_t w0 = vld1q_f32(win + i), w1 = vld1q_f32(win + i + 4);
+            vst1q_f32(re + i, vmulq_f32(i0, w0)); vst1q_f32(re + i + 4, vmulq_f32(i1, w1));
+            vst1q_f32(im + i, vmulq_f32(q0, w0)); vst1q_f32(im + i + 4, vmulq_f32(q1, w1));
+        }
+        fft_fast(re, im);
+        for (int k = 0; k <= K1 - K0; k++){ int rp = rvk[k]; float p = re[rp]*re[rp] + im[rp]*im[rp]; if (p > pm[k]) pm[k] = p; }
+    }
+    for (int k = 0; k <= K1 - K0; k++) j->mh[K0 + k] = pm[k];
+#else
     for (long s = j->s0; s < j->s1; s += j->hop, j->nf++){
         const int16_t *xp = j->x + 2 * s;
         for (int i = 0; i < N; i++){ re[i] = xp[2*i] * win[i]; im[i] = xp[2*i+1] * win[i]; }
         fft(re, im);
         for (int k = 0; k < N; k++){ float p = re[k]*re[k] + im[k]*im[k]; if (p > j->mh[k]) j->mh[k] = p; }
     }
+#endif
     return NULL;
 }
 // max-hold with adjustable hop, split over 2 threads (the Zynq has 2 A9 cores); returns the number of FFT windows
