@@ -182,7 +182,7 @@ for the encoder's splash screen. The encoder stays silent until `#B 100`. `?B` r
 | `P <dBm>` | TX1 output level, −84.75 … −5.0 (`ERR range` outside) |
 | `K <n>` | deviation range: 0 dBFS = 0.75 kHz × n (100 = ±75 kHz), 10 … 250 |
 | `B 0/1` | FPGA limiter off/on |
-| `H <kHz>` | deviation ceiling (maximum) of the limiter, 20 … 100 |
+| `H <kHz>` | deviation ceiling (maximum) of the limiter, 20 … 150 |
 | `G 0/1` | mask guard off/on |
 | `X` | reset the mask monitor |
 | `NULL`, `NULLAUTO 0/1`, `NULLRX 1/2` | LO/image nulling through the coupler now / automatically after every calibration (default on) / receiver (2 = coupler into RX2, default) |

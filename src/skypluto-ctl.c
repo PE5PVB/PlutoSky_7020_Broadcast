@@ -401,7 +401,7 @@ static void lim_conf_read(void){
     fclose(f);
     if (!isfinite(ceil_user)) ceil_user = 67.0;
     if (!isfinite(ceil_max_khz)) ceil_max_khz = 70.0;
-    if (ceil_max_khz > 70.0) ceil_max_khz = 70.0;             // hard upper bound for conf values (the Pico H may go up to 100)
+    if (ceil_max_khz > 70.0) ceil_max_khz = 70.0;             // hard upper bound for conf values (the Pico H may go up to 150)
     if (!ceil_from_pico){
         if (ceil_user > ceil_max_khz) ceil_user = ceil_max_khz;
         if (ceil_user < 30.0) ceil_user = 30.0;
@@ -1468,7 +1468,7 @@ static void handle(char *line){
         }
         return;
     }
-    // H <kHz>: ceiling of the FPGA limiter (peak deviation in kHz, dot or comma as decimal), 20..100 (chosen by the user: the
+    // H <kHz>: ceiling of the FPGA limiter (peak deviation in kHz, dot or comma as decimal), 20..150 (chosen by the user: the
     // menu may also go above the 70 kHz limit of the conf file). The Pico is in charge (sends H at every link resync); ceil_khz from the
     // conf file is only the fallback until the first H. Not stored in the conf file. An H switches the adaptive ceiling control off
     // (otherwise it would overwrite the chosen ceiling again). ?E ceil= returns the value.
@@ -1476,7 +1476,7 @@ static void handle(char *line){
         char hb[32]; snprintf(hb, sizeof hb, "%s", arg);
         for (char *c = hb; *c; c++) if (*c == ',') *c = '.';
         char *e; double h = strtod(hb, &e);
-        if (e == hb || !isfinite(h) || h < 20.0 || h > 100.0){ tx_str("ERR range\n"); return; }
+        if (e == hb || !isfinite(h) || h < 20.0 || h > 150.0){ tx_str("ERR range\n"); return; }
         if (!lim_present){ tx_str("ERR nolim\n"); return; }
         tx_str("OK\n");
         if (fabs(h - ceil_user) > 0.005 || !ceil_from_pico){        // the same maximum again (a resync) changes nothing: the guard keeps its ceiling

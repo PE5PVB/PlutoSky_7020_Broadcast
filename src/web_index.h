@@ -46,7 +46,7 @@ static const char WEB_INDEX[] =
 "<h2>Modulation</h2><div class=\"g\">\n"
 "<div class=\"f\"><label for=\"i_k\">Deviation range kdev <small id=\"kinfo\" style=\"color:var(--tx2)\"></small></label><span><input id=\"i_k\" type=\"number\" step=\"1\" min=\"10\" max=\"250\"> <button class=\"go\" data-set=\"k\">Set</button></span></div>\n"
 "<div class=\"f\"><label>FPGA peak limiter</label><span class=\"seg\" id=\"sg_b\"><button data-v=\"0\">Off</button><button data-v=\"1\">On</button></span></div>\n"
-"<div class=\"f\"><label for=\"i_h\">Limiter ceiling, maximum (kHz)</label><span><input id=\"i_h\" type=\"number\" step=\"0.5\" min=\"20\" max=\"100\"> <button class=\"go\" data-set=\"h\">Set</button></span></div>\n"
+"<div class=\"f\"><label for=\"i_h\">Limiter ceiling, maximum (kHz)</label><span><input id=\"i_h\" type=\"number\" step=\"0.5\" min=\"20\" max=\"150\"> <button class=\"go\" data-set=\"h\">Set</button></span></div>\n"
 "<div class=\"f\"><label>Mask guard <small style=\"color:var(--tx2)\">(lowers the ceiling automatically when the 5-minute mask margin drops below +3.5 dB)</small></label><span class=\"seg\" id=\"sg_g\"><button data-v=\"0\">Off</button><button data-v=\"1\">On</button></span></div></div>\n"
 "<div class=\"warnnote\" id=\"hwarn\" style=\"display:none\">Above about 60 kHz the SM.1268-5 mask margin can fall below the required +3 dB. Watch the mask margin on the Overview.</div>\n"
 "<h2>TX calibration (expert)</h2><div class=\"g\">\n"
