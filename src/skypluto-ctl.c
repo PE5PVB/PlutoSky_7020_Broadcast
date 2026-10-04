@@ -374,6 +374,8 @@ static void lim_conf_read(void){
         else if (!strncmp(ln, "guard=", 6)){ if (!guard_from_pico) guard_on = atoi(ln + 6) ? 1 : 0; }
     }
     fclose(f);
+    if (!isfinite(ceil_user)) ceil_user = 67.0;
+    if (!isfinite(ceil_max_khz)) ceil_max_khz = 70.0;
     if (ceil_max_khz > 70.0) ceil_max_khz = 70.0;             // hard upper bound for conf values (the Pico H may go up to 100)
     if (!ceil_from_pico){
         if (ceil_user > ceil_max_khz) ceil_user = ceil_max_khz;
@@ -486,9 +488,11 @@ static double cal_hold_t = 0.0;
 // TX2 (twin) follows TX1: same attenuation, never lower than TX2_MIN_ATTEN, and fully closed on E 0.
 static void twin_apply(void){
     if (!twin_enable) return;
-    if (!twin_sel_done){   // have channel 2 (TX2) select 'external data' = the modulator (DATA_SEL=2)
+    static double twin_next_try = 0.0;
+    if (!twin_sel_done && mono() >= twin_next_try){   // have channel 2 (TX2) select 'external data' = the modulator (DATA_SEL=2)
         if (system("iio_reg cf-ad9361-dds-core-lpc 0x0498 0x2 >/dev/null 2>&1; iio_reg cf-ad9361-dds-core-lpc 0x04D8 0x2 >/dev/null 2>&1") == 0)
             twin_sel_done = 1;
+        else twin_next_try = mono() + 30.0;                                  // a system() call blocks the main loop: do not retry every second
     }
     // With the transmitter on, TX2 is always at -15 dBm (attenuation TX2_MIN_ATTEN), even if TX1 is lower: the mask shoulder grows with
     // power, so TX2 at -15 dBm is conservative for lower TX1 levels, and the measurement keeps a good signal-to-noise ratio. Mute on E 0.
@@ -541,6 +545,7 @@ static void ir_finish(void){
 }
 // TX calibration of the AD9361 (LO leakage = rf_dc_offs, image = tx_quad). The chip's calibration is only valid for the LO frequency it ran at, so it is repeated in a child process
 // after every tune and every time the transmitter opens and when the die temperature has drifted by 3 degC (the output is muted during all of them).
+static double cal_failed_t = 0.0;                          // when the calibration gave up: it is tried again after 30 s
 static int    cal_fail = 0, cal_failed = 0, cal_try = 0;      // cal_fail: consecutive failed attempts; cal_failed: gave up (the output stays muted until the next F/E); cal_try: fork failures
 static long long cal_expect_f = 0;                            // LO frequency the running child has to reach (0 = no retune)
 static int    cal_temp_ref = 0, cal_drift = 0;                // die temperature (m degC) at the last calibration; consecutive 15 s checks with a drift
@@ -548,6 +553,7 @@ static double cal_last_end = 0.0, cal_temp_chk = 0.0;
 static int    cal_pending = 0, cal_retune = 0;       // cal_retune: the calibration child also retunes the TX-LO to last_f (a tune while the transmitter is open)
 static pid_t  cal_pid = -1;
 static double cal_due = 0.0, cal_t0 = 0.0;
+static void measure_finish(void);
 static void tx_set_state(int off){
     if (off == tx_off) return;
     tx_off = off;
@@ -556,7 +562,9 @@ static void tx_set_state(int off){
         if (phy_find()[0]) cal_retune = 2;           // the child powers the LO up, tunes it and calibrates in one go
         else { tx_lo_power(1); cal_retune = 0; }
     }
-    else {                                            // closing: stop a running calibration, nothing is held any more
+    else {                                            // closing: stop a running calibration and measurement, nothing is held any more
+        if (m_pid > 0) measure_finish();
+        lp_fail = 0;
         if (cal_pid > 0){ int stc; kill(cal_pid, SIGKILL); waitpid(cal_pid, &stc, 0); cal_pid = -1; }
         cal_pending = 0; cal_retune = 0; cal_hold = 0; cal_failed = 0; cal_fail = 0;
     }
@@ -718,8 +726,7 @@ static void mask_done_blk(const char *mb){                 // processes a comple
     double off = viatwin ? TWIN_OFFSET_DB : 0.0;
     margin -= off;
     mk_last_margin = margin; mk_last_t = mono();
-    int slot = mk_i; mk_i = (mk_i + 1) % MASK_KEEP; if (mk_n < MASK_KEEP) mk_n++;
-    mk[slot].t = mk_last_t; mk[slot].margin = margin; mk[slot].sho = sho + off; mk[slot].flo = flo; mk[slot].dev = dev; mk[slot].conc = conc;
+    double tsp[GRID], tfl[GRID];                                         // decoded first: a bad block must not touch the ring
     int okspec = 0;
     if (sp && fp){
         sp += 5; fp += 6; okspec = 1;
@@ -728,13 +735,15 @@ static void mask_done_blk(const char *mb){                 // processes a comple
             if (!mk_dec(sp[k], &a) || !mk_dec(fp[k], &b)){ okspec = 0; break; }
             double ad = fabs((k - GRID / 2) * 6.0);
             if (ad >= 80.0){ a += off; if (a > 0.0) a = 0.0; }          // only the skirts are shifted; the peak stays at 0 dB
-            mk[slot].sp[k] = a; mk[slot].fl[k] = b;
+            tsp[k] = a; tfl[k] = b;
         }
     }
-    if (!okspec){                                                        // no usable spectrum: do not count this slot
-        mk_i = slot; if (mk_n > 0) mk_n--;
+    if (!okspec){                                                        // no usable spectrum: do not count this block
         fprintf(stderr, "   .. mask: geen SPEC/FLOOR in de uitvoer\n"); fflush(stderr); return;
     }
+    int slot = mk_i; mk_i = (mk_i + 1) % MASK_KEEP; if (mk_n < MASK_KEEP) mk_n++;
+    mk[slot].t = mk_last_t; mk[slot].margin = margin; mk[slot].sho = sho + off; mk[slot].flo = flo; mk[slot].dev = dev; mk[slot].conc = conc;
+    for (int k = 0; k < GRID; k++){ mk[slot].sp[k] = tsp[k]; mk[slot].fl[k] = tfl[k]; }
     mk_seq++;                                                            // an accepted spectrum (?L: q=, ?M: seq=)
     // the combination over the 5-min window takes a few ms at 4 spectra per second (1200 entries): compute at most once per second
     static double last_cmb = 0.0; static int lg = 0;
@@ -754,7 +763,7 @@ static void mask_done_blk(const char *mb){                 // processes a comple
 static void measure_finish(void){
     int st; kill(m_pid, SIGKILL); waitpid(m_pid, &st, 0);
     close(m_fd); m_pid = -1; m_fd = -1;
-    if (pw_en && m_kind == 0) pw_rx1_init();                  // the ALC measurement left RX1 on TX_MONITOR1 with its own gain: restore port, manual mode and the meter's gain
+    if (pw_en && (m_kind == 0 || mask_rx_cfg == 1)) pw_rx1_init();                  // the ALC measurement left RX1 on TX_MONITOR1 with its own gain: restore port, manual mode and the meter's gain
 }
 static void measure_done(void){
     m_buf[m_len] = 0;
@@ -786,6 +795,8 @@ static void measure_done(void){
     double nt = trim + step;
     if (nt >  ALC_MAX_TRIM) nt =  ALC_MAX_TRIM;
     if (nt < -ALC_MAX_TRIM) nt = -ALC_MAX_TRIM;
+    if (nom_a + nt < ATTEN_FLOOR) nt = ATTEN_FLOOR - nom_a;      // below the floor the trim has no effect: no wind-up
+    if (nt > ALC_MAX_TRIM) nt = ALC_MAX_TRIM;
     if (nt != trim){
         trim = nt;
         if (!tx_off && !cal_hold) apply_atten(nom_a + trim);
@@ -1131,7 +1142,7 @@ static void handle(char *line){
         }
         last_f = hz; alc_reset(3.0);
         if (!cal_hold) cal_hold_t = mono();
-        cal_hold = 1; cal_pending = 1; cal_retune = 1; cal_due = mono(); cal_failed = 0; cal_fail = 0;
+        cal_hold = 1; cal_pending = 1; if (cal_retune < 1) cal_retune = 1; cal_due = mono(); cal_failed = 0; cal_fail = 0;
         { FILE *tf = fopen("/tmp/skypluto-tuned", "w"); if (tf){ fprintf(tf, "%lld\n", last_f); fclose(tf); } }     // a restart of the daemon adopts the CURRENT frequency
         { char mv[16]; snprintf(mv, sizeof mv, "-%.2f", ATTEN_MUTE);
           if (phy_write("out_voltage0_hardwaregain", mv) == 0){ applied_a = ATTEN_MUTE; phy_write("out_voltage1_hardwaregain", mv); applied_a2 = ATTEN_MUTE; } }   // mute at once
@@ -1146,7 +1157,7 @@ static void handle(char *line){
         double pct = 12.0; { const char *sp = strchr(arg, ' '); if (sp) pct = atof(sp + 1); }
         if (secs < 5.0 || secs > 600.0 || pct < 1.0 || pct > 90.0 || !isfinite(secs) || !isfinite(pct)){ tx_str("ERR range\n"); return; }
         if (tx_off || last_f <= 0){ tx_str("ERR off\n"); return; }
-        if (ir_pid > 0){ tx_str("ERR busy\n"); return; }
+        if (ir_pid > 0 || cal_hold || cal_pending || cal_pid > 0){ tx_str("ERR busy\n"); return; }
         if (access(MASKBIN, X_OK) != 0){ tx_str("ERR nomask\n"); return; }
         tx_str("OK\n"); ir_kind = 1;
         { FILE *hf = fopen("/tmp/skypluto.hold", "w"); if (hf){ fputs("ir\n", hf); fclose(hf); } }
@@ -1168,7 +1179,7 @@ static void handle(char *line){
         double secs = atof(arg);
         if (secs < 5.0 || secs > 600.0 || !isfinite(secs)){ tx_str("ERR range\n"); return; }
         if (tx_off || last_f <= 0){ tx_str("ERR off\n"); return; }
-        if (ir_pid > 0){ tx_str("ERR busy\n"); return; }
+        if (ir_pid > 0 || cal_hold || cal_pending || cal_pid > 0){ tx_str("ERR busy\n"); return; }
         if (access(MASKBIN, X_OK) != 0){ tx_str("ERR nomask\n"); return; }
         tx_str("OK\n"); ir_kind = 2;
         { FILE *hf = fopen("/tmp/skypluto.hold", "w"); if (hf){ fputs("lo\n", hf); fclose(hf); } }
@@ -1188,7 +1199,7 @@ static void handle(char *line){
         double secs = atof(arg);
         if (secs < 5.0 || secs > 300.0 || !isfinite(secs)){ tx_str("ERR range\n"); return; }
         if (tx_off || last_f <= 0){ tx_str("ERR off\n"); return; }
-        if (ir_pid > 0){ tx_str("ERR busy\n"); return; }
+        if (ir_pid > 0 || cal_hold || cal_pending || cal_pid > 0){ tx_str("ERR busy\n"); return; }
         if (access(MASKBIN, X_OK) != 0){ tx_str("ERR nomask\n"); return; }
         tx_str("OK\n"); ir_kind = 3;
         { FILE *hf = fopen("/tmp/skypluto.hold", "w"); if (hf){ fputs("mpx\n", hf); fclose(hf); } }
@@ -1236,8 +1247,10 @@ static void handle(char *line){
         if (tx_off || last_f <= 0){ tx_str("ERR off\n"); return; }
         if (ir_pid > 0){ tx_str("ERR busy\n"); return; }
         tx_str("OK\n");
+        if (cal_pending || cal_pid > 0) return;                  // a calibration is already pending or running: it does exactly this
         if (!cal_hold) cal_hold_t = mono();
-        cal_hold = 1; cal_pending = 1; cal_retune = 0; cal_due = mono(); cal_failed = 0; cal_fail = 0;
+        { int was_failed = cal_failed; if (was_failed && cal_retune < 1) cal_retune = 1; }   // after a failure the LO may be wrong: retune it as well
+        cal_hold = 1; cal_pending = 1; cal_due = mono(); cal_failed = 0; cal_fail = 0;
         fprintf(stderr, "   -> CAL: TX-kalibratie op verzoek\n"); fflush(stderr);
         return;
     }
@@ -1283,8 +1296,10 @@ static void handle(char *line){
         if (e == hb || !isfinite(h) || h < 20.0 || h > 100.0){ tx_str("ERR range\n"); return; }
         if (!lim_present){ tx_str("ERR nolim\n"); return; }
         tx_str("OK\n");
-        if (fabs(h - ceil_user) > 0.005 || fabs(h - ceil_khz) > 0.005 || !ceil_from_pico){
-            ceil_from_pico = 1; ceil_user = h; ceil_khz = h; ceil_tgt = h; guard_act = 0; guard_t = mono(); if (ceil_max_khz < h) ceil_max_khz = h; lim_apply();
+        if (fabs(h - ceil_user) > 0.005 || !ceil_from_pico){        // the same maximum again (a resync) changes nothing: the guard keeps its ceiling
+            int first = !ceil_from_pico;
+            ceil_from_pico = 1; ceil_user = h; ceil_tgt = h; guard_act = 0; guard_t = mono(); if (ceil_max_khz < h) ceil_max_khz = h;
+            if (first || h < ceil_khz){ ceil_khz = h; lim_apply(); }   // lower: at once; higher: ceil_ramp() follows in steps of 0.5 kHz (no gain step)
             fprintf(stderr, "   -> begrenzerplafond %.2f kHz (op verzoek van de Pico)\n", h); fflush(stderr);
         }
         return;
@@ -1345,8 +1360,9 @@ static void web_send(int fd, int code, const char *ctype, const char *body, size
     int hl = snprintf(h, sizeof h, "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nCache-Control: no-store\r\nConnection: close\r\n%s\r\n", code, st, ctype, n, extra ? extra : "");
     struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 250000; setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);     // a client that does not read must not stall the main loop (UART replies) for long
     int fl = fcntl(fd, F_GETFL); fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+    double t0 = mono();                                                      // SO_SNDTIMEO bounds one send(), not the response: stop after 0.6 s in total
     send(fd, h, (size_t)hl, MSG_NOSIGNAL);
-    size_t o = 0; while (o < n){ ssize_t w = send(fd, body + o, n - o, MSG_NOSIGNAL); if (w <= 0) break; o += (size_t)w; }
+    size_t o = 0; while (o < n && mono() - t0 < 0.6){ ssize_t w = send(fd, body + o, n - o, MSG_NOSIGNAL); if (w <= 0) break; o += (size_t)w; }
 }
 // execute a command as the UART does and fetch the reply
 static const char *web_cmd(const char *c){
@@ -1379,7 +1395,7 @@ static void web_handle(struct wconn *c){
     if (clen > have) return;                                            // body not complete yet
     if (clen > 400) clen = 400;
     body[clen] = 0;
-    char cookie[160] = ""; { const char *p = strcasestr(c->buf, "Cookie:"); if (p){ p += 7; while (*p == ' ') p++; size_t i = 0; while (*p && *p != '\r' && i < sizeof cookie - 1) cookie[i++] = *p++; cookie[i] = 0; } }
+    char cookie[512] = ""; { const char *p = strcasestr(c->buf, "Cookie:"); if (p){ p += 7; while (*p == ' ') p++; size_t i = 0; while (*p && *p != '\r' && i < sizeof cookie - 1) cookie[i++] = *p++; cookie[i] = 0; } }
     int xrw = strcasestr(c->buf, "X-Requested-With: skypluto") != NULL;
     int post = !strcmp(method, "POST");
     if (mono() - wconf_t > 30.0) web_conf_read();
@@ -1388,7 +1404,8 @@ static void web_handle(struct wconn *c){
     else if (post && !strcmp(path, "/login")){
         if (!xrw){ web_send(c->fd, 403, "text/plain", "no", 2, NULL); }
         else if (!wpass[0] || !strcmp(body, wpass)){
-            char tok[33] = ""; unsigned char r[16]; FILE *u = fopen("/dev/urandom", "r"); if (u){ if (fread(r, 1, 16, u) != 16) memset(r, 7, 16); fclose(u); }
+            char tok[33] = ""; unsigned char r[16]; memset(r, 0, sizeof r); int rok = 0; FILE *u = fopen("/dev/urandom", "r"); if (u){ rok = fread(r, 1, 16, u) == 16; fclose(u); }
+            if (!rok){ web_send(c->fd, 403, "text/plain", "no", 2, NULL); close(c->fd); c->fd = -1; return; }       // no entropy: no session
             for (int i = 0; i < 16; i++) snprintf(tok + 2*i, 3, "%02x", r[i]);
             if (wtn < 4) wtn++;
             for (int i = wtn - 1; i > 0; i--) memcpy(wtok[i], wtok[i-1], 33);
@@ -1659,7 +1676,7 @@ int main(int argc, char **argv){
                 fprintf(stderr, "   -> TX-kalibratie (LO-lek, beeld) %s na %.1f s\n", cok ? "klaar" : "MISLUKT", now - cal_t0); fflush(stderr);
                 if (!cok && !tx_off){
                     if (++cal_fail < 3){ cal_pending = 1; cal_retune = 1; cal_due = now + 0.5; }                // try again, still muted
-                    else { cal_failed = 1; cal_pending = 0; fprintf(stderr, "   !! TX-kalibratie mislukt: de zender blijft dicht tot de volgende F of E\n"); fflush(stderr); }
+                    else { cal_failed = 1; cal_failed_t = now; cal_pending = 0; fprintf(stderr, "   !! TX-kalibratie mislukt: de zender blijft dicht, nieuwe poging over 30 s (of eerder met F, E of CAL)\n"); fflush(stderr); }
                 }
                 if (cok){ cal_fail = 0; cal_failed = 0; cal_last_end = now; cal_temp_ref = temp_mC; }
                 { char lp[140] = ""; FILE *lf; if (phy_dir[0]) snprintf(lp, sizeof lp, "%s/out_altvoltage1_TX_LO_powerdown", phy_dir);
@@ -1697,6 +1714,10 @@ int main(int argc, char **argv){
                 else { cal_pending = 0; if (cal_retune == 2) tx_lo_power(1); cal_retune = 0; cal_hold = 0; apply_current(); cal_try = 0;
                        fprintf(stderr, "   !! TX-kalibratie kon niet starten (fork), zender vrijgegeven zonder kalibratie\n"); fflush(stderr); }
             }
+        }
+        if (cal_failed && !tx_off && cal_pid <= 0 && !cal_pending && now - cal_failed_t >= 30.0){        // retry: a muted transmitter must not stay muted for good
+            cal_failed = 0; cal_fail = 0; cal_hold = 1; cal_hold_t = now; cal_pending = 1; cal_retune = 1; cal_due = now;
+            fprintf(stderr, "   .. TX-kalibratie opnieuw geprobeerd\n"); fflush(stderr);
         }
         if (cal_hold && cal_pid <= 0 && !cal_pending && !cal_failed && now - cal_hold_t > 30.0){ cal_hold = 0; apply_current(); }   // safety net: do not stay muted for ever (not after a failed calibration)
         // temperature-driven recalibration (done here, muted, instead of by a separate script): the chip's LO-leak/image calibration drifts with the die temperature
