@@ -12,10 +12,10 @@ and put it on the air** — with a small FPGA-only signal path (no ARM, no DMA, 
  ┌───────────────────┐  I2S (192 kHz, MPX)   ┌──────────────────────────────────────────────┐
  │ MPX encoder       │ ────────────────────► │ PlutoSky                                     │
  │ (stereo + RDS,    │  BCLK / WS / SDATA    │  I2S RX ► async FIFO ► limiter/fade ►        │
- │  pre-emphasis,    │                       │  interpolator ► FM modulator ► AD9361 ► TX1 ─┼──► antenna / PA
- │  e.g. PicoAudio)  │ ◄──────────────────── │                   │                          │
- └───────────────────┘  1-wire UART (control)│  TX2 ───────────────────────────────► RX2    │  mask monitor
-                                             │  RX1 ◄── attenuator ◄── (sample of TX1)      │  power meter
+ │  pre-emphasis,    │                       │  interpolator ► FM modulator ► AD9361 ► TX1 ─┼─► [coupler] ──► filter / PA / antenna
+ │  e.g. PicoAudio)  │ ◄──────────────────── │                                              │        │ coupled port
+ └───────────────────┘  1-wire UART (control)│  RX2 ◄───────────────────────────────────────┼────────┘  (mask monitor, LO/image nulling)
+                                             │  RX1 ◄── attenuator ◄── (sample of TX1)      │  power meter (optional)
                                              └──────────────────────────────────────────────┘
 ```
 
@@ -57,8 +57,8 @@ and put it on the air** — with a small FPGA-only signal path (no ARM, no DMA, 
   linear stage behind it, so the whole chain is **flat within ±0.002 dB up to 76 kHz** (multiplex, pilot, RDS and RDS2 included). Saturation, never wrap-around.
 - **FM modulator**: phase accumulator + a 14-bit, 16384-entry sine/cosine ROM. Deviation = `kdev × 0.75 kHz`
   at 0 dBFS (`kdev 100` = ±75 kHz).
-- **TX2 twin**: TX2 transmits the identical modulation. It is looped back into RX2 so the transmitter can measure its
-  own spectrum without touching the TX1 path.
+- **Digital LO and image correction**: a DC offset on I/Q against the LO leakage and a Q gain/skew correction against the I/Q image,
+  in front of the DAC (set by the automatic nulling, see below). The digital carrier sits at −9 dBFS so that the DAC stays linear at zero-IF.
 - **Impulse time-stamping** for end-to-end latency and phase measurements.
 
 **Control software (runs on the Pluto's ARM)**
@@ -70,11 +70,13 @@ and put it on the air** — with a small FPGA-only signal path (no ARM, no DMA, 
 - **Continuous mask monitoring** (4 spectra per second, 5-minute max-hold) and an automatic **mask guard** that lowers
   the deviation ceiling when the 5-minute mask margin drops below +3.5 dB, and raises it again when there is room.
 - **TX calibration of the AD9361** (LO leakage, image) after every tune and every time the transmitter opens, **with the output muted** until it is done (about 2 s), and again when the die temperature has drifted by 3 °C.
+- **Automatic LO and image nulling** through the directional coupler right after every calibration (about 5 s, silent carrier): the LO leakage
+  and the image are measured on RX2 and nulled with the digital corrections, typically **LO ≤ −70 dBc, image ≤ −75 dBc** on every frequency.
 - **Power meter** on RX1, used as a pure measurement bridge: you enter the attenuator value, the web interface and
   the serial protocol report dBm and watts.
 - **Watchdog / supervisor**: a crashed daemon is restarted automatically, and an open transmitter stays open.
 - **Boot status** is sent to the encoder, which shows it on its splash screen.
-- **Loop-cable detection**: a warning when the TX2→RX2 cable is missing.
+- **Measurement-path detection**: a warning when RX2 gets no signal from the coupler.
 - Measurement tools: tone meter, end-to-end impulse response, LO leakage, demodulated-MPX capture.
 
 ---
@@ -85,8 +87,8 @@ and put it on the air** — with a small FPGA-only signal path (no ARM, no DMA, 
   report `FISH Ball PlutoSDR Rev.A (Z7020-AD9361)`. An original ADALM-PLUTO uses different pins and will **not** work.
 - A micro-SD card (FAT32) for the boot files.
 - An **MPX source** with an I2S output (3.3 V logic, 192 kHz) — e.g. the PicoAudio Broadcast encoder.
-- RF: a dummy load / attenuator for testing, a short SMA cable (TX2 → RX2), a band-pass/low-pass filter and amplifier
-  of your own for real operation. An optional SMA attenuator for the RX1 power meter.
+- RF: a **directional coupler** directly on TX1 with its coupled port to RX2 (see below), a dummy load / attenuator for testing,
+  a band-pass/low-pass filter and amplifier of your own for real operation. An optional SMA attenuator for the RX1 power meter.
 - Ethernet (for the web interface) and a USB cable (power, optional serial/ethernet-over-USB for engineering).
 
 ---
@@ -117,8 +119,9 @@ Notes:
 
 | Port | Connection |
 |------|------------|
-| **TX1** | **The transmitter output** → filter → amplifier → antenna (dummy load while testing). Output level is set from −84.75 dBm up to a **−5 dBm maximum**. |
-| **TX2 → RX2** | A **short SMA cable** (no attenuator needed). TX2 transmits a copy of the modulation (software-limited to ≤ −15 dBm) and RX2 uses it to monitor the spectrum against the mask. RX2 is overloaded above ≈ −10 dBm and can be damaged above **+2.5 dBm** — never connect TX1 directly to RX2. If the cable is missing the web interface shows a red warning and the mask guard is blind. |
+| **TX1** | **The transmitter output** → directional coupler (through path) → filter → amplifier → antenna (dummy load while testing). Output level is set from −84.75 dBm up to a **−5 dBm maximum**. |
+| **Coupler → RX2** | A **directional coupler on the TX1 output**, its **coupled port to RX2** (an SMA coupler of 10–30 dB; terminate an unused port with 50 Ω). This is the measurement path: RX2 monitors the spectrum against the mask, and after every calibration the LO leakage and the image are nulled from it. Keep the level at RX2 below ≈ −10 dBm (overload; damage above **+2.5 dBm**): with the Pluto's own −5 dBm maximum any coupler of ≥ 10 dB is safe. **Never connect TX1 directly to RX2**, and put the coupler *before* an external amplifier. If RX2 gets no signal the web interface shows a red warning and the mask guard is blind. |
+| **TX2** | Not used: it is kept muted. (Older setups measured a copy of the modulation on TX2 with a cable TX2 → RX2: `twin=1` in `skypluto-mask.conf`.) |
 | **RX1** | Optional **power meter**. Feed a sample of the TX1 output through an attenuator of your choice (e.g. a directional coupler plus attenuator) and enter its total attenuation in the web interface (Control → power meter, serial `Q`) and calibrate against a known level (`QK`). Make sure the level at RX1 stays within the AD9361's input range (the same limits as for RX2 apply). The measuring range is about −50 … −10 dBm at the TX1 output with a 20 dB attenuator (±0.1 dB between −40 and −10 dBm, measured with a spectrum analyser); below that the board's own crosstalk/noise floor (about −71.5 dBm at RX1) dominates. Choose the attenuator to suit your power. The meter is off by default (`QM`). |
 | Ethernet | web interface (DHCP, port 80) |
 | USB | power; engineering access (the board also appears as a USB network adapter) |
@@ -135,7 +138,9 @@ Notes:
    web settings are volatile; with an encoder connected, the encoder's stored settings win after every re-sync.
 4. A restart of just the daemon (an update, a crash) leaves the RF **on**; a power cycle always starts closed.
 5. The Pluto's clock has no battery: after a reboot it reads 1970. This does not affect operation.
-6. The **green LED** shows the transmitter state: **off** = closed (no RF), **blinking** (2 Hz) = tuning or calibrating (the output is muted), **on** = really on the air.
+6. The **green LED** shows the transmitter state: **off** = closed (no RF), **blinking** (2 Hz) = tuning, calibrating or nulling (the output is muted or the carrier is silent), **on** = really on the air.
+   After every frequency change this takes about 7 s: ~2 s AD9361 calibration, then ~5 s LO/image nulling through the coupler. The encoder sees `cal=run` in `?E` meanwhile (the PicoAudio blinks its display).
+7. A new Pluto needs no configuration for this: without configuration files the mask monitor measures through the coupler on RX2 and the nulling runs after every calibration.
 
 ---
 
@@ -180,12 +185,14 @@ for the encoder's splash screen. The encoder stays silent until `#B 100`. `?B` r
 | `H <kHz>` | deviation ceiling (maximum) of the limiter, 20 … 100 |
 | `G 0/1` | mask guard off/on |
 | `X` | reset the mask monitor |
+| `NULL`, `NULLAUTO 0/1`, `NULLRX 1/2` | LO/image nulling through the coupler now / automatically after every calibration (default on) / receiver (2 = coupler into RX2, default) |
+| `OFS <kHz>`, `DC <i> <q>`, `IQ <gain> <skew>`, `LVL <dB>` | manual TX nulling: low-IF offset for measuring (0 = zero-IF), digital DC offset against the LO leakage, digital I/Q gain/phase correction against the image, digital carrier level (default −9 dBFS) (stored in the Pluto; also in the web interface, Control - TX calibration) |
 | `J <s>`, `Y <s>`, `Z <s>` | impulse response / carrier-bin / MPX capture measurements |
 | `Q <dB>`, `QK <dBm>`, `QM 0/1`, `QG <dB\|A>` | power meter: attenuator value in dB (0…120), calibrate against a known power in dBm (settled signal present), meter off/on, hold the RX1 gain manually / back to automatic |
 
 | Query | Answer |
 |-------|--------|
-| `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.02 proto=2 ver=1.02 bit=B1D00018` (software version and bitstream id) |
+| `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.02 proto=2 ver=1.02 bit=B1D0001A` (software version and bitstream id) |
 | `?S` | `en=1 f=107999998 p=-29.00 att=34.00 tx=on up=312 kdev=100` — state, frequency, level, attenuation, uptime |
 | `?P` | `set=-29.00 out=-29.00 att=34.00 trim=0.00 alc=hold` — set point and the automatic level control |
 | `?T` | `temp=39.5` — board temperature (°C) |
@@ -194,7 +201,8 @@ for the encoder's splash screen. The encoder stays silent until `#B 100`. `?B` r
 | `?D`, `?G` | measured peak deviation (0.25 s windows) / swing meter (20 ms windows) |
 | `?L` | spectrum around the carrier (mask monitor) |
 | `?A` | strongest audio tone: frequency and deviation |
-| `?R` | loop cable TX2 → RX2: `r=ok` / `r=missing` / `r=na` |
+| `?R` | measurement path (coupler → RX2): `r=ok` / `r=missing` / `r=na` |
+| `?IQ`, `?NL` | the digital corrections and level / the result of the last nulling (LO and image before/after in dBc) |
 | `?O` | power meter: `o=<dBm at TX1> w=<watt> in=<dBm at RX1> att= cal= g= st=ok\|low\|high\|nosig\|off` |
 | `?B` | last boot step |
 
@@ -208,7 +216,7 @@ From a shell on the Pluto (`ssh root@<ip>`, default password `analog`):
 ## Mask protection, limiter and levels
 
 The deviation limit is enforced **in the FPGA** (a 258-sample look-ahead true-peak limiter), so the transmitted deviation can
-never exceed the configured ceiling. On top of that, the **mask guard** watches the spectrum (TX2 → RX2) and
+never exceed the configured ceiling. On top of that, the **mask guard** watches the spectrum (TX1 through the coupler → RX2) and
 adjusts the ceiling:
 
 - the chosen maximum (`H`) is the *upper limit*;
@@ -237,7 +245,7 @@ tools in `scripts/` and `src/skypluto-mask.c`. The figures come from the encoder
 | Audio response with 50 µs pre-emphasis / de-emphasis | flat within **0.016 dB**, 200 Hz – 15 kHz (transmitter) |
 | Total delay, encoder + Pluto | 3.424 ms + about 1.59 ms = **about 5.02 ms**, linear phase (the Pluto part was measured as 1.584 ms; the true-peak look-ahead adds 2 samples = 10 µs) |
 | Stereo L−R path | S = M within **±0.004 dB** above 2 kHz (±0.017 dB at 0.5 … 1 kHz), phase ≤ 0.13°, separation 59 … 81 dB (**median 74.5 dB**), **no L−R trim needed** (the interpolator is flat to ±0.002 dB up to 76 kHz) |
-| LO leakage, transmitter on | **≤ −45 dBc on every frequency tried** (75, 98, 108, 200, 435, 868, 1296, 2400, 3500 and 5800 MHz; carrier-null method, the figure is the floor of the method, ≤ −50.6 dBc at 108 MHz on the first null); closed ≤ −95 dBc |
+| LO leakage and image, transmitter on, after the automatic nulling | LO **−69 … −73 dBc**, image **−75 … −81 dBc** (107.9, 435, 1296 and 2320 MHz; measured through the coupler, the image figures are at the floor of the measurement). With only the AD9361's own calibration the LO is at −51 … −64 dBc and the image at −50 … −68 dBc. Closed ≤ −95 dBc |
 | Mask margin (1 kHz tone at 0 dBFS, limiter on, guard off) | ≥ **+4.9 dB** at every maximum deviation from 75 down to 50 kHz (5-minute margin, +6.1 dB at 75 kHz, +9.5 dB at 50 kHz) |
 
 | | |
@@ -247,7 +255,7 @@ tools in `scripts/` and `src/skypluto-mask.c`. The figures come from the encoder
 | ![Phase and group delay](docs/figures/10-audio-phase.png) | ![Stereo balance](docs/figures/11-stereo-balance.png) |
 | **Fig. 3** Phase and group delay (encoder + Pluto, measured with impulses) | **Fig. 4** L+R and L−R path level and phase |
 | ![Stereo separation](docs/figures/12-stereo-separation.png) | ![LO leakage](docs/figures/13-lo-leakage.png) |
-| **Fig. 5** Stereo separation (tone on L only), this release without any trim against the earlier build | **Fig. 6** LO leakage, carrier-null method |
+| **Fig. 5** Stereo separation (tone on L only), this release without any trim against the earlier build | **Fig. 6** LO leakage, carrier-null method (an earlier build, before the automatic nulling) |
 
 ![Mask margin against maximum deviation](docs/figures/14-mask-vs-level.png)
 

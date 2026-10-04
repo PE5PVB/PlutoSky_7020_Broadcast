@@ -44,7 +44,7 @@ module tb_fm_modulator;
     ) dut (
         .clk(clk), .rst(rst), .en(en), .kdev(kdev),
         .offset_inc(offset_inc), .level(level),
-        .dc_i(12'sd0), .dc_q(12'sd0),
+        .dc_i(12'sd0), .dc_q(12'sd0), .qgain(18'sd0), .qskew(18'sd0),
         .comp(comp), .comp_valid(comp_valid),
         .i_out(i_out), .q_out(q_out), .iq_valid(iq_valid)
     );

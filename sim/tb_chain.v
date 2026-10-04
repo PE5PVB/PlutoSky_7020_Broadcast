@@ -65,7 +65,7 @@ module tb_chain;
                             .LUT_FILE("data/sine_lut.mem")) u_mod (
         .clk(rd_clk), .rst(mod_rst), .en(1'b1),
         .kdev(18'sd100), .offset_inc(24'sd0), .level(16'd65535),
-        .dc_i(12'sd0), .dc_q(12'sd0),
+        .dc_i(12'sd0), .dc_q(12'sd0), .qgain(18'sd0), .qskew(18'sd0),
         .comp(comp_out), .comp_valid(comp_valid),
         .i_out(i_out), .q_out(q_out), .iq_valid(iq_valid));
 

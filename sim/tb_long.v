@@ -1,14 +1,17 @@
 // Long-duration TB: complete exciter with a real I2S master, adjustable clock offset (+PPM=), AXI activity (+AXW=1: a clear write
 // to LIM_CTRL every 20 ms, and a LIM_CEIL write every 100 ms), reset pulses (+RSTMS=<ms>), tone or square wave (+SQ=1 +A=), duration (+TEND=<ms>).
+// +PLLD=<MHz> models a bit clock made by a fractional divider of a PLL (a Raspberry Pi: 500 MHz PLLD): every BCLK edge is snapped to the PLL's period grid, which gives
+// the sawtooth jitter of such a clock. +STEPLOG=1 writes the rate loop's step_dyn every 2 ms to step.txt.
 // Detects a STALL of the conditioner: dbg_pulls stops advancing within a 20 ms window.
 `timescale 1ns/1ps
 module tb_long;
     localparam real FS   = 192187.5;
     localparam real TRD  = 81.380;           // l_clk 12.288 MHz
-    real A = 0.25, PPM = 0.0;
+    real A = 0.25, PPM = 0.0, PLLD = 0.0;
+    integer STEPLOG = 0, ACC0 = 0;
     integer SQ = 0, AXW = 0, TEND = 500, RSTMS = 0, RSTBURST = 0;
     initial begin
-        if ($value$plusargs("A=%f", A)) ; if ($value$plusargs("SQ=%d", SQ)) ; if ($value$plusargs("PPM=%f", PPM));
+        if ($value$plusargs("A=%f", A)) ; if ($value$plusargs("SQ=%d", SQ)) ; if ($value$plusargs("PPM=%f", PPM)); if ($value$plusargs("PLLD=%f", PLLD)); if ($value$plusargs("STEPLOG=%d", STEPLOG)); if ($value$plusargs("ACC0=%d", ACC0));
         if ($value$plusargs("AXW=%d", AXW)); if ($value$plusargs("TEND=%d", TEND)); if ($value$plusargs("RSTMS=%d", RSTMS)); if ($value$plusargs("RSTBURST=%d", RSTBURST));
     end
     real pi; initial pi = 3.14159265358979;
@@ -16,7 +19,13 @@ module tb_long;
 
     reg l_clk = 0, bclk = 0;
     always #(TRD/2.0) l_clk = ~l_clk;
-    always #(bhalf)   bclk  = ~bclk;
+    real tid = 0.0, tq = 0.0, tprev = 0.0, tpd = 0.0;
+    initial begin
+        if (PLLD > 0.0) begin
+            tpd = 1000.0 / PLLD;                                              // PLL period in ns
+            forever begin tid = tid + bhalf; tq = $floor(tid / tpd) * tpd; #(tq - tprev); bclk = ~bclk; tprev = tq; end
+        end else forever begin #(bhalf); bclk = ~bclk; end
+    end
 
     reg lr = 1'b1, sd = 1'b0;
     integer bc = 0, fr = 0;
@@ -61,11 +70,14 @@ module tb_long;
         end
     endtask
 
-    integer ms = 0; integer last_pulls = 0, frozen = 0, cur;
+    integer ms = 0; integer last_pulls = 0, frozen = 0, cur, sfd;
+    initial if (ACC0 != 0) begin #1000000; dut.u_ups.acc_i = ACC0; end      // start the rate loop's integrator near its equilibrium (saves the multi-second convergence)
     initial begin
+        sfd = $fopen("step.txt", "w");
         #200 rstn = 1;
         while (ms < TEND) begin
             #1000000; ms = ms + 1;
+            if (STEPLOG && (ms % 2) == 0) $fdisplay(sfd, "%0d", dut.u_ups.step_dyn);
             if (AXW && (ms % 20) == 0) axi_write(6'h24, 32'h7);                 // clear pulse (as lim_poll)
             if (AXW && (ms % 100) == 0) axi_write(6'h20, 32'h7B0C05);           // ceil write (as lim_apply)
             if (RSTMS != 0 && ms == RSTMS) begin

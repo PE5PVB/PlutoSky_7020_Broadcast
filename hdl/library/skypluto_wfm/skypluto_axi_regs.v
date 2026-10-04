@@ -10,6 +10,8 @@
 //   0x14 MAGIC         0x57464D32 ("WFM2")                               RO
 //   0x18 DC_I          digital DC offset on I (signed, LO-leakage nulling)  RW
 //   0x1C DC_Q          digital DC offset on Q (signed)                   RW
+//   0x58 QGAIN         Q gain error correction (signed, units of 2^-18)  RW
+//   0x5C QSKEW         I/Q phase error correction (signed, 2^-18 rad)    RW
 //   0x20 LIM_CEIL      limiter peak ceiling (counts, full scale = 2^23)  RW  (default 0x733333 = 0.9 FS)
 //   0x24 LIM_CTRL      [0]=limiter on [1]=fade on [2]=clear statistics   RW  (default 3)
 //   0x28 LIM_GMIN      smallest g_req since clear (Q16, 65536 = none)    RO
@@ -32,6 +34,7 @@ module skypluto_axi_regs #(
     parameter integer LVL_W   = 16,
     parameter integer KDEV_W  = 18,
     parameter integer DC_W    = 12,
+    parameter integer QC_W    = 18,
     parameter [PHASE_W-1:0] OFFSET_DEFAULT = 0,
     parameter [LVL_W-1:0]   LEVEL_DEFAULT  = 16'h4000,   // -12 dBFS: clean (little 3rd-order)
     parameter [KDEV_W-1:0]  KDEV_DEFAULT   = 18'sd100  // KSHIFT=13: 100 = +-75 kHz at full-scale MPX (~750 Hz/step)
@@ -62,6 +65,8 @@ module skypluto_axi_regs #(
     output wire signed [KDEV_W-1:0]  kdev,
     output wire signed [DC_W-1:0]    dc_i,
     output wire signed [DC_W-1:0]    dc_q,
+    output wire signed [QC_W-1:0]    qgain,
+    output wire signed [QC_W-1:0]    qskew,
     // from fabric
     input  wire                     status_overflow,
     input  wire                     status_underflow,
@@ -89,7 +94,7 @@ module skypluto_axi_regs #(
 
     reg [31:0] reg_ctrl, reg_offset, reg_level, reg_kdev, reg_dci, reg_dcq, reg_lceil, reg_lctrl;
     reg [4:0]  reg_dbgsel;
-    reg [31:0] reg_impctrl, reg_impthr, reg_i2sctrl;
+    reg [31:0] reg_impctrl, reg_impthr, reg_i2sctrl, reg_qg, reg_qs;
     assign i2s_ctrl = reg_i2sctrl[15:0];
     assign imp_en  = reg_impctrl[0];
     assign imp_thr = reg_impthr[23:0];
@@ -102,6 +107,8 @@ module skypluto_axi_regs #(
     assign kdev          = reg_kdev[KDEV_W-1:0];
     assign dc_i          = reg_dci[DC_W-1:0];
     assign dc_q          = reg_dcq[DC_W-1:0];
+    assign qgain         = reg_qg[QC_W-1:0];
+    assign qskew         = reg_qs[QC_W-1:0];
     assign lim_ceil      = reg_lceil[23:0];
     assign lim_en        = reg_lctrl[0];
     assign fade_en       = reg_lctrl[1];
@@ -121,7 +128,7 @@ module skypluto_axi_regs #(
             reg_dci    <= 32'h0;
             reg_dcq    <= 32'h0;
             reg_lceil  <= 32'h733333; reg_lctrl <= 32'h3; clr_tog <= 1'b0; reg_dbgsel <= 5'd0;
-            reg_impctrl <= 32'h0; reg_impthr <= 32'h0F5C28; reg_i2sctrl <= 32'h0;
+            reg_impctrl <= 32'h0; reg_impthr <= 32'h0F5C28; reg_i2sctrl <= 32'h0; reg_qg <= 32'h0; reg_qs <= 32'h0;
         end else begin
             if (wr_fire) begin
                 s_axi_awready <= 1'b1;
@@ -137,6 +144,8 @@ module skypluto_axi_regs #(
                     5'h10: reg_impctrl <= s_axi_wdata;
                     5'h11: reg_impthr  <= s_axi_wdata;
                     5'h15: reg_i2sctrl <= s_axi_wdata;
+                    5'h16: reg_qg      <= s_axi_wdata;
+                    5'h17: reg_qs      <= s_axi_wdata;
                     5'h09: begin reg_lctrl <= {s_axi_wdata[31:3], 1'b0, s_axi_wdata[1:0]};      // bit 2 = clear pulse (reads as 0)
                                 if (s_axi_wdata[2]) clr_tog <= ~clr_tog; end
                     5'h0F: reg_dbgsel <= s_axi_wdata[4:0];
@@ -185,6 +194,8 @@ module skypluto_axi_regs #(
                     5'h13: s_axi_rdata <= st_imp_count;
                     5'h14: s_axi_rdata <= st_fmt;
                     5'h15: s_axi_rdata <= reg_i2sctrl;
+                    5'h16: s_axi_rdata <= reg_qg;
+                    5'h17: s_axi_rdata <= reg_qs;
                     default: s_axi_rdata <= 32'd0;
                 endcase
             end else begin

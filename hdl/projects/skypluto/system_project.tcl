@@ -16,6 +16,10 @@ set_property PROCESSING_ORDER LATE   [get_files skypluto_late.xdc]
 set_property used_in_synthesis false [get_files skypluto_late.xdc]
 
 set_property is_enabled false [get_files  *system_sys_ps7_0.xdc]
+# a physical optimisation after routing closes the last tens of picoseconds on the AD9361 rx_clk paths (4 ns), which otherwise
+# fail now and then depending on the placement of the rest of the design
+set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
+set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]
 adi_project_run pluto
 source $ad_hdl_dir/library/axi_ad9361/axi_ad9361_delay.tcl
 

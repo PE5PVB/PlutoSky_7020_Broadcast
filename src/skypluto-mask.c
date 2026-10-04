@@ -863,6 +863,173 @@ static int pwr_main(long long txlo, double secs){
     return 0;
 }
 
+// ============================ LO NULLING (--null) ==========================================================================
+// skypluto-mask --null <carrier_Hz> <rx=1|2> <port> <out_file> [iq]
+// Nulls the transmitter's LO leakage with the exciter's digital DC offset. Needs a cable from the transmitter output to the RX
+// (TX1 -> RX1, at most -15 dBm). The carrier is silenced (kdev 0) and moved 100 kHz up with the NCO while the LO stays where it is
+// (the AD9361's calibration stays exactly as in operation); the LO leakage is then a line of its own at the LO frequency.
+// One continuous capture per round: the DC offset steps through c, c+D (I), c-D, c+D (Q), c-D, c while the stream is read; the line powers
+// of the segments give the vector u of the remaining leakage in DC units: p = k |u + d|^2, k from the carrier (digital amplitude known),
+// u from the first differences. Round 1 with D = 60, round 2 with D = 15, then one check capture. About 3 s. Writes one result line.
+// With "iq" (a bitstream with the I/Q correction, 0x58/0x5C) the same rounds also step the Q gain and skew and null the image line
+// 100 kHz below the LO the same way (about 5 s).
+#include <sys/mman.h>
+#include <fcntl.h>
+#define NL_WFM_BASE 0x7C440000UL
+static volatile uint32_t *nl_regs;
+static uint32_t nl_rd(int off){ return nl_regs[off / 4]; }
+static void nl_wr(int off, uint32_t v){ nl_regs[off / 4] = v; }
+static void nl_dc(int di, int dq){ nl_wr(0x18, (uint32_t)(di & 0xFFF)); nl_wr(0x1C, (uint32_t)(dq & 0xFFF)); }
+static int nl_s12(uint32_t v){ v &= 0xFFF; return (v & 0x800) ? (int)v - 4096 : (int)v; }
+
+#define NL_FS     3072000.0
+static double NL_X = 136533.0 * 12288000.0 / 16777216.0;      // the NCO offset in Hz (99 999.76 by default; other values when a line interferes)
+#define NL_B      4096                                   // block for the line correlations
+#define NL_SEG    0.14                                   // s per DC point
+#define NL_GUARD  0.06                                   // s at the start of each segment that are not used (the stream lags the register writes)
+#define NL_LEAD   0.10
+
+// one round: 10 points c, DC I +-, DC Q +-, gain +-, skew +-, c; per point the mean power of the LO line, the carrier, the image and the floor
+// over the usable part of the segment. The DC steps only move the LO line and the gain/skew steps only move the image, so both pairs are
+// fitted from the same capture. dlt = the DC step, dlg = the gain/skew step (0 = no I/Q correction in the bitstream: those points are skipped).
+#define NL_NP 10
+static double nl_win[NL_B];
+static int nl_hasiq = 0;
+static void nl_iq(int g, int s){ if (nl_hasiq){ nl_wr(0x58, (uint32_t)(g & 0x3FFFF)); nl_wr(0x5C, (uint32_t)(s & 0x3FFFF)); } }
+static int nl_s18(uint32_t v){ v &= 0x3FFFF; return (v & 0x20000) ? (int)v - 262144 : (int)v; }
+static int nl_round(int rx, int di, int dq, int gg, int gs, int dlt, int dlg, double *plo, double *pc, double *pimg, double *pfl){
+    const long seg = (long)(NL_SEG * NL_FS) / NL_B * NL_B, lead = (long)(NL_LEAD * NL_FS) / NL_B * NL_B, guard = (long)(NL_GUARD * NL_FS);
+    const int np = dlg ? NL_NP : 6;
+    static const int pts10[NL_NP][4] = { {0,0,0,0}, {1,0,0,0}, {-1,0,0,0}, {0,1,0,0}, {0,-1,0,0}, {0,0,1,0}, {0,0,-1,0}, {0,0,0,1}, {0,0,0,-1}, {0,0,0,0} };
+    static const int pts6[6][4]  = { {0,0,0,0}, {1,0,0,0}, {-1,0,0,0}, {0,1,0,0}, {0,-1,0,0}, {0,0,0,0} };
+    const int (*pts)[4] = dlg ? pts10 : pts6;
+    const long total = lead + np * seg + seg / 2;
+    char c[200]; snprintf(c, sizeof c, "iio_readdev -b 16384 -s %ld cf-ad9361-lpc voltage%d voltage%d 2>/dev/null", total, rx == 2 ? 2 : 0, rx == 2 ? 3 : 1);
+    nl_dc(di, dq); nl_iq(gg, gs);
+    FILE *p = popen(c, "r"); if (!p) return -1;
+    int16_t *blk = malloc(NL_B * 2 * sizeof(int16_t)); if (!blk){ pclose(p); return -1; }
+    double sl[NL_NP] = {0}, sc[NL_NP] = {0}, si[NL_NP] = {0}, sf[NL_NP] = {0}; long cnt[NL_NP] = {0};
+    const double wl = -2.0 * M_PI * OFFSET / NL_FS, wc = -2.0 * M_PI * (OFFSET + NL_X) / NL_FS, wi = -2.0 * M_PI * (OFFSET - NL_X) / NL_FS, wf = -2.0 * M_PI * (OFFSET + 0.5 * NL_X) / NL_FS;
+    long pos = 0; int next = 1;
+    for (;;){
+        size_t got = fread(blk, 2 * sizeof(int16_t), NL_B, p);
+        if (got < NL_B) break;
+        // the point changes once the stream has been read up to the start of the next segment
+        while (next < np && pos + NL_B >= lead + next * seg){
+            nl_dc(di + pts[next][0] * dlt, dq + pts[next][1] * dlt); nl_iq(gg + pts[next][2] * dlg, gs + pts[next][3] * dlg); next++;
+        }
+        // which segment's usable window does this block fall in
+        int sgi = -1;
+        for (int k = 0; k < np; k++){ long a = lead + k * seg + guard, e = lead + (k + 1) * seg; if (pos >= a && pos + NL_B <= e){ sgi = k; break; } }
+        if (sgi >= 0){
+            // four line correlations with rotating phasors (exact start phase per block from the absolute sample index)
+            double w4[4] = { wl, wc, wi, wf }, ar[4] = {0}, ai[4] = {0};
+            for (int q = 0; q < 4; q++){
+                double ph = w4[q] * (double)pos, pr = cos(ph), pi_ = sin(ph), sr = cos(w4[q]), si_ = sin(w4[q]);
+                for (int i = 0; i < NL_B; i++){
+                    double x = blk[2*i] * nl_win[i], y = blk[2*i+1] * nl_win[i];      // Hann: the strong carrier 100 kHz away must not leak into the LO line
+                    ar[q] += x * pr - y * pi_; ai[q] += x * pi_ + y * pr;
+                    double t = pr * sr - pi_ * si_; pi_ = pr * si_ + pi_ * sr; pr = t;
+                }
+            }
+            double lr = ar[0], li = ai[0], cr = ar[1], ci = ai[1], ir = ar[2], ii = ai[2], fr = ar[3], fi = ai[3];
+            sl[sgi] += lr * lr + li * li; sc[sgi] += cr * cr + ci * ci; si[sgi] += ir * ir + ii * ii; sf[sgi] += fr * fr + fi * fi; cnt[sgi]++;
+        }
+        pos += NL_B;
+    }
+    pclose(p); free(blk);
+    for (int k = 0; k < np; k++){ if (cnt[k] < 3) return -2; plo[k] = sl[k] / cnt[k]; pc[k] = sc[k] / cnt[k]; pimg[k] = si[k] / cnt[k]; pfl[k] = sf[k] / cnt[k]; }
+    if (!dlg){ for (int k = 6; k < NL_NP; k++){ plo[k] = plo[5]; pc[k] = pc[5]; pimg[k] = pimg[5]; pfl[k] = pfl[5]; } plo[9] = plo[5]; pc[9] = pc[5]; pimg[9] = pimg[5]; }
+    return 0;
+}
+
+// 5-point fit of one pair from the powers p[] of a round: a = index of the + step of the first parameter (then -, + of the second, -),
+// p = k |u + d|^2 along each axis. Returns the curvature relative to the model; u = the offsets of the optimum from the centre.
+static double nl_fit(const double *p, int a, double dlt, double k, double *ux, double *uy){
+    double p0 = (p[0] + p[NL_NP - 1]) / 2.0;
+    *ux = (p[a] - p[a + 1]) / (4.0 * dlt * k); *uy = (p[a + 2] - p[a + 3]) / (4.0 * dlt * k);
+    return ((p[a] + p[a + 1] - 2 * p0) + (p[a + 2] + p[a + 3] - 2 * p0)) / (4.0 * dlt * dlt * k);
+}
+
+static int null_main(long long carrier, int rx, const char *port, const char *outfile, int want_iq){
+    FILE *of = fopen(outfile, "w"); if (!of) return 1;
+    int fd = open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd < 0){ fprintf(of, "NULL err=mem\n"); fclose(of); return 1; }
+    void *m = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, NL_WFM_BASE); close(fd);
+    if (m == MAP_FAILED){ fprintf(of, "NULL err=mem\n"); fclose(of); return 1; }
+    nl_regs = m; nl_hasiq = want_iq ? 1 : 0;
+    for (int i = 0; i < NL_B; i++) nl_win[i] = 0.5 - 0.5 * cos(2.0 * M_PI * i / NL_B);
+    uint32_t k0 = nl_rd(0x0C), o0 = nl_rd(0x04), lvl = nl_rd(0x08) & 0xFFFF;
+    int di0 = nl_s12(nl_rd(0x18)), dq0 = nl_s12(nl_rd(0x1C));
+    int gg0 = nl_hasiq ? nl_s18(nl_rd(0x58)) : 0, gs0 = nl_hasiq ? nl_s18(nl_rd(0x5C)) : 0;
+    if ((o0 & 0xFFFFFF) != 0){ fprintf(of, "NULL err=lowif\n"); fclose(of); return 1; }
+    const double adig = 32767.0 * lvl / 65536.0;              // the carrier's digital amplitude in sample LSBs
+    int ch = rx == 2 ? 1 : 0;
+    nl_wr(0x0C, 0); nl_wr(0x04, 136533);                       // silent carrier, 100 kHz above the LO (another offset is tried if a line interferes)
+    sh("iio_attr -q -o -c ad9361-phy altvoltage0 frequency %lld >/dev/null 2>&1", carrier - (long long)OFFSET);
+    sh("iio_attr -q -i -c ad9361-phy voltage%d rf_port_select %s >/dev/null 2>&1", ch, port);
+    sh("iio_attr -q -i -c ad9361-phy voltage%d gain_control_mode manual >/dev/null 2>&1", ch);
+    // RX gain: a mean power of ~3e5 counts^2; refuse a level that is too high even at 0 dB (protects the RX input)
+    int16_t *tmp = malloc(16384 * 2 * sizeof(int16_t)); int g = 10, err = 0;
+    for (int it = 0; it < 4; it++){
+        sh("iio_attr -q -i -c ad9361-phy voltage%d hardwaregain %d >/dev/null 2>&1", ch, g); usleep(30000);
+        if (!tmp || capture(rx, 16384, tmp)){ err = 1; break; }
+        double pw = meanpower(tmp, 16384);
+        if (g == 0 && pw > 2.0e6){ err = 2; break; }
+        if (pw < 3.0){ err = 3; break; }
+        int ng = (int)floor(g + 10.0 * log10(3.0e5 / pw) + 0.5); if (ng < 0) ng = 0; if (ng > 70) ng = 70;
+        if (ng == g) break;
+        g = ng;
+    }
+    free(tmp);
+    // Image: the correction adds (-G + jS)/2^19 of the carrier to the image (G, S in register units of 2^-18), so the image's scale is the
+    // carrier power / 2^38. Steps 600 and 150 (an image of about -59 and -71 dBc), check with 40.
+    double plo[NL_NP], pc[NL_NP], pim[NL_NP], pfl[NL_NP];
+    int di = di0, dq = dq0, gg = gg0, gs = gs0, iq_ok = nl_hasiq;
+    double lo_before = 0, lo_after = 0, img_before = 0, img = 0, flo = 0, curv[2] = {0, 0}, curvi[2] = {0, 0}; int ok = 0;
+    const int dl[2] = { 60, 15 }, dg[2] = { 600, 150 };
+    // offsets of the carrier from the LO: 100 kHz, and if the fit fails (an interfering line near the LO, the image or the carrier) 120, 80, 140 kHz
+    static const uint32_t incs[4] = { 136533, 163840, 109227, 191147 };
+    for (int xi = 0; xi < 4 && !err; xi++){
+        nl_wr(0x04, incs[xi]); NL_X = incs[xi] * 12288000.0 / 16777216.0; usleep(20000);
+        di = di0; dq = dq0; gg = gg0; gs = gs0; iq_ok = nl_hasiq;
+        ok = 1;
+        for (int r = 0; r < 2 && ok; r++){
+            if (nl_round(rx, di, dq, gg, gs, dl[r], iq_ok ? dg[r] : 0, plo, pc, pim, pfl)){ ok = 0; break; }
+            double cc = (pc[0] + pc[NL_NP - 1]) / 2.0, k = cc / (adig * adig), ux, uy;
+            curv[r] = nl_fit(plo, 1, dl[r], k, &ux, &uy);
+            if (r == 0){ lo_before = 10.0 * log10((plo[0] + plo[NL_NP - 1]) / 2.0 / cc); img_before = 10.0 * log10((pim[0] + pim[NL_NP - 1]) / 2.0 / cc); }
+            if (curv[r] < 0.5 || curv[r] > 1.5){ ok = 0; break; }          // the model does not fit (no coupler, wrong port, interference)
+            di = (int)lrint(di - ux); dq = (int)lrint(dq - uy);
+            if (di < -2047 || di > 2047 || dq < -2047 || dq > 2047){ ok = 0; break; }
+            if (iq_ok){                                              // the image: a bad fit only drops the I/Q part, the DC result stays
+                double vx, vy;
+                curvi[r] = nl_fit(pim, 5, dg[r], cc / 274877906944.0, &vx, &vy);
+                int ng = (int)lrint(gg - vx), ns = (int)lrint(gs - vy);
+                if (curvi[r] < 0.5 || curvi[r] > 1.5 || ng < -60000 || ng > 60000 || ns < -60000 || ns > 60000){ iq_ok = 0; gg = gg0; gs = gs0; }
+                else { gg = ng; gs = ns; }
+            }
+        }
+        if (ok){                                               // check: a round at the result with tiny steps gives the remaining lines
+            if (nl_round(rx, di, dq, gg, gs, 4, iq_ok ? 40 : 0, plo, pc, pim, pfl)) ok = 0;
+            else {
+                double cc = (pc[0] + pc[NL_NP - 1]) / 2.0;
+                lo_after = 10.0 * log10((plo[0] + plo[NL_NP - 1]) / 2.0 / cc); img = 10.0 * log10((pim[0] + pim[NL_NP - 1]) / 2.0 / cc); flo = 10.0 * log10((pfl[0] + pfl[NL_NP - 1]) / 2.0 / cc);
+                if (iq_ok && img > img_before + 1.0){ iq_ok = 0; gg = gg0; gs = gs0; }   // never leave the image worse than it was
+            }
+        }
+        if (ok) break;
+    }
+    if (ok){ nl_dc(di, dq); nl_iq(gg, gs); } else { nl_dc(di0, dq0); nl_iq(gg0, gs0); }
+    nl_wr(0x04, o0); nl_wr(0x0C, k0);
+    if (err) fprintf(of, "NULL err=%s gain=%d\n", err == 2 ? "level" : err == 3 ? "nosignal" : "capture", g);
+    else if (!ok) fprintf(of, "NULL err=fit dci=%d dcq=%d curv=%.2f,%.2f gain=%d\n", di0, dq0, curv[0], curv[1], g);
+    else fprintf(of, "NULL ok dci=%d dcq=%d qg=%d qs=%d iq=%s before=%.1f after=%.1f imgb=%.1f image=%.1f floor=%.1f curv=%.2f,%.2f curvi=%.2f,%.2f gain=%d x=%.0f\n",
+                 di, dq, gg, gs, !nl_hasiq ? "na" : iq_ok ? "ok" : "fit", lo_before, lo_after, img_before, img, flo, curv[0], curv[1], curvi[0], curvi[1], g, NL_X / 1e3);
+    fclose(of);
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char **argv){
     if (argc >= 4 && !strcmp(argv[1], "--pwr")){
         struct sched_param spx; spx.sched_priority = 0; sched_setscheduler(0, SCHED_OTHER, &spx);
@@ -875,6 +1042,10 @@ int main(int argc, char **argv){
     if (argc >= 6 && !strcmp(argv[1], "--lo")){
         struct sched_param spx; spx.sched_priority = 0; sched_setscheduler(0, SCHED_OTHER, &spx);
         return lo_main(atoll(argv[2]), atoi(argv[3]), argv[4], atof(argv[5]), argc > 6 ? argv[6] : "/tmp/pluto_lo", argc > 7 ? atoi(argv[7]) : 0);
+    }
+    if (argc >= 6 && !strcmp(argv[1], "--null")){
+        struct sched_param spx; spx.sched_priority = 0; sched_setscheduler(0, SCHED_OTHER, &spx);
+        return null_main(atoll(argv[2]), atoi(argv[3]), argv[4], argv[5], argc > 6 && !strcmp(argv[6], "iq"));
     }
     if (argc >= 6 && !strcmp(argv[1], "--ir")){
         struct sched_param spx; spx.sched_priority = 0; sched_setscheduler(0, SCHED_OTHER, &spx);
