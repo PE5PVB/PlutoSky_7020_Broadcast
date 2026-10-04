@@ -636,7 +636,7 @@ static void ir_finish(void){
     unlink("/tmp/skypluto.hold");
 }
 // TX calibration of the AD9361 (LO leakage = rf_dc_offs, image = tx_quad). The chip's calibration is only valid for the LO frequency it ran at, so it is repeated in a child process
-// after every tune and every time the transmitter opens and when the die temperature has drifted by 3 degC (the output is muted during all of them).
+// after every tune and every time the transmitter opens and when the die temperature has drifted by 8 degC (the output is muted during all of them).
 static double cal_failed_t = 0.0;                          // when the calibration gave up: it is tried again after 30 s
 static int    cal_fail = 0, cal_failed = 0, cal_try = 0;      // cal_fail: consecutive failed attempts; cal_failed: gave up (the output stays muted until the next F/E); cal_try: fork failures
 static long long cal_expect_f = 0;                            // LO frequency the running child has to reach (0 = no retune)
@@ -1915,7 +1915,7 @@ int main(int argc, char **argv){
         if (now - cal_temp_chk >= 15.0){
             cal_temp_chk = now;
             int dT = temp_mC - cal_temp_ref; if (dT < 0) dT = -dT;
-            if (!tx_off && cal_pid <= 0 && !cal_pending && !cal_hold && cal_temp_ref != 0 && dT >= 3000 && now - cal_last_end > 300.0) cal_drift++; else cal_drift = 0;
+            if (!tx_off && cal_pid <= 0 && !cal_pending && !cal_hold && cal_temp_ref != 0 && dT >= 8000 && now - cal_last_end > 300.0) cal_drift++; else cal_drift = 0;
             if (cal_drift >= 4 && ir_pid <= 0){ cal_drift = 0; cal_hold = 1; cal_hold_t = now; cal_pending = 1; cal_retune = 0; cal_due = now;
                 fprintf(stderr, "   -> temperatuurdrift %.1f C: TX-kalibratie\n", dT / 1000.0); fflush(stderr); }
             if (cal_temp_ref == 0 && temp_mC != 0 && !tx_off) cal_temp_ref = temp_mC;
