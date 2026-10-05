@@ -934,6 +934,9 @@ static void measure_done(void){
 // Continuous mask mode: the child delivers a MASK/SPEC/FLOOR block every second; process each complete block immediately
 // tone measurement (audio linearity): the mask monitor delivers 'TONE f=<Hz> dev=<kHz>' before each MASK block as long as /tmp/skypluto.tone is fresh ('?A' touches that file)
 static double tone_f = 0.0, tone_dev = 0.0, tone_t = -100.0; static unsigned long tone_seq = 0;
+// stereo alignment (?SA): the mask monitor delivers 'SA f= m= sm= th= pil=' (or 'SA na') per 0.25 s window as long as /tmp/skypluto.sa is fresh
+#define SA_N 4
+static struct { double t, f, m, sm, th, pil; } sa_r[SA_N]; static int sa_i = 0, sa_cnt = 0;
 static void mask_drain(void){
     for (;;){
         m_buf[m_len] = 0;
@@ -943,6 +946,16 @@ static void mask_drain(void){
             double pp, kk;
             if (sscanf(m_buf, "PWR p=%lf pk=%lf", &pp, &kk) == 2 && pw_en) pw_feed(pp, kk);
             int rest1 = m_len - (int)(e1 + 1 - m_buf); memmove(m_buf, e1 + 1, (size_t)rest1); m_len = rest1; continue;
+        }
+        if (!strncmp(m_buf, "SA ", 3)){
+            char *e2 = strchr(m_buf, '\n');
+            if (!e2) break;
+            double f1, m1, s1, t1, p1;
+            if (sscanf(m_buf, "SA f=%lf m=%lf sm=%lf th=%lf pil=%lf", &f1, &m1, &s1, &t1, &p1) == 5){
+                sa_r[sa_i].t = mono(); sa_r[sa_i].f = f1; sa_r[sa_i].m = m1; sa_r[sa_i].sm = s1; sa_r[sa_i].th = t1; sa_r[sa_i].pil = p1;
+                sa_i = (sa_i + 1) % SA_N; if (sa_cnt < SA_N) sa_cnt++;
+            }
+            int rest2 = m_len - (int)(e2 + 1 - m_buf); memmove(m_buf, e2 + 1, (size_t)rest2); m_len = rest2; continue;
         }
         if (!strncmp(m_buf, "TONE ", 5)){
             char *e0 = strchr(m_buf, '\n');
@@ -1145,6 +1158,26 @@ static void handle(char *line){
             double age = mono() - tone_t;
             if (age > 2.0){ tx_str("a=na\n"); return; }
             snprintf(buf, sizeof buf, "a=%.1f %.3f q=%lu ams=%d\n", tone_f, tone_dev, tone_seq, (int)(age * 1000.0));
+            tx_str(buf); return;
+        }
+        // ?SA = stereo alignment, for a tone on ONE channel (e.g. -18 dBFS on L): the average of the last (up to) 4 valid 0.25 s windows of the same tone
+        // frequency, the newest at most 2 s old. sm = S/M (dB), th = deviation of the 38 kHz subcarrier from 2x pilot (degrees at 38 kHz, positive =
+        // subcarrier leads), sep = separation (dB) from sm and th, pil = pilot (kHz deviation), m = M (kHz), n = windows averaged, ams = age of the newest.
+        // The first '?SA' enables the measurement (valid for 10 s; ask at least every 10 s). 'sa=na' while there is no (fresh, valid) measurement.
+        if (!strcmp(cmd,"?SA")){
+            { FILE *sf = fopen("/tmp/skypluto.sa", "w"); if (sf){ fputs("1\n", sf); fclose(sf); } }
+            double now = mono(); int newest = -1;
+            for (int k = 0; k < sa_cnt; k++) if (newest < 0 || sa_r[k].t > sa_r[newest].t) newest = k;
+            if (newest < 0 || now - sa_r[newest].t > 2.0){ tx_str("sa=na\n"); return; }
+            double m = 0, sm = 0, th = 0, pil = 0; int n = 0;
+            for (int k = 0; k < sa_cnt; k++){
+                if (now - sa_r[k].t > 2.0 || fabs(sa_r[k].f - sa_r[newest].f) > 0.5) continue;
+                m += sa_r[k].m; sm += sa_r[k].sm; th += sa_r[k].th; pil += sa_r[k].pil; n++;
+            }
+            m /= n; sm /= n; th /= n; pil /= n;
+            double r = pow(10.0, sm / 20.0) * cos(th * M_PI / 180.0), sep = -20.0 * log10(fabs((1.0 - r) / (1.0 + r)) + 1e-9);
+            snprintf(buf, sizeof buf, "sa=ok f=%.0f m=%.2f sm=%+.3f th=%+.2f sep=%.1f pil=%.2f n=%d ams=%d\n",
+                     sa_r[newest].f, m, sm, th, sep, pil, n, (int)((now - sa_r[newest].t) * 1000.0));
             tx_str(buf); return;
         }
         // ?J = status of the impulse measurement: j=idle | j=run <s> | j=ok / j=err <rc>, n = number of detected impulses (FPGA counter)

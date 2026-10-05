@@ -422,6 +422,75 @@ static int tone_enabled(void){
     struct stat st;
     return stat("/tmp/skypluto.tone", &st) == 0 && time(NULL) - st.st_mtime < 10;
 }
+// ---- stereo alignment (?SA): a tone on ONE channel (L or R) -> M, S and the pilot from the own transmission -------------------------------------------------
+// Only active if /tmp/skypluto.sa was touched within the last 10 s (by '?SA' of the daemon). 0.1 s of each 0.25 s window: mixed to baseband, channel-filtered
+// (+-200 kHz) and decimated to 768 kS/s, FM-demodulated; the tone is found with a 16384-point FFT of the composite (box-4 to 192 kHz), its frequency rounded to
+// 1 Hz; then Hann-windowed correlations at f (M), 38 kHz - f and 38 kHz + f (the two sidebands of S) and 19 kHz (pilot) on the 768 kS/s composite.
+//   sm  = 20 log10((|U| + |L|) / |M|)         (S relative to M; 0 dB = a perfect L-R / L+R balance)
+//   th  = (phase(U) + phase(L)) / 2 - 2 phase(pilot), folded to the nearest +-90 degrees: the deviation of the 38 kHz subcarrier from its ideal relation to the
+//         pilot, in degrees at 38 kHz; POSITIVE = the subcarrier LEADS (to correct with the pilot: advance the pilot by th/2 degrees at 19 kHz)
+//   pil = pilot amplitude in kHz deviation
+// Output 'SA f=<Hz> m=<kHz> sm=<dB> th=<deg> pil=<kHz>' or 'SA na' (no tone, too weak, |th| > 5 degrees: probably clipped, or |sm| > 1 dB: not a tone on one channel).
+static int sa_enabled(void){
+    struct stat st;
+    return stat("/tmp/skypluto.sa", &st) == 0 && time(NULL) - st.st_mtime < 10;
+}
+static void sa_analyze(const int16_t *buf, long nfr){
+    enum { NS = 307200, NM = (NS - ED_N1) / ED_D, FFT_N = 16384 };
+    if (nfr < NS){ printf("SA na\n"); fflush(stdout); return; }
+    ed_init();
+    static float g[NM]; static double re[FFT_N], im[FFT_N];
+    double pr = 0.0, pq = 0.0, mean = 0.0; long ng = 0;
+    for (long m = 0; m < NM; m++){
+        double yr = 0.0, yi = 0.0; long n0 = m * ED_D;
+        for (int k = 0; k < ED_N1; k++){
+            long n = n0 + k; double a = buf[2*n], b = buf[2*n+1], c = ed_cr[n & 127], sn = ed_ci[n & 127];
+            yr += ed_h1[k] * (a * c - b * sn); yi += ed_h1[k] * (a * sn + b * c);
+        }
+        if (m > 0){ g[ng] = (float)(atan2(yi * pr - yr * pq, yr * pr + yi * pq) * (FS / ED_D) / (2.0 * M_PI)); mean += g[ng]; ng++; }
+        pr = yr; pq = yi;
+    }
+    mean /= (ng ? ng : 1);
+    // tone search: box-4 to 192 kHz, Hann, 16384 points, 300 Hz..16 kHz outside the pilot
+    long nb = ng / 4; if (nb > FFT_N) nb = FFT_N;
+    for (int k = 0; k < FFT_N; k++){
+        double v = 0.0; if (k < nb){ for (int j = 0; j < 4; j++) v += g[4*k + j] - mean; v *= 0.25 * (0.5 - 0.5 * cos(2.0 * M_PI * k / nb)); }
+        re[k] = v; im[k] = 0.0;
+    }
+    fft_inplace(re, im, FFT_N);
+    double binw = (FS / ED_D / 4.0) / FFT_N, best = 0.0; int kp = 0;
+    for (int k = (int)(300.0 / binw); k <= (int)(16000.0 / binw); k++){
+        double fk = k * binw; if (fabs(fk - 19000.0) < 500.0) continue;
+        double m2 = re[k]*re[k] + im[k]*im[k]; if (m2 > best){ best = m2; kp = k; }
+    }
+    if (kp < 2){ printf("SA na\n"); fflush(stdout); return; }
+    double a = log(sqrt(re[kp-1]*re[kp-1] + im[kp-1]*im[kp-1]) + 1e-30), b = 0.5 * log(best + 1e-60), c = log(sqrt(re[kp+1]*re[kp+1] + im[kp+1]*im[kp+1]) + 1e-30);
+    double den = a - 2.0 * b + c, d = (fabs(den) > 1e-12) ? 0.5 * (a - c) / den : 0.0;
+    double ft = floor((kp + d) * binw + 0.5);                        // test tones are whole Hz
+    // correlations on the 768 kS/s composite (Hann)
+    const double fr4[4] = { ft, 38000.0 - ft, 38000.0 + ft, 19000.0 }, fsd = FS / ED_D;
+    double cr[4] = {0}, ci[4] = {0}, ws = 0.0;
+    for (long i = 0; i < ng; i++){ double w = 0.5 - 0.5 * cos(2.0 * M_PI * i / ng); ws += w; }
+    for (int q = 0; q < 4; q++){
+        double ph = -2.0 * M_PI * fr4[q] / fsd, sr = cos(ph), si = sin(ph), wr = 1.0, wi = 0.0;
+        for (long i = 0; i < ng; i++){
+            double w = (0.5 - 0.5 * cos(2.0 * M_PI * i / ng)) * (g[i] - mean);
+            cr[q] += w * wr; ci[q] += w * wi;
+            double t = wr * sr - wi * si; wi = wr * si + wi * sr; wr = t;
+        }
+        cr[q] *= 2.0 / ws; ci[q] *= 2.0 / ws;
+    }
+    // the phase-difference demodulator averages the frequency over one sample: response sinc(f / fsd) (-0.035 dB at 38 kHz at 768 kS/s); undo it per line
+    double cor[4]; for (int q = 0; q < 4; q++){ double x = M_PI * fr4[q] / fsd; cor[q] = x / sin(x); }
+    double aM = hypot(cr[0], ci[0]) / 1e3 * cor[0], aL = hypot(cr[1], ci[1]) / 1e3 * cor[1], aU = hypot(cr[2], ci[2]) / 1e3 * cor[2], aP = hypot(cr[3], ci[3]) / 1e3 * cor[3];
+    if (aM < 1.0 || aL + aU < 0.05){ printf("SA na\n"); fflush(stdout); return; }
+    double car = 0.5 * (atan2(ci[2], cr[2]) + atan2(ci[1], cr[1])) - 2.0 * atan2(ci[3], cr[3]);
+    double dd = 0.5 * atan2(sin(2.0 * car), cos(2.0 * car));          // folded to (-90, 90]
+    double th = (dd >= 0.0 ? dd - M_PI / 2.0 : dd + M_PI / 2.0) * 180.0 / M_PI;
+    double sm = 20.0 * log10((aL + aU) / aM);
+    if (fabs(th) > 5.0 || fabs(sm) > 1.0){ printf("SA na\n"); fflush(stdout); return; }   // clipped, or not a tone on one channel (programme, mono)
+    printf("SA f=%.0f m=%.4f sm=%.4f th=%.3f pil=%.4f\n", ft, aM, sm, th, aP); fflush(stdout);
+}
 static int tone_analyze(const int16_t *buf, long nfr, double *fo, double *dev_khz){
     enum { M = 16384, D = 16 };
     if (nfr < (long)M * D + 2) return 0;
@@ -561,6 +630,7 @@ static int stream_main(long long txlo, int rx, const char *port, int gain, doubl
         double margin = 99;
         if (rdc.ch4){ double n = (double)win_fr, mi = rdc.pw_si[b] / n, mq = rdc.pw_sq[b] / n, p = rdc.pw_s2[b] / n - mi * mi - mq * mq; printf("PWR p=%.1f pk=%ld\n", p, rdc.pw_pk[b]); fflush(stdout); }
         if (tone_enabled()){ double tf, td; if (tone_analyze(x, win_fr, &tf, &td)){ printf("TONE f=%.1f dev=%.3f\n", tf, td); fflush(stdout); } }
+        if (sa_enabled()) sa_analyze(x, win_fr);
         report_block(mh, fmh, g, dev, jumps, cov, &margin);
         { static double last_jmp = 0;                               // keep a capture rejected for phase jumps (at most every 10 s) for analysis
           if (jumps > 0 && t0 - last_jmp > 10.0){ FILE *jf = fopen("/tmp/mask_jump.iq", "wb"); if (jf){ fwrite(x, 2 * sizeof(int16_t), (size_t)win_fr, jf); fclose(jf); last_jmp = t0; } } }
@@ -869,6 +939,11 @@ static int mpx_main(long long txlo, int rx, const char *port, double secs, const
             h[n] = sinc * i0 / i0b; sum += h[n];
         }
         for (int n = 0; n < MPX_TAPS; n++) h[n] /= sum;
+        // The phase-difference demodulator at 768 kS/s averages the frequency over one sample: response sinc(f / 768 kHz), -0.035 dB at 38 kHz,
+        // -0.14 dB at 76 kHz. A 3-tap inverse (-1/24, 1 + 1/12, -1/24) folded into the low-pass undoes it to within 0.001 dB up to 76 kHz.
+        static double h2[MPX_TAPS]; h2[0] = h[0];
+        for (int n = 0; n < MPX_TAPS; n++){ double v = h[n] * (1.0 + 1.0 / 12.0); if (n > 0) v -= h[n-1] / 24.0; if (n + 1 < MPX_TAPS) v -= h[n+1] / 24.0; h2[n] = v; }
+        for (int n = 0; n < MPX_TAPS; n++) h[n] = h2[n];
     }
     int16_t *w = malloc((size_t)MPX_WF * 2 * sizeof(int16_t)); float *f = malloc((size_t)(MPX_WF / ED_D) * sizeof(float));
     if (!w || !f) return 1;
