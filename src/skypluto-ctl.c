@@ -197,7 +197,7 @@ static double guard_low = 3.5;         // dB: below this the limit is lowered (r
 #define GUARD_LOW    guard_low
 #define GUARD_MIN    35.0              // kHz: never lower
 static double ceil_user = 67.0;        // maximum chosen by the user/Pico (kHz)
-static int    guard_on = 1, guard_from_pico = 0, guard_act = 0;    // guard_act = 1: ceil_khz is below ceil_user because of the protection
+static int    guard_on = 0, guard_from_pico = 0, guard_act = 0;    // guard_act = 1: ceil_khz is below ceil_user because of the protection
 static double guard_t = 0.0;           // time of the last change by the protection
 static int    guard_init = 1;          // 1 = initialising: the mask window holds too little data (after start, TX open, mask reset or guard on) for the guard to act
 #define GUARD_INIT_N 240               // spectra (~60 s at 4 per second) needed before the guard takes its first decision

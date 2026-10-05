@@ -67,7 +67,7 @@ and put it on the air** — with a small FPGA-only signal path (no ARM, no DMA, 
   half-duplex UART**, serves a **web interface on port 80**, and offers a local TCP console.
 - **Tune-gated start**: after power-on the transmitter is **closed** (LO off, maximum attenuation). RF only appears
   after the encoder has sent a valid frequency (tune) command.
-- **Continuous mask monitoring** (4 spectra per second, 5-minute max-hold) and an automatic **mask guard** that lowers
+- **Continuous mask monitoring** (4 spectra per second, 5-minute max-hold) and an optional automatic **mask guard** (off by default, `G 1`) that lowers
   the deviation ceiling when the 5-minute mask margin drops below +3.5 dB, and raises it again when there is room.
 - **TX calibration of the AD9361** (LO leakage, image) after every tune and every time the transmitter opens, **with the output muted** until it is done (about 2 s), and again when the die temperature has drifted by 8 °C.
 - **Automatic LO and image nulling** through the directional coupler right after every calibration (about 5 s, silent carrier): the LO leakage
@@ -216,7 +216,7 @@ From a shell on the Pluto (`ssh root@<ip>`, default password `analog`):
 ## Mask protection, limiter and levels
 
 The deviation limit is enforced **in the FPGA** (a 258-sample look-ahead true-peak limiter), so the transmitted deviation can
-never exceed the configured ceiling. On top of that, the **mask guard** watches the spectrum (TX1 through the coupler → RX2) and
+never exceed the configured ceiling. On top of that, the optional **mask guard** (off by default; switch it on with `G 1` or in the encoder menu) watches the spectrum (TX1 through the coupler → RX2) and
 adjusts the ceiling:
 
 - the chosen maximum (`H`) is the *upper limit*;
