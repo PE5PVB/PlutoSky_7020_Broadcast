@@ -112,7 +112,7 @@ off. The **control** itself (see §5) is accurate in relative terms.
 | `?NL` | `NULL ok dci=60 dcq=-41 qg=-421 qs=-97 iq=ok before=-57.3 after=-71.2 imgb=-49.5 image=-77.5 floor=-80.0 curv=1.01,1.05 curvi=1.04,1.06 gain=44 x=100 auto=1 rx=2` — the last nulling: DC result, gain/skew in register units (2^-18), `iq=ok/fit/na`, LO line and image before/after and the measurement floor in dBc, the fit curvatures (≈ 1 = the model fits), RX gain, the offset used (kHz); then `NULLAUTO` and `NULLRX`. `nl=idle` / `nl=run` / `NULL err=<reason>` otherwise. |
 | `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.02 proto=2 ver=1.02 bit=B1D0001A` — identification: `ver=` is the software version of the release (show this one), `bit=` the build id of the FPGA bitstream (`-` if the bitstream has no diagnostics) |
 | `?C` | `cal=auto` |
-| `?M` | `m=+7.3 w=+5.8 sh=-48.7 fl=-71.7 dev=72 n=1180 age=0 tw=1 c=1 seq=5231 ams=180` — mask monitor (see §4a) |
+| `?M` | `m=+7.3 w=+5.8 sh=-48.7 fl=-71.7 dev=72 n=1180 age=0 tw=0 c=1 seq=5231 ams=180 hit=-1 under=0.0 wf=+132` — mask monitor (see §4a) |
 | `?L` | `l=<57 characters> q=<n>` — spectrum of the **latest** measurement (~250 ms); `q` = sequence number (equal to the previous reply = repeat), `l=na` without a measurement |
 | `?D` | `d=<kHz> ceil=<kHz> q=<n> ams=<ms>` — measured peak deviation (kHz) from the FPGA conditioner (`pk/2^23 × 0.75 × kdev`), limiter ceiling, window sequence number and age; `d=na` without a measurement |
 | `?B` | `b=100 Gereed` — latest boot step (see 'Boot status'), `b=0 -` if there has been none yet |
@@ -159,8 +159,10 @@ The **running max-hold over the last 300 s (about 1200 spectra, time-based)** is
 
 - `?M`: `m` = margin of the latest measurement (dB, positive = within the mask); **`w` = margin of the 5-minute max-hold**;
   `sh` = mean shoulder level ±130…170 kHz (dB below the peak); `fl` = monitor noise floor (same scale);
-  `dev` = peak deviation (kHz, sensitive to noise and overshoot, from the first 4 ms of each window: **indication, overestimates**); `n` = number of spectra in the
-  window (max ~1200); `age` = seconds since the last spectrum; `tw` = 1 via the twin; `c` = 1 if the shoulder is ≥ 6 dB above the floor
+  `dev` = peak deviation (kHz) of the 5-minute window, from a band-limited FM demodulation of the RF (±200 kHz channel, 90 kHz composite low-pass; 4 ms of every other window, so it can miss a rare peak: `?D`/`?G` from the FPGA see every sample); `n` = number of spectra in the
+  window (max ~1200); `age` = seconds since the last spectrum; `tw` = 1 via the twin; `c` = 1 if the shoulder is ≥ 6 dB above the floor;
+  `hit` = seconds since the last single spectrum (0.25 s) that was below the mask (-1 = none in the 5-minute window); `under` = % of the window's spectra below the mask;
+  `wf` = offset (kHz) of the worst bin of the 5-minute max-hold (where `w` is measured)
   (0 = floor-limited, `w` is then a lower bound); `seq` = spectrum sequence number; `ams` = age of the latest spectrum in ms. Without a measurement: `m=na n=0`. No measurement is made while the transmitter is off (`E 0`).
 - `?L` / `?W` / `?N`: 57 points, k = −28…+28, frequency = k × 6 kHz relative to the carrier (−168…+168 kHz). One character per point: level in dB below the peak
   in steps of 1.25 dB; `A`…`Z` = 0…25, `a`…`z` = 26…51, `0`…`9` = 52…61 (so dB = −1.25 × index; the 29th character is the carrier).

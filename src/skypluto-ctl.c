@@ -163,6 +163,7 @@ static int    mk_n = 0, mk_i = 0;
 static unsigned long mk_seq = 0;               // count of accepted spectra since daemon start (q= in ?L, seq= in ?M)
 static double cmb_sp[GRID], cmb_fl[GRID], cmb_margin = 0, cmb_sho = 0, cmb_flo = 0, cmb_dev = 0, mk_last_t = 0, mk_last_margin = 0;
 static int    cmb_conc = 0, cmb_n = 0;         // cmb_n = number of measurements in the 5-minute window
+static double cmb_hit = -1.0, cmb_under = 0.0, cmb_wf = 0.0;   // s since the last spectrum below the mask (-1 = none in the window), % of spectra below it, offset (kHz) of the worst bin
 // Twin: via the FPGA, TX2 gets the same modulator output as TX1 and follows the TX1 attenuation; the mask monitor
 // measures TX2 on RX2, so TX1 stays completely free of a measurement coupling. Config: twin=1 in MASKCONF.
 // TX2 is connected DIRECTLY to RX2 (no attenuator): hence never louder than -15 dBm (TX2_MIN_ATTEN), and muted on E 0.
@@ -762,10 +763,11 @@ static int mk_dec(char c, double *db){
 static void mask_combine(void){
     for (int k = 0; k < GRID; k++){ cmb_sp[k] = -99.0; cmb_fl[k] = -99.0; }
     cmb_dev = 0.0; cmb_n = 0;
-    double tnow = mono();
+    double tnow = mono(), t_hit = -1.0; int n_under = 0;
     for (int i = 0; i < mk_n; i++){
         if (tnow - mk[i].t > MASK_WINDOW) continue;                 // older than 5 minutes: excluded
         cmb_n++;
+        if (mk[i].margin < 0.0){ n_under++; if (mk[i].t > t_hit) t_hit = mk[i].t; }
         for (int k = 0; k < GRID; k++){
             if (mk[i].sp[k] > cmb_sp[k]) cmb_sp[k] = mk[i].sp[k];
             if (mk[i].fl[k] > cmb_fl[k]) cmb_fl[k] = mk[i].fl[k];
@@ -776,9 +778,10 @@ static void mask_combine(void){
     for (int k = 0; k < GRID; k++){
         double off = (k - GRID / 2) * 6.0, ad = fabs(off);
         if (ad < 80.0) continue;
-        double m = mask_lvl(off) - cmb_sp[k]; if (m < margin) margin = m;
+        double m = mask_lvl(off) - cmb_sp[k]; if (m < margin){ margin = m; cmb_wf = off; }
         if (ad >= 130.0){ sh += cmb_sp[k]; fl += cmb_fl[k]; n++; }
     }
+    cmb_hit = (t_hit >= 0.0) ? tnow - t_hit : -1.0; cmb_under = cmb_n ? 100.0 * n_under / cmb_n : 0.0;
     cmb_margin = margin; cmb_sho = n ? sh / n : 0; cmb_flo = n ? fl / n : 0; cmb_conc = ((cmb_sho - cmb_flo) >= 6.0);
 }
 // Mask protection: evaluate every ~1 s (after mask_combine). The 5-minute window is cleared after every change, so the margin below is the one SINCE the change.
@@ -1212,9 +1215,12 @@ static void handle(char *line){
         // mask monitor (SM.1268-5), live for the Pico web interface
         if (!strcmp(cmd,"?M")){
             if (mk_n <= 0){ tx_str("m=na n=0\n"); return; }
-            snprintf(buf,sizeof buf,"m=%+.1f w=%+.1f sh=%.1f fl=%.1f dev=%.0f n=%d age=%d tw=%d c=%d seq=%lu ams=%d\n",
+            // hit = s since the last single spectrum below the mask (-1 = none in the 5-minute window), under = % of the window's spectra below it,
+            // wf = offset (kHz) of the worst bin of the 5-minute max-hold
+            snprintf(buf,sizeof buf,"m=%+.1f w=%+.1f sh=%.1f fl=%.1f dev=%.0f n=%d age=%d tw=%d c=%d seq=%lu ams=%d hit=%d under=%.1f wf=%+.0f\n",
                      mk_last_margin, cmb_margin, cmb_sho, cmb_flo, cmb_dev, cmb_n, (int)(mono() - mk_last_t),
-                     (mask_rx_cfg == 2 && twin_enable) ? 1 : 0, cmb_conc, mk_seq, (int)((mono() - mk_last_t) * 1000.0));
+                     (mask_rx_cfg == 2 && twin_enable) ? 1 : 0, cmb_conc, mk_seq, (int)((mono() - mk_last_t) * 1000.0),
+                     cmb_hit < 0.0 ? -1 : (int)cmb_hit, cmb_under, cmb_wf);
             tx_str(buf); return;
         }
         if (!strcmp(cmd,"?W") || !strcmp(cmd,"?N")){
