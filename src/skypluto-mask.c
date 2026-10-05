@@ -211,7 +211,10 @@ static long count_jumps(const int16_t *x, long frames){
         if (ar*ar + ai*ai < 1.0e4) continue;                        // too little signal: phase meaningless
         double re = br*ar + bi*ai, im = bi*ar - br*ai;              // b * conj(a)
         double r2 = re*c0 + im*s0, i2 = im*c0 - re*s0;              // derotation by the expected step
-        if (r2 <= 0.0 || i2*i2 > 0.5 * r2*r2) n++;                  // angle > ~35 degrees
+        // angle > ~47 degrees: a missing sample shifts the phase by the full expected step (59 degrees, at least 50 at the deviation extremes),
+        // while another station inside the RX bandwidth (e.g. an FM broadcaster 1.5 MHz away through the coupler, -13 dB) bends single steps
+        // by up to ~35 degrees when the own carrier sits at its deviation extreme; 35 degrees as the limit rejected every capture of a full-scale tone
+        if (r2 <= 0.0 || i2*i2 > 1.15 * r2*r2) n++;
     }
     return n;
 }
@@ -282,7 +285,7 @@ static long count_jumps_f(const int16_t *x, long frames, float pr, float pi_, in
         if (ar*ar + ai*ai >= 1.0e4f){
             float re = br*ar + bi*ai, im = bi*ar - br*ai;
             float r2 = re*c0 + im*s0, i2 = im*c0 - re*s0;
-            if (r2 <= 0.0f || i2*i2 > 0.5f * r2*r2) n++;
+            if (r2 <= 0.0f || i2*i2 > 1.15f * r2*r2) n++;            // > ~47 degrees, see count_jumps
         }
         ar = br; ai = bi;
     }
@@ -333,7 +336,55 @@ static long maxhold_h(const int16_t *x, long frames, double *mh, int hop){
     for (int k = 0; k < N; k++) if (mh2[k] > mh[k]) mh[k] = mh2[k];
     return a.nf + b.nf;
 }
-static double est_dev(const int16_t *buf, long nd){        // peak deviation (kHz) over the first nd samples (LP 16), as in the single-shot mode
+// Peak deviation (kHz) of the transmission over the first nd samples, measured like an FM receiver would: the carrier (at OFFSET) is mixed to
+// baseband, channel-filtered (+-200 kHz, linear phase) and decimated by 4 to 768 kS/s, FM-demodulated, and the result is low-passed at 90 kHz
+// (the composite band: everything the modulator can carry, nothing above). Noise and the RF skirts outside the composite band no longer add to
+// the peak (a plain instantaneous frequency with a short boxcar read ~15 kHz too high).
+#define ED_D   4                                   // decimation
+#define ED_N1  63                                  // channel filter taps (at FS)
+#define ED_N2  41                                  // composite low-pass taps (at FS / ED_D)
+static float ed_h1[ED_N1], ed_h2[ED_N2], ed_cr[128], ed_ci[128];
+static void ed_lp(float *h, int n, double fc, double fs){        // Blackman-windowed sinc, unity gain at DC
+    double s = 0;
+    for (int k = 0; k < n; k++){
+        double m = k - (n - 1) / 2.0, x = 2.0 * fc / fs * m;
+        double sinc = (m == 0) ? 1.0 : sin(M_PI * x) / (M_PI * x);
+        double w = 0.42 - 0.5 * cos(2.0 * M_PI * k / (n - 1)) + 0.08 * cos(4.0 * M_PI * k / (n - 1));
+        h[k] = (float)(2.0 * fc / fs * sinc * w); s += h[k];
+    }
+    for (int k = 0; k < n; k++) h[k] = (float)(h[k] / s);
+}
+static void ed_init(void){
+    static int done = 0; if (done) return; done = 1;
+    ed_lp(ed_h1, ED_N1, 200e3, FS); ed_lp(ed_h2, ED_N2, 90e3, FS / ED_D);
+    for (int i = 0; i < 128; i++){ double a = -2.0 * M_PI * OFFSET / FS * i; ed_cr[i] = (float)cos(a); ed_ci[i] = (float)sin(a); }   // OFFSET/FS = 21/128: the mixer repeats every 128 samples
+}
+static double est_dev(const int16_t *buf, long nd){
+    ed_init();
+    long nm = (nd - ED_N1) / ED_D; if (nm < ED_N2 + 16) return 0.0;
+    float *fr = malloc((size_t)nm * sizeof(float)), *xr = malloc((size_t)nd * sizeof(float)), *xi = malloc((size_t)nd * sizeof(float));
+    if (!fr || !xr || !xi){ free(fr); free(xr); free(xi); return 0.0; }
+    for (long n = 0; n < nd; n++){ float a = buf[2*n], b = buf[2*n+1], c = ed_cr[n & 127], s = ed_ci[n & 127]; xr[n] = a * c - b * s; xi[n] = a * s + b * c; }
+    double pr = 0, pi_ = 0, mean = 0; long cnt = 0;
+    for (long m = 0; m < nm; m++){
+        const float *ar = xr + m * ED_D, *ai = xi + m * ED_D; float yr = 0, yi = 0;
+        for (int k = 0; k < ED_N1; k++){ yr += ed_h1[k] * ar[k]; yi += ed_h1[k] * ai[k]; }
+        if (m > 0){ fr[cnt] = atan2f(yi * (float)pr - yr * (float)pi_, yr * (float)pr + yi * (float)pi_) * (float)(FS / ED_D / (2.0 * M_PI)); cnt++; }
+        pr = yr; pi_ = yi;
+    }
+    double pk = 0; long nl = cnt - ED_N2 + 1; float *g = malloc((size_t)(nl > 0 ? nl : 1) * sizeof(float));
+    if (g && nl > 0){
+        for (long i = 0; i < nl; i++){ float s = 0; for (int k = 0; k < ED_N2; k++) s += ed_h2[k] * fr[i + k]; g[i] = s; mean += s; }
+        mean /= nl;
+        for (long i = 0; i < nl; i++){ double d = fabs(g[i] - mean); if (d > pk) pk = d; }
+    }
+    free(g); free(fr); free(xr); free(xi);
+    return pk / 1e3;
+}
+
+// Raw instantaneous frequency (boxcar of 16 samples, no channel filter): only a check for a disturbed capture (noise instead of a signal gives
+// impossible values above 150 kHz). It reads ~15 kHz high on a real transmission, so it is NOT the reported deviation.
+static double est_dev_raw(const int16_t *buf, long nd){
     double lp[16] = {0}, sum = 0, mean = 0, pk = 0; long cnt = 0;
     float *fl = malloc((size_t)nd * sizeof(float)); if (!fl) return 0.0;
     for (long i = 0; i + 1 < nd; i++){
@@ -502,12 +553,17 @@ static int stream_main(long long txlo, int rx, const char *port, int gain, doubl
         pr = x[2*(win_fr-1)]; pi_ = x[2*(win_fr-1)+1];
         long nf = maxhold_h(x, win_fr, mh, hop);
         double cov = (double)(N / 2) / hop; if (cov > 1.0) cov = 1.0;     // 1.00 = at least 50 % overlap (a burst cannot hide); 0.67 at hop 384
-        double dev = est_dev(x, 12288);                             // 4 ms is enough for a deviation indication (expensive atan2 per sample, so keep it short)
-        if (dev > 150.0) jumps += 1000;                             // impossible deviation (max ~+-75 kHz): capture disturbed -> the daemon ignores this window
+        // 4 ms of every other 0.25 s window (~5 ms of CPU each; more would cost the FFT its 50 % overlap). The FPGA's ?D/?G see every sample;
+        // this is the RF check, and the daemon keeps the maximum over 5 minutes, so a repeated value changes nothing.
+        static double dev_last = 0.0; static long dev_n = 0;
+        double dev = (dev_n++ & 1) ? dev_last : (dev_last = est_dev(x, win_fr < 12288 ? win_fr : 12288));
+        if (est_dev_raw(x, 12288) > 150.0) jumps += 1000;           // impossible deviation (max ~+-75 kHz): capture disturbed -> the daemon ignores this window
         double margin = 99;
         if (rdc.ch4){ double n = (double)win_fr, mi = rdc.pw_si[b] / n, mq = rdc.pw_sq[b] / n, p = rdc.pw_s2[b] / n - mi * mi - mq * mq; printf("PWR p=%.1f pk=%ld\n", p, rdc.pw_pk[b]); fflush(stdout); }
         if (tone_enabled()){ double tf, td; if (tone_analyze(x, win_fr, &tf, &td)){ printf("TONE f=%.1f dev=%.3f\n", tf, td); fflush(stdout); } }
         report_block(mh, fmh, g, dev, jumps, cov, &margin);
+        { static double last_jmp = 0;                               // keep a capture rejected for phase jumps (at most every 10 s) for analysis
+          if (jumps > 0 && t0 - last_jmp > 10.0){ FILE *jf = fopen("/tmp/mask_jump.iq", "wb"); if (jf){ fwrite(x, 2 * sizeof(int16_t), (size_t)win_fr, jf); fclose(jf); last_jmp = t0; } } }
         if (margin < 3.0 && jumps == 0 && t0 - last_bad > 5.0){    // keep a bad, undisturbed capture (two alternating files)
             char fn[64]; snprintf(fn, sizeof fn, "/tmp/mask_bad_%d.iq", (int)(time(NULL) & 1));
             FILE *bf = fopen(fn, "wb");
@@ -1092,22 +1148,8 @@ int main(int argc, char **argv){
     long jumps = count_jumps(buf, frames);
     { FILE *cf = fopen("/tmp/mask_cur.iq", "wb");                 // keep the main capture temporarily (deleted or renamed at the end)
       if (cf){ fwrite(buf, 2 * sizeof(int16_t), (size_t)frames, cf); fclose(cf); } }
-    // deviation (LP 16 points) and signal spectrum
-    double pk = 0;
-    { long nd = frames < 768000 ? frames : 768000;      // deviation over the first quarter second (atan2 per sample is expensive on the ARM)
-      double lp[16] = {0}; double sum = 0, mean = 0; long cnt = 0; static double *fl; fl = malloc((size_t)nd * sizeof(double));
-      if (fl){
-        for (long i = 0; i + 1 < nd; i++){
-            double ar = buf[2*i], ai = buf[2*i+1], br = buf[2*i+2], bi = buf[2*i+3];
-            double re = br*ar + bi*ai, im = bi*ar - br*ai;
-            double f = atan2(im, re) * FS / (2.0 * M_PI);
-            sum += f - lp[i & 15]; lp[i & 15] = f;
-            if (i >= 15){ fl[cnt++] = sum / 16.0; mean += fl[cnt-1]; }
-        }
-        mean /= cnt ? cnt : 1;
-        for (long i = 0; i < cnt; i++){ double d = fabs(fl[i] - mean); if (d > pk) pk = d; }
-        free(fl);
-      } }
+    // deviation (band-limited FM demodulation over the first quarter second) and signal spectrum
+    double pk = est_dev(buf, frames < 768000 ? frames : 768000) * 1e3;
     static double mh[N], fmh[N];
     maxhold(buf, frames, mh);
 
