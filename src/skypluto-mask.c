@@ -435,9 +435,34 @@ static int sa_enabled(void){
     struct stat st;
     return stat("/tmp/skypluto.sa", &st) == 0 && time(NULL) - st.st_mtime < 10;
 }
-static void sa_analyze(const int16_t *buf, long nfr){
+// ---- composite DC (?SD): the mean instantaneous frequency of the carrier relative to the tuned frequency ------------------------------------------------
+// Active if /tmp/skypluto.sd was touched within the last 10 s. From the same demodulation as ?SA: Hann-weighted mean of the instantaneous frequency (Hz;
+// the window suppresses the pilot and any tone), minus what the two synthesizers contribute: the capture's carrier sits at
+// (TX LO - RX LO) - OFFSET, and both LOs are fractional-N with a finite step, so their actual frequencies (read back from the driver, 1 Hz) are used.
+// What remains is the DC of the composite in Hz deviation (plus < 1 Hz from the rounding of the read-back). The absolute error of the 40 MHz reference
+// is NOT visible: TX and RX share it. Output 'SD dc=<Hz>' (positive = carrier above the tuned frequency).
+static int sd_enabled(void){
+    struct stat st;
+    return stat("/tmp/skypluto.sd", &st) == 0 && time(NULL) - st.st_mtime < 10;
+}
+static int sd_lo(const char *attr, long long *v){                  // read an LO frequency (Hz) of ad9361-phy from sysfs
+    static char dir[96] = "";
+    if (!dir[0]){
+        for (int i = 0; i < 8; i++){
+            char p[96], nm[32] = ""; snprintf(p, sizeof p, "/sys/bus/iio/devices/iio:device%d/name", i);
+            FILE *f = fopen(p, "r"); if (!f) continue;
+            if (fgets(nm, sizeof nm, f) && !strncmp(nm, "ad9361-phy", 10)) snprintf(dir, sizeof dir, "/sys/bus/iio/devices/iio:device%d", i);
+            fclose(f); if (dir[0]) break;
+        }
+        if (!dir[0]) return -1;
+    }
+    char p[160]; snprintf(p, sizeof p, "%s/%s", dir, attr);
+    FILE *f = fopen(p, "r"); if (!f) return -1;
+    int ok = fscanf(f, "%lld", v) == 1; fclose(f); return ok ? 0 : -1;
+}
+static void sa_analyze(const int16_t *buf, long nfr, int do_sa, int do_sd){
     enum { NS = 307200, NM = (NS - ED_N1) / ED_D, FFT_N = 16384 };
-    if (nfr < NS){ printf("SA na\n"); fflush(stdout); return; }
+    if (nfr < NS){ if (do_sa){ printf("SA na\n"); fflush(stdout); } return; }
     ed_init();
     static float g[NM]; static double re[FFT_N], im[FFT_N];
     double pr = 0.0, pq = 0.0, mean = 0.0; long ng = 0;
@@ -451,6 +476,14 @@ static void sa_analyze(const int16_t *buf, long nfr){
         pr = yr; pq = yi;
     }
     mean /= (ng ? ng : 1);
+    if (do_sd){
+        double sw = 0.0, sg = 0.0; long long tx = 0, rx = 0;
+        for (long i = 0; i < ng; i++){ double w = 0.5 - 0.5 * cos(2.0 * M_PI * i / ng); sw += w; sg += w * g[i]; }
+        if (sw > 0.0 && sd_lo("out_altvoltage1_TX_LO_frequency", &tx) == 0 && sd_lo("out_altvoltage0_RX_LO_frequency", &rx) == 0){
+            printf("SD dc=%.3f\n", sg / sw - ((double)(tx - rx) - OFFSET)); fflush(stdout);
+        }
+    }
+    if (!do_sa) return;
     // tone search: box-4 to 192 kHz, Hann, 16384 points, 300 Hz..16 kHz outside the pilot
     long nb = ng / 4; if (nb > FFT_N) nb = FFT_N;
     for (int k = 0; k < FFT_N; k++){
@@ -630,7 +663,7 @@ static int stream_main(long long txlo, int rx, const char *port, int gain, doubl
         double margin = 99;
         if (rdc.ch4){ double n = (double)win_fr, mi = rdc.pw_si[b] / n, mq = rdc.pw_sq[b] / n, p = rdc.pw_s2[b] / n - mi * mi - mq * mq; printf("PWR p=%.1f pk=%ld\n", p, rdc.pw_pk[b]); fflush(stdout); }
         if (tone_enabled()){ double tf, td; if (tone_analyze(x, win_fr, &tf, &td)){ printf("TONE f=%.1f dev=%.3f\n", tf, td); fflush(stdout); } }
-        if (sa_enabled()) sa_analyze(x, win_fr);
+        { int a = sa_enabled(), d = sd_enabled(); if (a || d) sa_analyze(x, win_fr, a, d); }
         report_block(mh, fmh, g, dev, jumps, cov, &margin);
         { static double last_jmp = 0;                               // keep a capture rejected for phase jumps (at most every 10 s) for analysis
           if (jumps > 0 && t0 - last_jmp > 10.0){ FILE *jf = fopen("/tmp/mask_jump.iq", "wb"); if (jf){ fwrite(x, 2 * sizeof(int16_t), (size_t)win_fr, jf); fclose(jf); last_jmp = t0; } } }

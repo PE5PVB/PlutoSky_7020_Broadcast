@@ -937,6 +937,9 @@ static double tone_f = 0.0, tone_dev = 0.0, tone_t = -100.0; static unsigned lon
 // stereo alignment (?SA): the mask monitor delivers 'SA f= m= sm= th= pil=' (or 'SA na') per 0.25 s window as long as /tmp/skypluto.sa is fresh
 #define SA_N 4
 static struct { double t, f, m, sm, th, pil; } sa_r[SA_N]; static int sa_i = 0, sa_cnt = 0;
+// composite DC (?SD): 'SD dc=<Hz>' per window as long as /tmp/skypluto.sd is fresh; the last (up to) 8 are averaged
+#define SD_N 8
+static struct { double t, dc; } sd_r[SD_N]; static int sd_i = 0, sd_cnt = 0;
 static void mask_drain(void){
     for (;;){
         m_buf[m_len] = 0;
@@ -946,6 +949,13 @@ static void mask_drain(void){
             double pp, kk;
             if (sscanf(m_buf, "PWR p=%lf pk=%lf", &pp, &kk) == 2 && pw_en) pw_feed(pp, kk);
             int rest1 = m_len - (int)(e1 + 1 - m_buf); memmove(m_buf, e1 + 1, (size_t)rest1); m_len = rest1; continue;
+        }
+        if (!strncmp(m_buf, "SD ", 3)){
+            char *e3 = strchr(m_buf, '\n');
+            if (!e3) break;
+            double d1;
+            if (sscanf(m_buf, "SD dc=%lf", &d1) == 1){ sd_r[sd_i].t = mono(); sd_r[sd_i].dc = d1; sd_i = (sd_i + 1) % SD_N; if (sd_cnt < SD_N) sd_cnt++; }
+            int rest3 = m_len - (int)(e3 + 1 - m_buf); memmove(m_buf, e3 + 1, (size_t)rest3); m_len = rest3; continue;
         }
         if (!strncmp(m_buf, "SA ", 3)){
             char *e2 = strchr(m_buf, '\n');
@@ -1178,6 +1188,18 @@ static void handle(char *line){
             double r = pow(10.0, sm / 20.0) * cos(th * M_PI / 180.0), sep = -20.0 * log10(fabs((1.0 - r) / (1.0 + r)) + 1e-9);
             snprintf(buf, sizeof buf, "sa=ok f=%.0f m=%.2f sm=%+.3f th=%+.2f sep=%.1f pil=%.2f n=%d ams=%d\n",
                      sa_r[newest].f, m, sm, th, sep, pil, n, (int)((now - sa_r[newest].t) * 1000.0));
+            tx_str(buf); return;
+        }
+        // ?SD = composite DC: mean instantaneous frequency of the carrier relative to the tuned frequency in Hz (positive = carrier too high), with the
+        // fractional-N steps of the TX and RX synthesizers removed; average of the last (up to) 8 windows of at most 4 s old (n), ams = age of the newest.
+        // Works with silence, pilot or programme (the Hann window suppresses tones). The absolute error of the 40 MHz reference is not visible (TX and RX share it).
+        // The first '?SD' enables the measurement (valid for 10 s). 'sd=na' while there is no fresh measurement.
+        if (!strcmp(cmd,"?SD")){
+            { FILE *sf = fopen("/tmp/skypluto.sd", "w"); if (sf){ fputs("1\n", sf); fclose(sf); } }
+            double now = mono(), dc = 0.0, tn = -1e9; int n = 0;
+            for (int k = 0; k < sd_cnt; k++){ if (now - sd_r[k].t > 4.0) continue; dc += sd_r[k].dc; n++; if (sd_r[k].t > tn) tn = sd_r[k].t; }
+            if (n == 0){ tx_str("sd=na\n"); return; }
+            snprintf(buf, sizeof buf, "sd=ok dc=%+.2f n=%d ams=%d\n", dc / n, n, (int)((now - tn) * 1000.0));
             tx_str(buf); return;
         }
         // ?J = status of the impulse measurement: j=idle | j=run <s> | j=ok / j=err <rc>, n = number of detected impulses (FPGA counter)
