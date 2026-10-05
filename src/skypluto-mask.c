@@ -437,28 +437,13 @@ static int sa_enabled(void){
 }
 // ---- composite DC (?SD): the mean instantaneous frequency of the carrier relative to the tuned frequency ------------------------------------------------
 // Active if /tmp/skypluto.sd was touched within the last 10 s. From the same demodulation as ?SA: Hann-weighted mean of the instantaneous frequency (Hz;
-// the window suppresses the pilot and any tone), minus what the two synthesizers contribute: the capture's carrier sits at
-// (TX LO - RX LO) - OFFSET, and both LOs are fractional-N with a finite step, so their actual frequencies (read back from the driver, 1 Hz) are used.
-// What remains is the DC of the composite in Hz deviation (plus < 1 Hz from the rounding of the read-back). The absolute error of the 40 MHz reference
-// is NOT visible: TX and RX share it. Output 'SD dc=<Hz>' (positive = carrier above the tuned frequency).
+// the window suppresses the pilot and any tone). The capture's carrier sits at (TX LO - RX LO) - OFFSET; both LOs are set to exact values (RX = TX - OFFSET)
+// and their fractional-N step is ~0.15 Hz at 108 MHz, so what remains is the DC of the composite in Hz deviation. The driver's read-back of the LO
+// frequencies is NOT used: it is off by up to ~2 Hz (an unmodulated carrier read -1.95 Hz with it, +0.05 Hz without). The absolute error of the 40 MHz
+// reference is not visible: TX and RX share it. Output 'SD dc=<Hz>' (positive = carrier above the tuned frequency).
 static int sd_enabled(void){
     struct stat st;
     return stat("/tmp/skypluto.sd", &st) == 0 && time(NULL) - st.st_mtime < 10;
-}
-static int sd_lo(const char *attr, long long *v){                  // read an LO frequency (Hz) of ad9361-phy from sysfs
-    static char dir[96] = "";
-    if (!dir[0]){
-        for (int i = 0; i < 8; i++){
-            char p[96], nm[32] = ""; snprintf(p, sizeof p, "/sys/bus/iio/devices/iio:device%d/name", i);
-            FILE *f = fopen(p, "r"); if (!f) continue;
-            if (fgets(nm, sizeof nm, f) && !strncmp(nm, "ad9361-phy", 10)) snprintf(dir, sizeof dir, "/sys/bus/iio/devices/iio:device%d", i);
-            fclose(f); if (dir[0]) break;
-        }
-        if (!dir[0]) return -1;
-    }
-    char p[160]; snprintf(p, sizeof p, "%s/%s", dir, attr);
-    FILE *f = fopen(p, "r"); if (!f) return -1;
-    int ok = fscanf(f, "%lld", v) == 1; fclose(f); return ok ? 0 : -1;
 }
 static void sa_analyze(const int16_t *buf, long nfr, int do_sa, int do_sd){
     enum { NS = 307200, NM = (NS - ED_N1) / ED_D, FFT_N = 16384 };
@@ -477,11 +462,9 @@ static void sa_analyze(const int16_t *buf, long nfr, int do_sa, int do_sd){
     }
     mean /= (ng ? ng : 1);
     if (do_sd){
-        double sw = 0.0, sg = 0.0; long long tx = 0, rx = 0;
+        double sw = 0.0, sg = 0.0;
         for (long i = 0; i < ng; i++){ double w = 0.5 - 0.5 * cos(2.0 * M_PI * i / ng); sw += w; sg += w * g[i]; }
-        if (sw > 0.0 && sd_lo("out_altvoltage1_TX_LO_frequency", &tx) == 0 && sd_lo("out_altvoltage0_RX_LO_frequency", &rx) == 0){
-            printf("SD dc=%.3f\n", sg / sw - ((double)(tx - rx) - OFFSET)); fflush(stdout);
-        }
+        if (sw > 0.0){ printf("SD dc=%.3f\n", sg / sw); fflush(stdout); }
     }
     if (!do_sa) return;
     // tone search: box-4 to 192 kHz, Hann, 16384 points, 300 Hz..16 kHz outside the pilot
