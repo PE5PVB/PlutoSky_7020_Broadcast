@@ -192,7 +192,7 @@ for the encoder's splash screen. The encoder stays silent until `#B 100`. `?B` r
 
 | Query | Answer |
 |-------|--------|
-| `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.02 proto=2 ver=1.02 bit=B1D0001A` (software version and bitstream id) |
+| `?V` | `magic=57464D32 fw=PlutoSky_7020_Broadcast-1.02 proto=2 ver=1.02 bit=B1D0001B` (software version and bitstream id) |
 | `?S` | `en=1 f=107999998 p=-29.00 att=34.00 tx=on up=312 kdev=100` — state, frequency, level, attenuation, uptime |
 | `?P` | `set=-29.00 out=-29.00 att=34.00 trim=0.00 alc=hold` — set point and the automatic level control |
 | `?T` | `temp=39.5` — board temperature (°C) |

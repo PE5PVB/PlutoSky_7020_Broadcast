@@ -33,7 +33,7 @@ module tb_i2s_rx;
     always #40.69 bclk = ~bclk;
     always @(posedge bclk) if (valid) valid_count = valid_count + 1;
 
-    skypluto_i2s_rx #(.DATA_W(DATA_W), .WS_TO_MSB(1)) dut (
+    skypluto_i2s_rx #(.DATA_W(DATA_W), .WS_TO_MSB(1), .EVAL_LOG2(11)) dut (
         .bclk(bclk), .ws(ws), .sd(sd),
         .man_en(man_en), .man_mode(man_mode), .man_bits(man_bits),
         .left(left), .right(right), .valid(valid),

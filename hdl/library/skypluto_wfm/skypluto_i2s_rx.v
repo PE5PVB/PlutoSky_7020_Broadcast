@@ -22,14 +22,19 @@
 //        LJ via dis[]: position p 'ever differs' from the bit at p = 0. With RJ-with-extension the first deviation comes only after (L - D + 1) positions (R >= 6); with
 //        LJ audio already after 1..4 positions. The word width is then D = the smallest standard width (16/20/24/32) >= L + 1 - R (the first data bits that are also
 //        equal to the sign make R slightly larger; this holds down to about -24 dBFS signal). Only a completely filled slot is ambiguous in this way.
-//     Every 2048 slots an evaluation is made; the format only changes after two equal evaluations. On silence (all zero) the format is kept.
+//     Every 2^EVAL_LOG2 slots (default 65536 = 170 ms at 192 kHz stereo) an evaluation is made; the format only changes after two equal
+//     evaluations. On silence (all zero) the format is kept. The window must be long: a window in which every sample is POSITIVE has a sign
+//     bit that is never 1, which looks exactly like a padded/right-justified word one or more bits later. A low bass tone (20-30 Hz) keeps
+//     the composite positive for ~10 ms around each crest; with windows of 2048 slots (5.3 ms) that flipped the format to right-justified
+//     and back, with gross errors on the samples in between. 170 ms contains a negative half period of anything above ~3 Hz.
 //   * The word is LEFT-ALIGNED to 24 bit (16-bit data << 8): full scale, and hence deviation, stay the same.
 // =============================================================================
 `timescale 1ns/1ps
 
 module skypluto_i2s_rx #(
     parameter integer DATA_W    = 24,  // output width per channel
-    parameter integer WS_TO_MSB = 1    // (initial format only) BCLKs from WS edge to MSB
+    parameter integer WS_TO_MSB = 1,   // (initial format only) BCLKs from WS edge to MSB
+    parameter integer EVAL_LOG2 = 16   // format evaluation window: 2^EVAL_LOG2 slots (11..16)
 )(
     input  wire                      bclk,   // I2S bit clock (external) - clock
     input  wire                      ws,     // word select / LRCLK
@@ -64,8 +69,9 @@ module skypluto_i2s_rx #(
 
     // ---- bit activity per position ----
     reg [63:0]  act     = 64'd0;
-    reg [11:0]  a_slots = 12'd0;
-    reg [11:0]  agree   = 12'd0;             // slots in which the bit at p=0 equalled the bit at p=1
+    reg [16:0]  a_slots = 17'd0;
+    reg [16:0]  agree   = 17'd0;             // slots in which the bit at p=0 equalled the bit at p=1
+    localparam [16:0] AG_HI = 17'd1700 << (EVAL_LOG2 - 11), AG_LO = 17'd1100 << (EVAL_LOG2 - 11);   // 83 % / 54 % of the window
     reg         p0b     = 1'b0;
     reg [63:0]  dis     = 64'd0;             // position p has ever had a different bit than position 0 (p0b)
     reg         rjx     = 1'b0;              // current format = right-justified with sign extension
@@ -97,7 +103,7 @@ module skypluto_i2s_rx #(
                 m_c = slot_l - dp_f;
                 n_c = (dp_f > DATA_W) ? DATA_W : dp_f;
             end else if (s_f == 8'd0 && e_f == slot_l - 8'd1) begin               // full slot: I2S or LJ?
-                m_c = (agree > 12'd1700) ? 8'd0 : (agree < 12'd1100) ? 8'd1 : ((f_m == 8'd0) ? 8'd0 : 8'd1);   // >83 %: LJ, <54 %: I2S, in between: keep (hysteresis)
+                m_c = (agree > AG_HI) ? 8'd0 : (agree < AG_LO) ? 8'd1 : ((f_m == 8'd0) ? 8'd0 : 8'd1);   // >83 %: LJ, <54 %: I2S, in between: keep (hysteresis)
                 n_c = (slot_l > DATA_W) ? DATA_W : slot_l;
             end else if (s_f == 8'd0) begin                             // left-justified with padding
                 m_c = 8'd0;
@@ -129,10 +135,10 @@ module skypluto_i2s_rx #(
             if (bitpos == l_prev && bitpos >= 8'd8) begin slot_l <= bitpos; fmt_slot <= bitpos; end
             // activity: position 0 = this cycle
             act[0] <= act[0] | sd; p0b <= sd;
-            // format evaluation every 2048 slots
-            a_slots <= a_slots + 12'd1;
-            if (a_slots == 12'd2047) begin
-                a_slots <= 12'd0; act <= {63'd0, sd}; agree <= 12'd0; dis <= 64'd0;
+            // format evaluation every 2^EVAL_LOG2 slots
+            a_slots <= a_slots + 17'd1;
+            if (a_slots == (17'd1 << EVAL_LOG2) - 17'd1) begin
+                a_slots <= 17'd0; act <= {63'd0, sd}; agree <= 17'd0; dis <= 64'd0;
                 if (!man_en && any_f) begin
                     cand_m <= m_c; cand_n <= n_c; cand_x <= x_c;
                     if (m_c == cand_m && n_c == cand_n && x_c == cand_x) begin f_m <= m_c; f_n <= n_c; rjx <= x_c; end   // only after two equal evaluations
@@ -151,7 +157,7 @@ module skypluto_i2s_rx #(
             bitpos <= 8'd1;                  // this cycle counts as "0 since edge"
         end else begin
             if (bitpos < 8'd64) act[bitpos[5:0]] <= act[bitpos[5:0]] | sd;
-            if (bitpos == 8'd1) agree <= agree + ((sd == p0b) ? 12'd1 : 12'd0);
+            if (bitpos == 8'd1) agree <= agree + ((sd == p0b) ? 17'd1 : 17'd0);
             if (bitpos < 8'd64 && sd != p0b) dis[bitpos[5:0]] <= 1'b1;
             // Shift in data bits within window [max(f_m,1), f_m + f_n)
             if (bitpos >= ((f_m == 8'd0) ? 8'd1 : f_m) && bitpos < (f_m + f_n))

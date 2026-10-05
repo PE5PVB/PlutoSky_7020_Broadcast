@@ -832,8 +832,9 @@ static int lo_main(long long txlo, int rx, const char *port, double secs, const 
 // <prefix>_index.csv = per window: index, start time (s since start), UTC epoch (ms), strongest tone (Hz) and its deviation (kHz).
 // The windows follow each other with gaps (iio_readdev start + processing, ~1.5 s per window); the tone frequency per window tells which step it belongs to.
 #define MPX_WF      1536000L         // 0.5 s
-#define MPX_DEC     16
-#define MPX_TAPS    351
+#define MPX_DEC     4                // after the channel filter (decimation ED_D = 4): 768 kS/s -> 192 kS/s
+#define MPX_TAPS    89               // composite low-pass at 768 kS/s (the 351 taps at 3.072 MS/s, scaled)
+#define MZ_N1       127              // Z channel filter taps (at FS)
 static int mpx_main(long long txlo, int rx, const char *port, double secs, const char *prefix){
     if (rx != 2){ fprintf(stderr, "mpx: alleen rx=2\n"); return 2; }
     int ch = rx - 1;
@@ -852,10 +853,14 @@ static int mpx_main(long long txlo, int rx, const char *port, double secs, const
     }
     sh("iio_attr -i -c ad9361-phy voltage%d hardwaregain %d >/dev/null 2>&1", ch, g); usleep(100000);
     free(tmp);
-    // FIR: Kaiser window (beta 8), cutoff frequency 80 kHz (transition 60..100 kHz), normalised to DC gain 1
+    // The capture is first mixed to baseband and channel-filtered (+-200 kHz) and decimated by 4 (as est_dev): other stations inside the RX
+    // bandwidth (FM broadcasters ~1.5 MHz away arrive through the coupler) must not reach the demodulator. Then the composite low-pass:
+    // Kaiser window (beta 8), cutoff 80 kHz (flat to ~60 kHz), at 768 kS/s, decimated by 4 to exactly 192 kHz. Normalised to DC gain 1.
+    ed_init();
+    static float hz[MZ_N1]; ed_lp(hz, MZ_N1, 270e3, FS);          // channel filter for Z: flat within 0.001 dB to +-200 kHz, -79 dB at 384 kHz
     static double h[MPX_TAPS];
     {
-        double fc = 80000.0 / FS, beta = 8.0, sum = 0.0;
+        double fc = 80000.0 / (FS / ED_D), beta = 8.0, sum = 0.0;
         double i0b = 0.0; { double x = beta / 2.0, t = 1.0; i0b = 1.0; for (int k = 1; k < 40; k++){ t *= (x / k) * (x / k); i0b += t; } }
         for (int n = 0; n < MPX_TAPS; n++){
             double m = n - (MPX_TAPS - 1) / 2.0, sinc = (m == 0.0) ? 2.0 * fc : sin(2.0 * M_PI * fc * m) / (M_PI * m);
@@ -865,7 +870,7 @@ static int mpx_main(long long txlo, int rx, const char *port, double secs, const
         }
         for (int n = 0; n < MPX_TAPS; n++) h[n] /= sum;
     }
-    int16_t *w = malloc((size_t)MPX_WF * 2 * sizeof(int16_t)); float *f = malloc((size_t)MPX_WF * sizeof(float));
+    int16_t *w = malloc((size_t)MPX_WF * 2 * sizeof(int16_t)); float *f = malloc((size_t)(MPX_WF / ED_D) * sizeof(float));
     if (!w || !f) return 1;
     char fn[300]; snprintf(fn, sizeof fn, "%s.f32", prefix); FILE *fo = fopen(fn, "wb");
     snprintf(fn, sizeof fn, "%s_index.csv", prefix); FILE *fi = fopen(fn, "w");
@@ -877,13 +882,18 @@ static int mpx_main(long long txlo, int rx, const char *port, double secs, const
         long long utc = (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
         if (capture(rx, MPX_WF, w)){ usleep(200000); continue; }
         double tf = 0, td = 0; int tok = tone_analyze(w, MPX_WF, &tf, &td);
-        double mean = 0.0;
-        for (long i = 0; i + 1 < MPX_WF; i++){
-            double ar = w[2*i], ai = w[2*i+1], br = w[2*i+2], bi = w[2*i+3];
-            f[i] = (float)(atan2(bi*ar - br*ai, br*ar + bi*ai) * FS / (2.0 * M_PI)); mean += f[i];
+        double mean = 0.0; long nm = (MPX_WF - MZ_N1) / ED_D, nf = 0; double pr = 0.0, pq = 0.0;
+        for (long m = 0; m < nm; m++){                                   // mix + channel filter, one output per ED_D input samples
+            double yr = 0.0, yi = 0.0; long n0 = m * ED_D;
+            for (int k = 0; k < MZ_N1; k++){
+                long n = n0 + k; double a = w[2*n], b = w[2*n+1], c = ed_cr[n & 127], sn = ed_ci[n & 127];
+                yr += hz[k] * (a * c - b * sn); yi += hz[k] * (a * sn + b * c);
+            }
+            if (m > 0){ f[nf] = (float)(atan2(yi * pr - yr * pq, yr * pr + yi * pq) * (FS / ED_D) / (2.0 * M_PI)); mean += f[nf]; nf++; }
+            pr = yr; pq = yi;
         }
-        f[MPX_WF - 1] = f[MPX_WF - 2]; mean /= (MPX_WF - 1);
-        long nout = (MPX_WF - MPX_TAPS) / MPX_DEC; if (nout > 96000) nout = 96000;
+        mean /= (nf ? nf : 1);
+        long nout = (nf - MPX_TAPS) / MPX_DEC; if (nout > 96000) nout = 96000; if (nout < 0) nout = 0;
         for (long o = 0; o < nout; o++){
             const float *x = f + o * MPX_DEC; double acc = 0.0;
             for (int n = 0; n < MPX_TAPS; n++) acc += h[n] * (x[n] - mean);
