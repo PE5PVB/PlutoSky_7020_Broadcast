@@ -192,7 +192,8 @@ static double ceil_max_khz = 67.5;             // upper bound for ceil_khz (also
 // transmitter closed, no twin) or with guard off (G 0), ceil_khz stays = ceil_user.
 static double guard_low = 3.5;         // dB: below this the limit is lowered (requirement: >= +3 dB); conf: guard_low= (test: set higher)
 #define GUARD_TARGET (guard_low + 1.0)  // dB: the reduction aims at this margin
-#define GUARD_HIGH   (guard_low + 4.5)  // dB: only above this (for at least 2 minutes) is the limit raised again
+#define GUARD_HIGH   (guard_low + 3.0)  // dB: above this (over at least GUARD_UP_N spectra since the last change) the limit goes back up
+#define GUARD_UP_N   120                // spectra (~30 s at 4 per second) since the last change before the limit may be raised
 #define GUARD_LOW    guard_low
 #define GUARD_MIN    35.0              // kHz: never lower
 static double ceil_user = 67.0;        // maximum chosen by the user/Pico (kHz)
@@ -783,7 +784,9 @@ static void mask_combine(void){
 // Mask protection: evaluate every ~1 s (after mask_combine). The 5-minute window is cleared after every change, so the margin below is the one SINCE the change.
 //  - margin < GUARD_LOW (after at least 20 s of data): lower the limit so that the expected margin becomes GUARD_TARGET (the margin grows ~0.9 dB per dB lower peak). The basis is the
 //    actually transmitted peak (dev_hold, last minute) if that is below the limit: a limit above the real peak does nothing.
-//  - margin > GUARD_HIGH for at least 2 minutes: raise the limit by 0.5 kHz, up to the chosen maximum.
+//  - margin > GUARD_HIGH over at least ~30 s: raise the limit as far as the margin allows (back to GUARD_TARGET), at most 25 % per step and up to
+//    the chosen maximum, so that after a loud passage the limit is back at its maximum within a few minutes (the limiter catches the peaks;
+//    the guard is only the safety net above it).
 static void guard_step(void){
     if (!guard_on || !lim_present || !lim_user || tx_off) return;
     if (fabs(ceil_khz - ceil_tgt) > 0.01) return;                  // limit is still ramping to its target
@@ -799,8 +802,12 @@ static void guard_step(void){
         if (nc > ceil_khz - 0.5) nc = ceil_khz - 0.5;
         if (nc < ceil_khz * 0.75) nc = ceil_khz * 0.75;             // at most 25 % per step
         if (nc < GUARD_MIN) nc = GUARD_MIN;
-    } else if (guard_act && w > GUARD_HIGH && cmb_n >= 480){
-        nc = ceil_khz + 0.5; if (nc > ceil_user) nc = ceil_user;
+    } else if (guard_act && w > GUARD_HIGH && cmb_n >= GUARD_UP_N){
+        double room = (w - GUARD_TARGET) / 0.9;                    // dB more peak the margin allows
+        nc = ceil_khz * pow(10.0, room / 20.0);
+        if (nc > ceil_khz * 1.25) nc = ceil_khz * 1.25;            // at most 25 % per step
+        if (nc < ceil_khz + 0.5) nc = ceil_khz + 0.5;
+        if (nc > ceil_user) nc = ceil_user;
     }
     if (fabs(nc - ceil_khz) < 0.01) return;
     fprintf(stderr, "   -> maskerbescherming: begrenzergrens %.1f -> %.1f kHz (marge %+.1f dB, max %.1f kHz)\n", ceil_khz, nc, w, ceil_user); fflush(stderr);

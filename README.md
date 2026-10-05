@@ -222,7 +222,7 @@ adjusts the ceiling:
 - the chosen maximum (`H`) is the *upper limit*;
 - if the 5-minute mask margin drops below **+3.5 dB**, the ceiling is lowered so that the expected margin becomes +4.5 dB
   (about 0.9 dB of margin per dB of peak reduction, at most 25 % per step, never below 35 kHz);
-- if the margin stays above +8 dB for two minutes, the ceiling is raised again in 0.5 kHz steps;
+- if the margin is above +6.5 dB over 30 s, the ceiling goes back up as far as the margin allows (at most 25 % per step), so it is back at the maximum within a few minutes after a loud passage;
 - ceiling changes are ramped (0.5 kHz per 100 ms) so that a change does not splatter;
 - right after a start, a tune or a mask reset the guard reports **`init`** and takes no decision until the mask
   window holds enough data (~1 minute);
