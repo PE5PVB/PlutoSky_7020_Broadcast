@@ -69,7 +69,7 @@ and put it on the air** — with a small FPGA-only signal path (no ARM, no DMA, 
   after the encoder has sent a valid frequency (tune) command.
 - **Continuous mask monitoring** (4 spectra per second, 5-minute max-hold) and an optional automatic **mask guard** (off by default, `G 1`) that lowers
   the deviation ceiling when the 5-minute mask margin drops below +3.5 dB, and raises it again when there is room.
-- **TX calibration of the AD9361** (LO leakage, image) after every tune and every time the transmitter opens, **with the output muted** until it is done (about 2 s), and again when the die temperature has drifted by 8 °C.
+- **TX calibration of the AD9361** (LO leakage, image) after every tune and every time the transmitter opens, **with the output muted** until it is done (about 2 s), and, if switched on with `CT 1`, again when the die temperature has drifted by 8 °C (off by default: during the warm-up after a cold start it would interrupt the programme).
 - **Automatic LO and image nulling** through the directional coupler right after every calibration (about 5 s, silent carrier): the LO leakage
   and the image are measured on RX2 and nulled with the digital corrections, typically **LO ≤ −70 dBc, image ≤ −75 dBc** on every frequency.
 - **Power meter** on RX1, used as a pure measurement bridge: you enter the attenuator value, the web interface and

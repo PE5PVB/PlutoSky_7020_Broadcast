@@ -119,6 +119,7 @@ static long long last_f   = -1;        // the carrier frequency of the last tune
 #define IQ_CONF "/mnt/jffs2/skypluto-iq.conf"
 static double lowif_khz = 0.0;
 static int    iq_dc_i = 0, iq_dc_q = 0, iq_gain_ppm = 0, iq_skew_ppm = 0, has_iq = 0;
+static int    cal_temp_auto = 0;                             // CT: recalibrate on a die temperature drift of 8 degC (default off: it interrupts the programme while the board warms up)
 // Digital carrier level in dBFS. Full scale drives the DAC and the analog baseband of the AD9361 into their non-linear range: at zero-IF the distortion
 // products land ON the carrier and sound like a second station underneath a quiet programme (gone at -6 dB). The attenuation is lowered by the same
 // amount, so the output power is unchanged: all attenuation values in the daemon (applied_a, nom_a, ATTEN_FLOOR, ?S att=) stay 'full-scale equivalent'
@@ -570,7 +571,7 @@ static void iq_apply(void){
 static void iq_conf_write(void){
     FILE *f = fopen(IQ_CONF ".new", "w"); if (!f) return;
     fprintf(f, "# digital I/Q corrections and low-IF offset (written by the DC / IQ / OFS commands)\n");
-    fprintf(f, "dc_i=%d\ndc_q=%d\nqgain_ppm=%d\nqskew_ppm=%d\nlowif_khz=%.3f\nlevel_db=%.1f\nnull_auto=%d\nnull_rx=%d\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, dig_db, null_auto, null_rx);
+    fprintf(f, "dc_i=%d\ndc_q=%d\nqgain_ppm=%d\nqskew_ppm=%d\nlowif_khz=%.3f\nlevel_db=%.1f\nnull_auto=%d\nnull_rx=%d\ncal_temp=%d\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, dig_db, null_auto, null_rx, cal_temp_auto);
     fclose(f); rename(IQ_CONF ".new", IQ_CONF);
 }
 static void iq_conf_read(void){
@@ -585,6 +586,7 @@ static void iq_conf_read(void){
         else if (!strncmp(ln, "lowif_khz=", 10)){ d = atof(ln + 10); if (isfinite(d) && fabs(d) <= 250.0) lowif_khz = d; }
         else if (!strncmp(ln, "null_auto=", 10)) null_auto = atoi(ln + 10) ? 1 : 0;
         else if (!strncmp(ln, "null_rx=", 8)) null_rx = (atoi(ln + 8) == 1) ? 1 : 2;
+        else if (!strncmp(ln, "cal_temp=", 9)) cal_temp_auto = atoi(ln + 9) ? 1 : 0;
         else if (!strncmp(ln, "level_db=", 9)){ d = atof(ln + 9); if (isfinite(d) && d >= -20.0 && d <= 0.0) dig_db = d; }
     }
     fclose(f);
@@ -1118,6 +1120,7 @@ static void handle(char *line){
 
     // ---------- queries ----------
     if (cmd[0]=='?'){
+        if (!strcmp(cmd,"?CT")){ int dT = temp_mC - cal_temp_ref; snprintf(buf, sizeof buf, "ct=%d dt=%+.1f\n", cal_temp_auto, cal_temp_ref ? dT / 1000.0 : 0.0); tx_str(buf); return; }
         if (!strcmp(cmd,"?NL")){ snprintf(buf, sizeof buf, "%s auto=%d rx=%d\n", null_last, null_auto, null_rx); tx_str(buf); return; }
         if (!strcmp(cmd,"?IQ")){
             snprintf(buf, sizeof buf, "dci=%d dcq=%d gain=%d skew=%d ofs=%.3f lvl=%.2f lo=%lld hw=%d\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, dig_db, lo_freq(), has_iq);
@@ -1392,6 +1395,11 @@ static void handle(char *line){
         if (e == 0) tx_str("OK\n");
         else tx_str(e == 1 ? "ERR off\n" : e == 2 ? "ERR busy\n" : e == 3 ? "ERR level\n" : e == 4 ? "ERR ofs\n" : e == 5 ? "ERR nomask\n" : "ERR fork\n");
         return;
+    }
+    // CT <0|1>: recalibrate (and null) automatically when the die temperature has drifted by 8 degC since the last calibration. Default 0: calibration
+    // only on a tune, on opening the transmitter and on CAL. Stored. ?CT -> ct=<0|1> dt=<drift since the last calibration, degC>.
+    if (!strcmp(cmd,"CT")){
+        cal_temp_auto = atoi(arg) ? 1 : 0; cal_drift = 0; iq_conf_write(); tx_str("OK\n"); return;
     }
     if (!strcmp(cmd,"NULLRX")){                              // NULLRX <1|2>: the receiver of the nulling (2 = coupler on TX1 into RX2, 1 = cable TX1 -> RX1)
         int v = atoi(arg); if (v != 1 && v != 2){ tx_str("ERR range\n"); return; }
@@ -1983,7 +1991,7 @@ int main(int argc, char **argv){
         if (now - cal_temp_chk >= 15.0){
             cal_temp_chk = now;
             int dT = temp_mC - cal_temp_ref; if (dT < 0) dT = -dT;
-            if (!tx_off && cal_pid <= 0 && !cal_pending && !cal_hold && cal_temp_ref != 0 && dT >= 8000 && now - cal_last_end > 300.0) cal_drift++; else cal_drift = 0;
+            if (cal_temp_auto && !tx_off && cal_pid <= 0 && !cal_pending && !cal_hold && cal_temp_ref != 0 && dT >= 8000 && now - cal_last_end > 300.0) cal_drift++; else cal_drift = 0;
             if (cal_drift >= 4 && ir_pid <= 0){ cal_drift = 0; cal_hold = 1; cal_hold_t = now; cal_pending = 1; cal_retune = 0; cal_due = now;
                 fprintf(stderr, "   -> temperatuurdrift %.1f C: TX-kalibratie\n", dT / 1000.0); fflush(stderr); }
             if (cal_temp_ref == 0 && temp_mC != 0 && !tx_off) cal_temp_ref = temp_mC;
