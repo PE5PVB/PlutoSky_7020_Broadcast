@@ -613,6 +613,7 @@ static void alc_reset(double delay){ ref_valid = 0; alc_state = "wait"; m_big = 
 
 // Transmitter open (0) / closed (1): order ON = LO first, then attenuation; OFF = attenuation to maximum first, then LO off.
 // ---- impulse measurement (end-to-end group delay): 'J <secs> [pct]' starts skypluto-mask --ir; output /tmp/pluto_ir.csv ------------------------------------
+static void cs_store(long long lo);
 static pid_t  ir_pid = -1; static double ir_t0 = 0.0, ir_secs = 0.0; static int ir_rc = -1; static int ir_kind = 0;   // ir_kind: 1 = impulse measurement (J), 2 = LO/fine spectrum (Y)
 static void ir_finish(void){
     if (ir_kind == 1) wr(R_IMPC, 0);                          // RX1 back to pass-through
@@ -636,6 +637,7 @@ static void ir_finish(void){
         if (pw_en) pw_rx1_init();
         snprintf(null_last, sizeof null_last, "%s", ln[0] ? ln : "NULL err=noresult");
         fprintf(stderr, "   -> LO-nulling: %s\n", null_last); fflush(stderr);
+        if (last_f == null_f && !tx_off) cs_store(lo_freq());          // the calibration + nulling that is on the air now, for the next opening on this frequency
     }
     unlink("/tmp/skypluto.hold");
 }
@@ -650,6 +652,78 @@ static int    cal_pending = 0, cal_retune = 0;       // cal_retune: the calibrat
 static pid_t  cal_pid = -1;
 static double cal_due = 0.0, cal_t0 = 0.0;
 static void measure_finish(void);
+// ---- stored calibrations: the result of the last calibration per TX LO frequency ---------------------------------------------------------------------------
+// After every calibration (and its nulling) the AD9361's own TX calibration result (registers 0x08E..0x09D: phase, gain and LO-leak offsets of TX1/TX2,
+// read through debugfs) and the digital corrections (DC, gain/skew) are stored per TX LO frequency in CALSTORE. When the transmitter opens on a frequency
+// that has a stored set and that is not a frequency change (the first opening after a boot, or reopening on the same frequency), the set is written back
+// instead of calibrating: no chip calibration and no nulling. A frequency change, CAL, a failed calibration and a temperature recalibration always calibrate.
+#define CALSTORE   "/mnt/jffs2/skypluto-cal.conf"
+#define CS_N       16                                 // frequencies kept (most recent first)
+#define CS_R0      0x08E
+#define CS_NR      16
+static long long cal_last_lo = 0;                     // TX LO frequency of the last calibration (or restore) in this session; 0 = none yet (after a boot)
+static int       cal_force = 0, cal_restoring = 0;    // cal_force: the next calibration must be a real one; cal_restoring: the running child only tunes (restore)
+static char      cs_dbg[96] = "";
+static const char *cs_dbgfile(void){                  // debugfs direct_reg_access of ad9361-phy
+    if (!cs_dbg[0] && phy_find()[0]){
+        const char *b = strrchr(phy_dir, '/');
+        if (b) snprintf(cs_dbg, sizeof cs_dbg, "/sys/kernel/debug/iio%s/direct_reg_access", b);
+        if (access(cs_dbg, R_OK | W_OK) != 0) cs_dbg[0] = 0;
+    }
+    return cs_dbg;
+}
+static int cs_reg_rd(int reg, int *v){
+    const char *fn = cs_dbgfile(); if (!fn[0]) return -1;
+    FILE *f = fopen(fn, "w"); if (!f) return -1; fprintf(f, "0x%X", reg); if (fclose(f) != 0) return -1;
+    f = fopen(fn, "r"); if (!f) return -1; char b[32] = ""; int ok = fgets(b, sizeof b, f) != NULL; fclose(f);
+    if (!ok) return -1;
+    *v = (int)strtol(b, NULL, 0) & 0xFF; return 0;
+}
+static int cs_reg_wr(int reg, int v){
+    const char *fn = cs_dbgfile(); if (!fn[0]) return -1;
+    FILE *f = fopen(fn, "w"); if (!f) return -1; fprintf(f, "0x%X 0x%X", reg, v & 0xFF); return fclose(f) == 0 ? 0 : -1;
+}
+typedef struct { long long f; int t_mC, r[CS_NR], dci, dcq, qg, qs; } CalSet;
+static int cs_load(CalSet *a){
+    int n = 0; FILE *f = fopen(CALSTORE, "r"); if (!f) return 0;
+    char ln[400];
+    while (n < CS_N && fgets(ln, sizeof ln, f)){
+        CalSet c; char rh[CS_NR * 2 + 4] = "";
+        if (sscanf(ln, "f=%lld t=%d r=%34s dci=%d dcq=%d qg=%d qs=%d", &c.f, &c.t_mC, rh, &c.dci, &c.dcq, &c.qg, &c.qs) != 7 || strlen(rh) != CS_NR * 2) continue;
+        int ok = 1; for (int i = 0; i < CS_NR; i++){ unsigned v; if (sscanf(rh + 2 * i, "%2x", &v) != 1){ ok = 0; break; } c.r[i] = (int)v; }
+        if (ok) a[n++] = c;
+    }
+    fclose(f); return n;
+}
+static int cs_find(long long lo, CalSet *out){
+    CalSet a[CS_N]; int n = cs_load(a);
+    for (int i = 0; i < n; i++) if (a[i].f == lo){ *out = a[i]; return 1; }
+    return 0;
+}
+// store the set that is on the air now for TX LO frequency lo (the chip registers as they are, the daemon's digital corrections)
+static void cs_store(long long lo){
+    if (lo <= 0 || fabs(lowif_khz) > 0.0005) return;
+    CalSet c; c.f = lo; c.t_mC = temp_mC; c.dci = iq_dc_i; c.dcq = iq_dc_q; c.qg = iq_gain_ppm; c.qs = iq_skew_ppm;
+    for (int i = 0; i < CS_NR; i++) if (cs_reg_rd(CS_R0 + i, &c.r[i]) != 0) return;
+    CalSet a[CS_N]; int n = cs_load(a);
+    FILE *f = fopen(CALSTORE ".tmp", "w"); if (!f) return;
+    char rh[CS_NR * 2 + 1]; for (int i = 0; i < CS_NR; i++) snprintf(rh + 2 * i, 3, "%02x", c.r[i]);
+    fprintf(f, "f=%lld t=%d r=%s dci=%d dcq=%d qg=%d qs=%d\n", c.f, c.t_mC, rh, c.dci, c.dcq, c.qg, c.qs);
+    for (int i = 0, k = 1; i < n && k < CS_N; i++){
+        if (a[i].f == lo) continue;
+        for (int j = 0; j < CS_NR; j++) snprintf(rh + 2 * j, 3, "%02x", a[i].r[j]);
+        fprintf(f, "f=%lld t=%d r=%s dci=%d dcq=%d qg=%d qs=%d\n", a[i].f, a[i].t_mC, rh, a[i].dci, a[i].dcq, a[i].qg, a[i].qs); k++;
+    }
+    if (fclose(f) == 0) rename(CALSTORE ".tmp", CALSTORE);
+    fprintf(stderr, "   -> kalibratie bewaard voor %lld Hz (%.1f C)\n", lo, temp_mC / 1000.0); fflush(stderr);
+}
+// write a stored set back (chip registers + digital corrections); 0 = done
+static int cs_restore(const CalSet *c){
+    for (int i = 0; i < CS_NR; i++) if (cs_reg_wr(CS_R0 + i, c->r[i]) != 0) return -1;
+    for (int i = 0; i < CS_NR; i++){ int v; if (cs_reg_rd(CS_R0 + i, &v) != 0 || v != c->r[i]) return -1; }   // read back
+    iq_dc_i = c->dci; iq_dc_q = c->dcq; iq_gain_ppm = c->qg; iq_skew_ppm = c->qs; iq_apply(); iq_conf_write();
+    return 0;
+}
 // Starts the LO nulling (meter tool --null on RX1). 0 = started, else the reason: 1 off, 2 busy, 3 level above -15 dBm, 4 low-IF offset set, 5 no tool, 6 fork.
 static int null_start(void){
     if (tx_off || last_f <= 0) return 1;
@@ -1509,7 +1583,7 @@ static void handle(char *line){
         if (cal_pending || cal_pid > 0) return;                  // a calibration is already pending or running: it does exactly this
         if (!cal_hold) cal_hold_t = mono();
         { int was_failed = cal_failed; if (was_failed && cal_retune < 1) cal_retune = 1; }   // after a failure the LO may be wrong: retune it as well
-        cal_hold = 1; cal_pending = 1; cal_due = mono(); cal_failed = 0; cal_fail = 0;
+        cal_hold = 1; cal_pending = 1; cal_due = mono(); cal_failed = 0; cal_fail = 0; cal_force = 1;
         fprintf(stderr, "   -> CAL: TX-kalibratie op verzoek\n"); fflush(stderr);
         return;
     }
@@ -1941,13 +2015,25 @@ int main(int argc, char **argv){
                 }
                 fprintf(stderr, "   -> TX-kalibratie (LO-lek, beeld) %s na %.1f s\n", cok ? "klaar" : "MISLUKT", now - cal_t0); fflush(stderr);
                 if (!cok && !tx_off){
-                    if (++cal_fail < 3){ cal_pending = 1; cal_retune = 1; cal_due = now + 0.5; }                // try again, still muted
+                    if (++cal_fail < 3){ cal_pending = 1; cal_retune = 1; cal_due = now + 0.5; cal_force = 1; }  // try again (a real calibration), still muted
                     else { cal_failed = 1; cal_failed_t = now; cal_pending = 0; fprintf(stderr, "   !! TX-kalibratie mislukt: de zender blijft dicht, nieuwe poging over 30 s (of eerder met F, E of CAL)\n"); fflush(stderr); }
                 }
-                if (cok){ cal_fail = 0; cal_failed = 0; cal_last_end = now; cal_temp_ref = temp_mC; }
+                if (cok && cal_restoring){                                         // the child only tuned: write the stored set back
+                    CalSet cs; long long lo = lo_freq();
+                    if (cs_find(lo, &cs) && cs_restore(&cs) == 0){
+                        fprintf(stderr, "   -> kalibratie teruggezet voor %lld Hz (gemeten bij %.1f C, nu %.1f C), geen nieuwe kalibratie\n", lo, cs.t_mC / 1000.0, temp_mC / 1000.0); fflush(stderr);
+                        snprintf(null_last, sizeof null_last, "NULL restored dci=%d dcq=%d t=%.1f", cs.dci, cs.dcq, cs.t_mC / 1000.0);
+                    } else {                                                      // could not restore: calibrate for real, still muted
+                        cok = 0; cal_pending = 1; cal_retune = 0; cal_due = now; cal_force = 1;
+                        fprintf(stderr, "   !! terugzetten mislukt: echte kalibratie\n"); fflush(stderr);
+                    }
+                }
+                if (cok){ cal_fail = 0; cal_failed = 0; cal_last_end = now; cal_temp_ref = temp_mC; cal_last_lo = lo_freq(); }
                 { char lp[140] = ""; FILE *lf; if (phy_dir[0]) snprintf(lp, sizeof lp, "%s/out_altvoltage1_TX_LO_powerdown", phy_dir);
                   if (!tx_off && lp[0] && (lf = fopen(lp, "r")) != NULL){ int pdv = 0; if (fscanf(lf, "%d", &pdv) != 1) pdv = 0; fclose(lf); if (pdv) tx_lo_power(1); } }   // LO still powered down: power it up
-                if (cok && !cal_pending && null_auto && (null_rx == 2 || want_dbm <= -15.0 + 0.001) && fabs(lowif_khz) < 0.0005) null_pending = 1;
+                if (cok && !cal_pending && !cal_restoring && null_auto && (null_rx == 2 || want_dbm <= -15.0 + 0.001) && fabs(lowif_khz) < 0.0005) null_pending = 1;
+                if (cok && !cal_pending && !cal_restoring && !null_pending) cs_store(lo_freq());   // no nulling follows: store the calibration as it is
+                cal_restoring = 0;
                 if (cok && !cal_pending){ cal_hold = 0; apply_current(); alc_reset(ALC_SETTLE);
                                    fprintf(stderr, "   -> zender weer open (atten TX1 %.2f dB, TX2 %.2f dB)\n", applied_a, applied_a2); fflush(stderr); }
             }
@@ -1959,11 +2045,15 @@ int main(int argc, char **argv){
                 if (m_pid > 0) measure_finish();                  // the running mask/ALC measurement uses the RX path and would see the calibration: stop it, it restarts afterwards
                 if (pw_pid > 0) kill(pw_pid, SIGKILL);            // one-shot power capture on RX1: reaped by the power-meter code below
                 char cs[900], mt[160] = "";
+                // restore instead of calibrate: not forced, no frequency change (first opening after a boot, or the same LO as the last calibration), zero-IF, a stored set
+                { CalSet tmp; long long lo = lo_freq();
+                  cal_restoring = (!cal_force && (cal_last_lo == 0 || cal_last_lo == lo) && fabs(lowif_khz) < 0.0005 && phy_find()[0] && cs_dbgfile()[0] && cs_find(lo, &tmp)) ? 1 : 0; }
+                cal_force = 0;
                 if (phy_find()[0]){                               // direct sysfs writes: no gap between the retune and the calibration; && chain: any failure shows in the exit status
                     if (cal_retune == 2) snprintf(mt, sizeof mt, "echo 0 > $D/out_altvoltage1_TX_LO_powerdown && ");
-                    char fq[96] = ""; if (cal_retune) snprintf(fq, sizeof fq, "echo %lld > $D/out_altvoltage1_TX_LO_frequency && ", lo_freq());
-                    snprintf(cs, sizeof cs, "D=%s; echo -%.2f > $D/out_voltage0_hardwaregain && echo -%.2f > $D/out_voltage1_hardwaregain && %s%secho rf_dc_offs > $D/calib_mode && echo tx_quad > $D/calib_mode",
-                             phy_dir, ATTEN_MUTE, ATTEN_MUTE, mt, fq);
+                    char fq[96] = ""; if (cal_retune || cal_restoring) snprintf(fq, sizeof fq, "echo %lld > $D/out_altvoltage1_TX_LO_frequency && ", lo_freq());
+                    snprintf(cs, sizeof cs, "D=%s; echo -%.2f > $D/out_voltage0_hardwaregain && echo -%.2f > $D/out_voltage1_hardwaregain && %s%s%s",
+                             phy_dir, ATTEN_MUTE, ATTEN_MUTE, mt, fq, cal_restoring ? "true" : "echo rf_dc_offs > $D/calib_mode && echo tx_quad > $D/calib_mode");
                 } else {
                     if (cal_retune) snprintf(mt, sizeof mt, "iio_attr -q -o -c ad9361-phy altvoltage1 frequency %lld >/dev/null 2>&1 && ", lo_freq());
                     snprintf(cs, sizeof cs,
@@ -1974,16 +2064,16 @@ int main(int argc, char **argv){
                 pid_t cp = fork();
                 if (cp == 0){ prctl(PR_SET_PDEATHSIG, SIGKILL); execl("/bin/sh", "sh", "-c", cs, (char *)NULL); _exit(127); }
                 if (cp > 0){
-                    cal_pid = cp; cal_t0 = now; cal_pending = 0; cal_try = 0; cal_expect_f = cal_retune ? lo_freq() : 0; if (cal_retune == 2) lo_pd = 0; cal_retune = 0;
+                    cal_pid = cp; cal_t0 = now; cal_pending = 0; cal_try = 0; cal_expect_f = (cal_retune || cal_restoring) ? lo_freq() : 0; if (cal_retune == 2) lo_pd = 0; cal_retune = 0;
                     applied_a = ATTEN_MUTE; applied_a2 = ATTEN_MUTE;      // the child mutes TX1 and TX2 first
-                    fprintf(stderr, "   -> TX-kalibratie gestart (f=%lld, zender dicht)\n", last_f); fflush(stderr);
+                    fprintf(stderr, cal_restoring ? "   -> opgeslagen kalibratie terugzetten (f=%lld, zender dicht)\n" : "   -> TX-kalibratie gestart (f=%lld, zender dicht)\n", last_f); fflush(stderr);
                 } else if (++cal_try <= 3) cal_due = now + 2.0;
                 else { cal_pending = 0; if (cal_retune == 2) tx_lo_power(1); cal_retune = 0; cal_hold = 0; apply_current(); cal_try = 0;
                        fprintf(stderr, "   !! TX-kalibratie kon niet starten (fork), zender vrijgegeven zonder kalibratie\n"); fflush(stderr); }
             }
         }
         if (cal_failed && !tx_off && cal_pid <= 0 && !cal_pending && now - cal_failed_t >= 30.0){        // retry: a muted transmitter must not stay muted for good
-            cal_failed = 0; cal_fail = 0; cal_hold = 1; cal_hold_t = now; cal_pending = 1; cal_retune = 1; cal_due = now;
+            cal_failed = 0; cal_fail = 0; cal_hold = 1; cal_hold_t = now; cal_pending = 1; cal_retune = 1; cal_due = now; cal_force = 1;
             fprintf(stderr, "   .. TX-kalibratie opnieuw geprobeerd\n"); fflush(stderr);
         }
         if (cal_hold && cal_pid <= 0 && !cal_pending && !cal_failed && now - cal_hold_t > 30.0){ cal_hold = 0; apply_current(); }   // safety net: do not stay muted for ever (not after a failed calibration)
@@ -1992,7 +2082,7 @@ int main(int argc, char **argv){
             cal_temp_chk = now;
             int dT = temp_mC - cal_temp_ref; if (dT < 0) dT = -dT;
             if (cal_temp_auto && !tx_off && cal_pid <= 0 && !cal_pending && !cal_hold && cal_temp_ref != 0 && dT >= 8000 && now - cal_last_end > 300.0) cal_drift++; else cal_drift = 0;
-            if (cal_drift >= 4 && ir_pid <= 0){ cal_drift = 0; cal_hold = 1; cal_hold_t = now; cal_pending = 1; cal_retune = 0; cal_due = now;
+            if (cal_drift >= 4 && ir_pid <= 0){ cal_drift = 0; cal_hold = 1; cal_hold_t = now; cal_pending = 1; cal_retune = 0; cal_due = now; cal_force = 1;
                 fprintf(stderr, "   -> temperatuurdrift %.1f C: TX-kalibratie\n", dT / 1000.0); fflush(stderr); }
             if (cal_temp_ref == 0 && temp_mC != 0 && !tx_off) cal_temp_ref = temp_mC;
         }
