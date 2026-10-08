@@ -661,6 +661,7 @@ static void measure_finish(void);
 #define CS_N       16                                 // frequencies kept (most recent first)
 #define CS_R0      0x08E
 #define CS_NR      16
+#define CS_FORCE   0x09F                               // force bits: 0xFF = use 0x08E..0x09D as written (restore), 0x00 = the chip's own calibration result
 static long long cal_last_lo = 0;                     // TX LO frequency of the last calibration (or restore) in this session; 0 = none yet (after a boot)
 static int       cal_force = 0, cal_restoring = 0;    // cal_force: the next calibration must be a real one; cal_restoring: the running child only tunes (restore)
 static char      cs_dbg[96] = "";
@@ -719,8 +720,11 @@ static void cs_store(long long lo){
 }
 // write a stored set back (chip registers + digital corrections); 0 = done
 static int cs_restore(const CalSet *c){
-    for (int i = 0; i < CS_NR; i++) if (cs_reg_wr(CS_R0 + i, c->r[i]) != 0) return -1;
-    for (int i = 0; i < CS_NR; i++){ int v; if (cs_reg_rd(CS_R0 + i, &v) != 0 || v != c->r[i]) return -1; }   // read back
+    // 0x09F (force bits) FIRST: only with these set does the chip use (and read back) the values written to 0x08E..0x09D instead of its own last result
+    { int fv = -1; if (cs_reg_wr(CS_FORCE, 0xFF) != 0 || cs_reg_rd(CS_FORCE, &fv) != 0 || fv != 0xFF){ fprintf(stderr, "   !! force-register 0x09F niet gezet (%d)\n", fv); return -1; } }
+    for (int i = 0; i < CS_NR; i++) if (cs_reg_wr(CS_R0 + i, c->r[i]) != 0){ fprintf(stderr, "   !! schrijven 0x%03X mislukt (%s)\n", CS_R0 + i, cs_dbgfile()); cs_reg_wr(CS_FORCE, 0); return -1; }
+    for (int i = 0; i < CS_NR; i++){ int v = -1;                                          // read back
+        if (cs_reg_rd(CS_R0 + i, &v) != 0 || v != c->r[i]){ fprintf(stderr, "   !! terugleesfout 0x%03X: %d, verwacht %d\n", CS_R0 + i, v, c->r[i]); cs_reg_wr(CS_FORCE, 0); return -1; } }
     iq_dc_i = c->dci; iq_dc_q = c->dcq; iq_gain_ppm = c->qg; iq_skew_ppm = c->qs; iq_apply(); iq_conf_write();
     return 0;
 }
@@ -2045,6 +2049,10 @@ int main(int argc, char **argv){
                 if (m_pid > 0) measure_finish();                  // the running mask/ALC measurement uses the RX path and would see the calibration: stop it, it restarts afterwards
                 if (pw_pid > 0) kill(pw_pid, SIGKILL);            // one-shot power capture on RX1: reaped by the power-meter code below
                 char cs[900], mt[160] = "";
+                // a real calibration first clears the force bits (0x09F), otherwise the chip would keep using a restored set and ignore the new result
+                char cs_unforce[300];
+                if (cs_dbgfile()[0]) snprintf(cs_unforce, sizeof cs_unforce, "echo '0x%X 0x0' > %s && echo rf_dc_offs > $D/calib_mode && echo tx_quad > $D/calib_mode", CS_FORCE, cs_dbgfile());
+                else snprintf(cs_unforce, sizeof cs_unforce, "echo rf_dc_offs > $D/calib_mode && echo tx_quad > $D/calib_mode");
                 // restore instead of calibrate: not forced, no frequency change (first opening after a boot, or the same LO as the last calibration), zero-IF, a stored set
                 { CalSet tmp; long long lo = lo_freq();
                   cal_restoring = (!cal_force && (cal_last_lo == 0 || cal_last_lo == lo) && fabs(lowif_khz) < 0.0005 && phy_find()[0] && cs_dbgfile()[0] && cs_find(lo, &tmp)) ? 1 : 0; }
@@ -2053,7 +2061,7 @@ int main(int argc, char **argv){
                     if (cal_retune == 2) snprintf(mt, sizeof mt, "echo 0 > $D/out_altvoltage1_TX_LO_powerdown && ");
                     char fq[96] = ""; if (cal_retune || cal_restoring) snprintf(fq, sizeof fq, "echo %lld > $D/out_altvoltage1_TX_LO_frequency && ", lo_freq());
                     snprintf(cs, sizeof cs, "D=%s; echo -%.2f > $D/out_voltage0_hardwaregain && echo -%.2f > $D/out_voltage1_hardwaregain && %s%s%s",
-                             phy_dir, ATTEN_MUTE, ATTEN_MUTE, mt, fq, cal_restoring ? "true" : "echo rf_dc_offs > $D/calib_mode && echo tx_quad > $D/calib_mode");
+                             phy_dir, ATTEN_MUTE, ATTEN_MUTE, mt, fq, cal_restoring ? "true" : cs_unforce);
                 } else {
                     if (cal_retune) snprintf(mt, sizeof mt, "iio_attr -q -o -c ad9361-phy altvoltage1 frequency %lld >/dev/null 2>&1 && ", lo_freq());
                     snprintf(cs, sizeof cs,
