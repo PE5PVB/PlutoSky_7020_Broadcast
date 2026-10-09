@@ -1230,6 +1230,42 @@ static double nl_fit(const double *p, int a, double dlt, double k, double *ux, d
     return ((p[a] + p[a + 1] - 2 * p0) + (p[a + 2] + p[a + 3] - 2 * p0)) / (4.0 * dlt * dlt * k);
 }
 
+// Residual FM of the silent carrier (0.25 s captured after the nulling, with its result applied): the carrier (OFFSET + NL_X) is mixed to 0 Hz,
+// low-passed (40 kHz) and decimated to 192 kS/s, FM-demodulated, de-emphasised (50 us), high-passed (30 Hz) and low-passed (15 kHz). The rms of
+// that frequency noise against 75 kHz deviation (a sine: 53.0 kHz rms) is the transmitter's S/N, unweighted. It contains the RX synthesizer's noise
+// as well (TX and RX have separate PLLs on the same reference), so it is an upper bound for the transmitter alone. Returns the S/N in dB, -1 on error.
+#define NF_D   16
+#define NF_N   97
+#define NF_N2  63
+static double nl_fm_snr(const int16_t *d, long n, double *rms_hz){
+    static float h[NF_N], h2[NF_N2]; ed_lp(h, NF_N, 40e3, NL_FS); ed_lp(h2, NF_N2, 15e3, NL_FS / NF_D);
+    long nd = (n - NF_N) / NF_D; if (nd < 20000) return -1.0;
+    float *br = malloc(nd * sizeof(float)), *bi = malloc(nd * sizeof(float)), *fq = malloc(nd * sizeof(float));
+    float *mr = malloc(n * sizeof(float)), *mi = malloc(n * sizeof(float));
+    if (!br || !bi || !fq || !mr || !mi){ free(br); free(bi); free(fq); free(mr); free(mi); return -1.0; }
+    {   double w = -2.0 * M_PI * (OFFSET + NL_X) / NL_FS, cr = 1.0, ci = 0.0, sr = cos(w), si = sin(w);
+        for (long i = 0; i < n; i++){
+            double x = d[2 * i], y = d[2 * i + 1]; mr[i] = (float)(x * cr - y * ci); mi[i] = (float)(x * ci + y * cr);
+            double t = cr * sr - ci * si; ci = cr * si + ci * sr; cr = t;
+            if ((i & 1023) == 1023){ double g = 1.0 / sqrt(cr * cr + ci * ci); cr *= g; ci *= g; }
+        }
+    }
+    for (long m = 0; m < nd; m++){ float yr = 0, yi = 0; const float *a = mr + m * NF_D, *b = mi + m * NF_D; for (int k = 0; k < NF_N; k++){ yr += h[k] * a[k]; yi += h[k] * b[k]; } br[m] = yr; bi[m] = yi; }
+    const double fs2 = NL_FS / NF_D, ade = 1.0 - exp(-1.0 / (fs2 * 50e-6)), ahp = 1.0 - exp(-2.0 * M_PI * 30.0 / fs2);
+    double de = 0, lp30 = 0;
+    for (long m = 1; m < nd; m++){
+        double f = atan2((double)bi[m] * br[m - 1] - (double)br[m] * bi[m - 1], (double)br[m] * br[m - 1] + (double)bi[m] * bi[m - 1]) * fs2 / (2.0 * M_PI);
+        if (m == 1){ de = f; lp30 = f; }
+        de += ade * (f - de); lp30 += ahp * (de - lp30); fq[m] = (float)(de - lp30);
+    }
+    double s2 = 0; long cnt = 0; const long skip = (long)(0.05 * fs2);              // the 30 Hz high-pass settles first
+    for (long m = skip; m + NF_N2 < nd; m++){ double y = 0; for (int k = 0; k < NF_N2; k++) y += h2[k] * fq[m + k]; s2 += y * y; cnt++; }
+    free(br); free(bi); free(fq); free(mr); free(mi);
+    if (cnt < 1000) return -1.0;
+    double r = sqrt(s2 / cnt); if (rms_hz) *rms_hz = r;
+    return 20.0 * log10(75000.0 / sqrt(2.0) / (r > 1e-6 ? r : 1e-6));
+}
+
 static int null_main(long long carrier, int rx, const char *port, const char *outfile, int want_iq){
     FILE *of = fopen(outfile, "w"); if (!of) return 1;
     int fd = open("/dev/mem", O_RDWR | O_SYNC);
@@ -1301,11 +1337,26 @@ static int null_main(long long carrier, int rx, const char *port, const char *ou
         if (ok) break;
     }
     if (ok){ nl_dc(di, dq); nl_iq(gg, gs); } else { nl_dc(di0, dq0); nl_iq(gg0, gs0); }
+    double snr = -1.0, nrms = 0.0;
+    if (ok){                                                   // the residual FM of the silent carrier, with the result applied (0.25 s more)
+        int16_t *d = malloc(786432L * 2 * sizeof(int16_t));
+        if (d && capture(rx, 786432L, d) == 0) snr = nl_fm_snr(d, 786432L, &nrms);
+        free(d);
+    }
+    // the S/N the measurement floor alone would give: 'floor' (dBc in one Hann bin, at 50 kHz from the carrier) as white phase noise S_phi
+    // through the same de-emphasis and 30 Hz..15 kHz band. A measured snr within ~1 dB of it is the limit of the coupler path, not the transmitter.
+    double snrf = -1.0;
+    if (ok && snr > 0){
+        double sphi = pow(10.0, (flo - 10.0 * log10(1.5 * NL_FS / NL_B)) / 10.0), I = 0.0, fd = 1.0 / (2.0 * M_PI * 50e-6);
+        for (double f = 30.0; f < 15000.0; f += 10.0) I += f * f / (1.0 + (f / fd) * (f / fd)) * 10.0;
+        snrf = 20.0 * log10(75000.0 / sqrt(2.0) / sqrt(sphi * I));
+    }
     nl_wr(0x04, o0); nl_wr(0x0C, k0);
     if (err) fprintf(of, "NULL err=%s gain=%d\n", err == 2 ? "level" : err == 3 ? "nosignal" : "capture", g);
     else if (!ok) fprintf(of, "NULL err=fit dci=%d dcq=%d curv=%.2f,%.2f gain=%d\n", di0, dq0, curv[0], curv[1], g);
-    else fprintf(of, "NULL ok dci=%d dcq=%d qg=%d qs=%d iq=%s before=%.1f after=%.1f imgb=%.1f image=%.1f floor=%.1f curv=%.2f,%.2f curvi=%.2f,%.2f gain=%d x=%.0f lo=%s\n",
-                 di, dq, gg, gs, !nl_hasiq ? "na" : iq_ok ? "ok" : "fit", lo_before, lo_after, img_before, img, flo, curv[0], curv[1], curvi[0], curvi[1], g, NL_X / 1e3, lo_kept ? "kept" : "new");
+    else fprintf(of, "NULL ok dci=%d dcq=%d qg=%d qs=%d iq=%s before=%.1f after=%.1f imgb=%.1f image=%.1f floor=%.1f curv=%.2f,%.2f curvi=%.2f,%.2f gain=%d x=%.0f lo=%s snr=%.1f nfm=%.2f snrf=%.1f\n",
+                 di, dq, gg, gs, !nl_hasiq ? "na" : iq_ok ? "ok" : "fit", lo_before, lo_after, img_before, img, flo, curv[0], curv[1], curvi[0], curvi[1], g, NL_X / 1e3, lo_kept ? "kept" : "new",
+                 snr, nrms, snrf);
     fclose(of);
     return ok ? 0 : 1;
 }
