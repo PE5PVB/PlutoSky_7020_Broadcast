@@ -50,13 +50,16 @@ and put it on the air** — with a small FPGA-only signal path (no ARM, no DMA, 
   24 bit, so the deviation is identical for every format. A manual override register exists.
 - **Adaptive clock-domain crossing**: an asynchronous FIFO whose read rate is steered by a loop, so that the
   encoder's clock and the Pluto's TCXO never over- or underrun the FIFO.
-- **Signal conditioner / limiter** with a 258-sample (1.34 ms) look-ahead and **true-peak detection**: the limiter looks at the samples *and* at the cubic
-  midpoints between them, so the waveform that the interpolator reconstructs stays under the ceiling too. A hard guarantee that the deviation never exceeds the configured
-  ceiling, plus a **soft fade-in/out** when the I2S stream disappears or returns (no clicks, no splatter).
+- **Signal conditioner / limiter** (optional, off by default) with a 258-sample (1.34 ms) look-ahead and **true-peak detection**: the limiter looks at the samples *and* at the cubic
+  midpoints between them, so the waveform that the interpolator reconstructs stays under the ceiling too. When switched on (`B 1`, ceiling `H`) it is a hard guarantee that the
+  deviation never exceeds the ceiling. The **soft fade-in/out** when the I2S stream disappears or returns (no clicks, no splatter) is always on.
 - **Polyphase interpolator** from 192 kHz to the 3.072 MSPS baseband rate: a 96-tap x4 FIR (image rejection ≥ 79 dB above 116 kHz) whose passband is pre-compensated for the
   linear stage behind it, so the whole chain is **flat within ±0.002 dB up to 76 kHz** (multiplex, pilot, RDS and RDS2 included). Saturation, never wrap-around.
 - **FM modulator**: phase accumulator + a 14-bit, 16384-entry sine/cosine ROM. Deviation = `kdev × 0.75 kHz`
-  at 0 dBFS (`kdev 100` = ±75 kHz).
+  at 0 dBFS; the fixed scale is `kdev 133` (0 dBFS = 99.75 kHz, 75 kHz = −2.5 dBFS): the deviation follows the input.
+- **Channel filter on the FM signal** (after the modulator): −6 dB at ±120 … ±160 kHz or off (`CF`). It cuts the RF skirts that set the
+  SM.1268 mask margin, so the deviation no longer has to be limited to keep the mask (multirate: decimate ×4, 63-tap FIR at 768 kS/s, interpolate ×4,
+  bit-exact against its model in simulation).
 - **Digital LO and image correction**: a DC offset on I/Q against the LO leakage and a Q gain/skew correction against the I/Q image,
   in front of the DAC (set by the automatic nulling, see below). The digital carrier sits at −9 dBFS so that the DAC stays linear at zero-IF.
 - **Impulse time-stamping** for end-to-end latency and phase measurements.
@@ -69,9 +72,12 @@ and put it on the air** — with a small FPGA-only signal path (no ARM, no DMA, 
   after the encoder has sent a valid frequency (tune) command.
 - **Continuous mask monitoring** (4 spectra per second, 5-minute max-hold) and an optional automatic **mask guard** (off by default, `G 1`) that lowers
   the deviation ceiling when the 5-minute mask margin drops below +3.5 dB, and raises it again when there is room.
-- **TX calibration of the AD9361** (LO leakage, image) after every tune and every time the transmitter opens, **with the output muted** until it is done (about 2 s), and, if switched on with `CT 1`, again when the die temperature has drifted by 8 °C (off by default: during the warm-up after a cold start it would interrupt the programme). The result of every calibration is stored per frequency: after a boot (or when the transmitter is reopened) on the same frequency it is written back instead of calibrating again; a frequency change or `CAL` always calibrates.
+- **TX calibration of the AD9361** (LO leakage, image) after every tune and every time the transmitter opens, **with the output muted** until it is done (about 0.3 s; after a boot or a jump of more than 100 MHz also the RX RF DC calibration, about 2 s), and, if switched on with `CT 1`, again when the die temperature has drifted by 8 °C (off by default: during the warm-up after a cold start it would interrupt the programme). The result of every calibration is stored per frequency: after a boot (or when the transmitter is reopened) on the same frequency it is written back instead of calibrating again; a frequency change or `CAL` always calibrates.
 - **Automatic LO and image nulling** through the directional coupler right after every calibration (about 4 s, silent carrier): the LO leakage
-  and the image are measured on RX2 and nulled with the digital corrections, typically **LO ≤ −70 dBc, image ≤ −75 dBc** on every frequency.
+  and the image are measured on RX2 and nulled with the digital corrections, typically **LO ≤ −70 dBc, image ≤ −75 dBc** on every frequency. The same silent
+  carrier gives the **carrier S/N** (residual FM, 50 µs, 30 Hz–15 kHz): ≥ 95 dB, the limit of the coupler path.
+- **AD9361 TX analog bandwidth** set to 1.6 MHz (`TB`, the driver's default is 18 MHz): DAC noise and images far from the carrier are filtered.
+- **RDS decoder of the own transmission** (`?RD`, web overview): PI, PTY, PS, RadioText and clock time, decoded from the coupler path.
 - **Power meter** on RX1, used as a pure measurement bridge: you enter the attenuator value, the web interface and
   the serial protocol report dBm and watts.
 - **Watchdog / supervisor**: a crashed daemon is restarted automatically, and an open transmitter stays open.
@@ -152,8 +158,8 @@ The Pluto's own web server is replaced by this one (port 80). Light/dark mode, w
 
 | Tab | What |
 |-----|------|
-| **Overview** | carrier frequency/level, deviation meter (20 ms windows, peak hold, ceiling), **SM.1268-5 mask plot** with the 5-minute margin, limiter and mask-guard status, I2S format chip (e.g. `24/32 i2s`), FIFO/I2S dropouts, encoder link status, power meter |
-| **Control** | RF on/off, carrier frequency, output level, deviation range (`kdev`), limiter on/off, ceiling (max deviation), mask guard on/off, mask reset, power-meter settings (attenuator value, calibration) |
+| **Overview** | carrier frequency/level, deviation meter (20 ms windows, peak hold, ceiling), **SM.1268-5 mask plot** with the 5-minute margin, limiter and mask-guard status, I2S format chip (e.g. `24/32 i2s`), FIFO/I2S dropouts, encoder link status, power meter, RDS of the own transmission (PI, PS, RadioText) |
+| **Control** | RF on/off, carrier frequency, output level, deviation scale (`kdev`), limiter on/off, ceiling (max deviation), mask guard on/off, mask reset, channel filter, TX analog bandwidth, LO/image nulling with the carrier S/N, power-meter settings (attenuator value, calibration) |
 | **Measure** | tone meter (frequency + deviation of the strongest audio tone), end-to-end impulse response with plot and CSV download |
 | **Console** | raw serial-protocol commands with history |
 
@@ -180,9 +186,10 @@ for the encoder's splash screen. The encoder stays silent until `#B 100`. `?B` r
 | `E 0` / `E 1` | transmitter off (maximum attenuation **and** TX-LO off) / on |
 | `F <Hz>` | tune (70 MHz … 6 GHz), e.g. `F 108000000`; opens the transmitter after boot |
 | `P <dBm>` | TX1 output level, −84.75 … −5.0 (`ERR range` outside) |
-| `K <n>` | deviation range: 0 dBFS = 0.75 kHz × n (100 = ±75 kHz), 10 … 250 |
-| `B 0/1` | FPGA limiter off/on |
-| `H <kHz>` | deviation ceiling (maximum) of the limiter, 20 … 150 |
+| `K <n>` | deviation scale: 0 dBFS = 0.75 kHz × n, 10 … 250 (default and PicoAudio: 133 = 99.75 kHz) |
+| `CF 0/120/125/130/135/140/150/160` | channel filter on the FM signal: off / −6 dB at that many kHz from the carrier (stored) |
+| `B 0/1` | FPGA limiter off (default) / on |
+| `H <kHz>` | deviation ceiling (maximum) of the limiter, 20 … 150 (only with `B 1`) |
 | `G 0/1` | mask guard off/on |
 | `X` | reset the mask monitor |
 | `NULL`, `NULLAUTO 0/1`, `NULLRX 1/2` | LO/image nulling through the coupler now / automatically after every calibration (default on) / receiver (2 = coupler into RX2, default) |
@@ -202,7 +209,8 @@ for the encoder's splash screen. The encoder stays silent until `#B 100`. `?B` r
 | `?L` | spectrum around the carrier (mask monitor) |
 | `?A` | strongest audio tone: frequency and deviation |
 | `?R` | measurement path (coupler → RX2): `r=ok` / `r=missing` / `r=na` |
-| `?IQ`, `?NL` | the digital corrections and level / the result of the last nulling (LO and image before/after in dBc) |
+| `?IQ`, `?NL` | the digital corrections and level / the result of the last nulling (LO and image before/after in dBc, carrier S/N) |
+| `?CF`, `?RD` | channel filter / RDS of the own transmission (`rd=ok pi= pty= ps="…" rt="…"`) |
 | `TB <kHz>`, `?TB` | analog TX bandwidth of the AD9361 (default 1600 kHz; the driver's 18 MHz passes DAC noise far from the carrier); a change recalibrates |
 | `?O` | power meter: `o=<dBm at TX1> w=<watt> in=<dBm at RX1> att= cal= g= st=ok\|low\|high\|nosig\|off` |
 | `?B` | last boot step |
@@ -216,8 +224,22 @@ From a shell on the Pluto (`ssh root@<ip>`, default password `analog`):
 
 ## Mask protection, limiter and levels
 
-The deviation limit is enforced **in the FPGA** (a 258-sample look-ahead true-peak limiter), so the transmitted deviation can
-never exceed the configured ceiling. On top of that, the optional **mask guard** (off by default; switch it on with `G 1` or in the encoder menu) watches the spectrum (TX1 through the coupler → RX2) and
+Since the **channel filter** (`CF`) the mask is kept by band-limiting the FM signal itself, not by limiting the deviation. The default is
+therefore: limiter **off** (`B 0`), fixed scale `K 133` (0 dBFS = 99.75 kHz), and the deviation follows the input — the encoder's processing
+decides how loud it is. Measured on programme with `CF 120`: peaks up to 93 kHz and still **+4.3 dB** 5-minute mask margin.
+
+| `CF` | mask margin gained (simulated) | stereo separation at 10 kHz (measured) |
+|---|---|---|
+| off | — | 69 … 71 dB |
+| 160 / 150 | +0.2 / +0.5 dB | 65 dB |
+| 140 | +1.3 dB | 63 dB |
+| 130 / 125 | +4.1 / +6.6 dB | — |
+| 120 | +9.9 dB | 53 dB |
+
+Whoever still wants a hard deviation limit switches the limiter on: `B 1` with a ceiling `H` (on the PicoAudio: *Max deviation* = a value
+with the SDR limiter on; *Max deviation* = Off sends `B 0`). The scale stays `K 133`, so pilot and RDS keep their level whatever the setting.
+The limit is then enforced **in the FPGA** (a 258-sample look-ahead true-peak limiter), so the transmitted deviation can
+never exceed the ceiling. On top of that, the optional **mask guard** (off by default; switch it on with `G 1` or in the encoder menu) watches the spectrum (TX1 through the coupler → RX2) and
 adjusts the ceiling:
 
 - the chosen maximum (`H`) is the *upper limit*;
@@ -247,7 +269,10 @@ tools in `scripts/` and `src/skypluto-mask.c`. The figures come from the encoder
 | Total delay, encoder + Pluto | 3.424 ms + about 1.59 ms = **about 5.02 ms**, linear phase (the Pluto part was measured as 1.584 ms; the true-peak look-ahead adds 2 samples = 10 µs) |
 | Stereo L−R path | S = M within **±0.004 dB** above 2 kHz (±0.017 dB at 0.5 … 1 kHz), phase ≤ 0.13°, separation 59 … 81 dB (**median 74.5 dB**), **no L−R trim needed** (the interpolator is flat to ±0.002 dB up to 76 kHz) |
 | LO leakage and image, transmitter on, after the automatic nulling | LO **−69 … −73 dBc**, image **−75 … −81 dBc** (107.9, 435, 1296 and 2320 MHz; measured through the coupler, the image figures are at the floor of the measurement). With only the AD9361's own calibration the LO is at −51 … −64 dBc and the image at −50 … −68 dBc. Closed ≤ −95 dBc |
-| Mask margin (1 kHz tone at 0 dBFS, limiter on, guard off) | ≥ **+4.9 dB** at every maximum deviation from 75 down to 50 kHz (5-minute margin, +6.1 dB at 75 kHz, +9.5 dB at 50 kHz) |
+| Mask margin (1 kHz tone at 0 dBFS, limiter on, guard off, no channel filter) | ≥ **+4.9 dB** at every maximum deviation from 75 down to 50 kHz (5-minute margin, +6.1 dB at 75 kHz, +9.5 dB at 50 kHz) |
+| Mask margin (programme, channel filter ±120, limiter off, peaks up to 93 kHz) | **+4.3 dB** (5-minute worst case) |
+| Pilot and RDS (fixed scale `K 133`) | pilot 6.74 kHz (9.0 %), RDS 3.0 kHz peak, identical with the limiter on or off |
+| Carrier S/N (residual FM of the silent carrier, 50 µs, 30 Hz–15 kHz, 75 kHz reference) | ≥ **95 dB** (the limit of the coupler path; 0.9 Hz rms) |
 
 | | |
 |:--:|:--:|
