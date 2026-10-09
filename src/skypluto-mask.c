@@ -29,6 +29,9 @@
 #include <sched.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <sys/resource.h>
+#include <fcntl.h>
 
 #define FS      3072000.0
 #define N       512
@@ -444,14 +447,14 @@ static int sa_enabled(void){
 // ---- RDS decoder (?RD): the RDS groups in the own transmission ---------------------------------------------------------------------------------------------
 // Active if /tmp/skypluto.rds was touched within the last 10 s (the daemon does that on '?RD', the web interface asks for it). One 0.25 s window in four:
 //   3.072 MS/s -> complex band-pass around the carrier (31 taps, evaluated only at every 8th sample) -> 384 kS/s -> FM demodulation ->
-//   x e^-j2pi57k -> low-pass 4 kHz (95 taps, every 16th sample) -> 24 kS/s -> carrier phase by squaring (BPSK) -> integrate and dump per half
-//   symbol (2375/s) with the best of 16 timing phases -> biphase (Manchester) -> differential decoding -> block sync with the offset words.
-// Every complete group (4 blocks with the right offset words, no error correction) is printed as 'RDSG <A> <B> <C> <D>' (hex); the daemon
+//   x e^-j2pi57k -> low-pass 12 kHz (63 taps) -> 96 kS/s -> low-pass 2.4 kHz (127 taps) -> carrier phase by squaring (BPSK) -> integrate and dump per half
+//   symbol (2375/s) with the best of 32 timing phases -> biphase (Manchester) -> differential decoding -> block sync with the offset words.
+// Every complete group (4 blocks with the right offset words, no error correction) is appended as 'RDSG <A> <B> <C> <D>' (hex) to /tmp/skypluto.rdsg; the daemon
 // keeps PI, PTY, PS, RT and the clock. A window of 0.25 s holds ~2.9 groups.
 #define RDS_D1   8
 #define RDS_N1   31
-#define RDS_D2   16
-#define RDS_N2   95
+#define RDS_NA   63                                 // low-pass 12 kHz at 384 kS/s -> 96 kS/s
+#define RDS_NB   127                                // low-pass 2.4 kHz at 96 kS/s, no decimation (the RDS band only: not the top of L-R at 53 kHz, not RDS2 at 66.5 kHz)
 static int rds_enabled(void){
     struct stat st;
     return stat("/tmp/skypluto.rds", &st) == 0 && time(NULL) - st.st_mtime < 10;
@@ -461,17 +464,21 @@ static uint16_t rds_check(uint32_t w){                     // received checkword
     for (int i = 25; i >= 10; i--) if (rem & (1u << i)) rem ^= 0x5B9u << (i - 10);
     return (uint16_t)((w & 0x3FF) ^ (rem & 0x3FF));
 }
+// Runs in a forked child at the lowest priority (see the streaming loop): no malloc (the parent has threads), output with write(2).
+#define RDS_MAXF  (800000L / RDS_D1 + 8)
+static float rds_f[RDS_MAXF], rds_mr[RDS_MAXF], rds_mi[RDS_MAXF], rds_ar[RDS_MAXF / 4 + 8], rds_ai[RDS_MAXF / 4 + 8], rds_br[RDS_MAXF / 4 + 8], rds_bi[RDS_MAXF / 4 + 8];
+static float rds_hs[RDS_MAXF / 32 + 8], rds_bd[RDS_MAXF / 32 + 8]; static uint8_t rds_bits[RDS_MAXF / 32 + 8];
 static void rds_analyze(const int16_t *buf, long nfr){
-    static float h1r[RDS_N1], h1i[RDS_N1], h2[RDS_N2]; static int init = 0;
+    static float h1r[RDS_N1], h1i[RDS_N1], ha[RDS_NA], hb[RDS_NB]; static int init = 0;
     if (!init){                                            // band-pass at OFFSET: Blackman low-pass 180 kHz, modulated to the carrier
-        float t1[RDS_N1], t2[RDS_N2]; ed_lp(t1, RDS_N1, 180e3, FS); ed_lp(t2, RDS_N2, 4000.0, FS / RDS_D1);
+        float t1[RDS_N1]; ed_lp(t1, RDS_N1, 180e3, FS); ed_lp(ha, RDS_NA, 12000.0, FS / RDS_D1); ed_lp(hb, RDS_NB, 2400.0, FS / RDS_D1 / 4.0);
         for (int k = 0; k < RDS_N1; k++){ double a = 2.0 * M_PI * OFFSET / FS * k; h1r[k] = (float)(t1[k] * cos(a)); h1i[k] = (float)(t1[k] * sin(a)); }
-        for (int k = 0; k < RDS_N2; k++) h2[k] = t2[k];
         init = 1;
     }
     long n1 = (nfr - RDS_N1) / RDS_D1; if (n1 < 4096) return;
-    float *f = malloc((size_t)n1 * sizeof(float)); if (!f) return;
-    // stage 1: complex band-pass + decimation, FM demodulation (the constant OFFSET rotation is removed with the mean)
+    if (n1 > RDS_MAXF - 4) n1 = RDS_MAXF - 4;
+    float *f = rds_f;
+    // stage 1: complex band-pass + decimation, rotation to 0 Hz, FM demodulation (a residual DC is removed with the mean)
     float pr = 0, pq = 0; double mean = 0; long nf = 0;
     for (long m = 0; m < n1; m++){
         const int16_t *x = buf + 2 * (m * RDS_D1); float yr = 0, yi = 0;
@@ -479,15 +486,20 @@ static void rds_analyze(const int16_t *buf, long nfr){
             float a = x[2 * (RDS_N1 - 1 - k)], b = x[2 * (RDS_N1 - 1 - k) + 1];
             yr += h1r[k] * a - h1i[k] * b; yi += h1r[k] * b + h1i[k] * a;
         }
+        {   // the band-pass output still sits at OFFSET, which aliases to OFFSET mod 384 kHz (120 kHz) after the decimation: with the deviation on
+            // top that crosses the Nyquist limit (192 kHz). Rotate it back to 0 Hz first (the rotation repeats every 16 outputs).
+            static float rc[16], rs[16]; static int ri = 0;
+            if (!ri){ for (int q = 0; q < 16; q++){ double a = -2.0 * M_PI * fmod(OFFSET * RDS_D1 / FS, 1.0) * q; rc[q] = (float)cos(a); rs[q] = (float)sin(a); } ri = 1; }
+            float c = rc[m & 15], sn = rs[m & 15], tr = yr * c - yi * sn; yi = yr * sn + yi * c; yr = tr;
+        }
         if (m > 0){ f[nf] = atan2f(yi * pr - yr * pq, yr * pr + yi * pq); mean += f[nf]; nf++; }
         pr = yr; pq = yi;
     }
     mean /= nf ? nf : 1;
-    // stage 2: x e^-j2pi57k, low-pass, decimation to 24 kS/s
-    const double fs1 = FS / RDS_D1, fs2 = fs1 / RDS_D2;
-    long n2 = (nf - RDS_N2) / RDS_D2; if (n2 < 1000){ free(f); return; }
-    float *br = malloc((size_t)n2 * sizeof(float)), *bi = malloc((size_t)n2 * sizeof(float)), *mr = malloc((size_t)nf * sizeof(float)), *mi = malloc((size_t)nf * sizeof(float));
-    if (!br || !bi || !mr || !mi){ free(f); free(br); free(bi); free(mr); free(mi); return; }
+    // stage 2: x e^-j2pi57k, low-pass 12 kHz + decimation to 96 kS/s, low-pass 2.4 kHz
+    const double fs1 = FS / RDS_D1, fs2 = fs1 / 4.0;       // the bit detector runs at 96 kS/s (~40 samples per half symbol)
+    long na = (nf - RDS_NA) / 4, n2 = na - RDS_NB; if (n2 < 4000) return;
+    float *br = rds_br, *bi = rds_bi, *mr = rds_mr, *mi = rds_mi;
     {   double w = -2.0 * M_PI * 57000.0 / fs1, cr = 1.0, ci = 0.0, sr = cos(w), si = sin(w);       // rotating phasor, renormalised every 1024 samples
         for (long n = 0; n < nf; n++){
             float v = (float)(f[n] - mean); mr[n] = v * (float)cr; mi[n] = v * (float)ci;
@@ -495,26 +507,27 @@ static void rds_analyze(const int16_t *buf, long nfr){
             if ((n & 1023) == 1023){ double g = 1.0 / sqrt(cr * cr + ci * ci); cr *= g; ci *= g; }
         }
     }
-    free(f);
-    for (long m = 0; m < n2; m++){
-        float yr = 0, yi = 0; const float *ar = mr + m * RDS_D2, *ai = mi + m * RDS_D2;
-        for (int k = 0; k < RDS_N2; k++){ yr += h2[k] * ar[k]; yi += h2[k] * ai[k]; }
+    for (long m = 0; m < na; m++){                         // 384 -> 96 kS/s
+        float yr = 0, yi = 0; const float *pr_ = mr + m * 4, *pi_ = mi + m * 4;
+        for (int k = 0; k < RDS_NA; k++){ yr += ha[k] * pr_[k]; yi += ha[k] * pi_[k]; }
+        rds_ar[m] = yr; rds_ai[m] = yi;
+    }
+    for (long m = 0; m < n2; m++){                         // the RDS band at 96 kS/s
+        float yr = 0, yi = 0; const float *pr_ = rds_ar + m, *pi_ = rds_ai + m;
+        for (int k = 0; k < RDS_NB; k++){ yr += hb[k] * pr_[k]; yi += hb[k] * pi_[k]; }
         br[m] = yr; bi[m] = yi;
     }
-    free(mr); free(mi);
     // carrier phase from the squared signal (BPSK: the modulation drops out), then the real part
     double sr = 0, si = 0;
     for (long m = 0; m < n2; m++){ sr += (double)br[m] * br[m] - (double)bi[m] * bi[m]; si += 2.0 * br[m] * bi[m]; }
     double ph = 0.5 * atan2(si, sr), cph = cos(ph), sph = sin(ph);
     for (long m = 0; m < n2; m++) br[m] = (float)(br[m] * cph + bi[m] * sph);
-    free(bi);
     // half-symbol integrate-and-dump with the best timing; Manchester: bit = first half - second half
-    const double sps = fs2 / 2375.0;                       // samples per half symbol (~10.1)
-    long nh = (long)((n2 - 2 * sps) / sps) - 1; if (nh < 64){ free(br); return; }
-    float *hs = malloc((size_t)nh * sizeof(float)), *bestd = malloc((size_t)(nh / 2 + 1) * sizeof(float)); long bestn = 0; double bestq = -1;
-    if (!hs || !bestd){ free(br); free(hs); free(bestd); return; }
-    for (int o = 0; o < 16; o++){
-        double off = o * 2.0 * sps / 16.0;
+    const double sps = fs2 / 2375.0;                       // samples per half symbol (~40.4)
+    long nh = (long)((n2 - 2 * sps) / sps) - 1; if (nh < 64) return;
+    float *hs = rds_hs, *bestd = rds_bd; long bestn = 0; double bestq = -1;
+    for (int o = 0; o < 32; o++){
+        double off = o * 2.0 * sps / 32.0;
         for (long j = 0; j < nh; j++){ long a = (long)(off + j * sps), b = (long)(off + (j + 1) * sps); float acc = 0; for (long i = a; i < b && i < n2; i++) acc += br[i]; hs[j] = acc; }
         for (int par = 0; par < 2; par++){
             long nb = (nh - par) / 2; double sd = 0, ss = 0;
@@ -523,22 +536,22 @@ static void rds_analyze(const int16_t *buf, long nfr){
             if (q > bestq){ bestq = q; bestn = nb; for (long j = 0; j < nb; j++) bestd[j] = hs[par + 2 * j] - hs[par + 2 * j + 1]; }
         }
     }
-    free(br); free(hs);
     // differential decoding and block sync
-    uint8_t *bits = malloc((size_t)bestn); if (!bits){ free(bestd); return; }
+    uint8_t *bits = rds_bits;
     for (long j = 1; j < bestn; j++) bits[j - 1] = (uint8_t)((bestd[j] > 0) ^ (bestd[j - 1] > 0));
-    long nbits = bestn - 1; free(bestd);
+    long nbits = bestn - 1;
     static const uint16_t OA = 0x0FC, OB = 0x198, OC = 0x168, OC2 = 0x350, OD = 0x1B4;
     for (long i = 0; i + 104 <= nbits; ){
         uint32_t w[4];
         for (int b = 0; b < 4; b++){ uint32_t v = 0; for (int k = 0; k < 26; k++) v = (v << 1) | bits[i + 26 * b + k]; w[b] = v; }
         uint16_t c2 = rds_check(w[2]);
         if (rds_check(w[0]) == OA && rds_check(w[1]) == OB && (c2 == OC || c2 == OC2) && rds_check(w[3]) == OD){
-            printf("RDSG %04X %04X %04X %04X\n", w[0] >> 10, w[1] >> 10, w[2] >> 10, w[3] >> 10);
+            char ln[48]; int n = snprintf(ln, sizeof ln, "RDSG %04X %04X %04X %04X\n", w[0] >> 10, w[1] >> 10, w[2] >> 10, w[3] >> 10);
+            int fd = open("/tmp/skypluto.rdsg", O_WRONLY | O_CREAT | O_APPEND, 0644);   // a file of its own: on stdout the line could land inside a mask block
+            if (fd >= 0){ if (write(fd, ln, (size_t)n) < 0){ } close(fd); }
             i += 104;
         } else i++;
     }
-    free(bits); fflush(stdout);
 }
 static int sd_enabled(void){
     struct stat st;
@@ -746,7 +759,16 @@ static int stream_main(long long txlo, int rx, const char *port, int gain, doubl
         if (rdc.ch4){ double n = (double)win_fr, mi = rdc.pw_si[b] / n, mq = rdc.pw_sq[b] / n, p = rdc.pw_s2[b] / n - mi * mi - mq * mq; printf("PWR p=%.1f pk=%ld\n", p, rdc.pw_pk[b]); fflush(stdout); }
         if (tone_enabled()){ double tf, td; if (tone_analyze(x, win_fr, &tf, &td)){ printf("TONE f=%.1f dev=%.3f\n", tf, td); fflush(stdout); } }
         { int a = sa_enabled(), d = sd_enabled(); if (a || d) sa_analyze(x, win_fr, a, d); }
-        { static long rds_n = 0; if (rds_enabled() && (rds_n++ & 3) == 0) rds_analyze(x, win_fr); }   // one window in four (~1 s)
+        // RDS: one window in four, decoded in a forked child at the lowest priority (~180 ms of CPU on the A9): it only uses the time the mask
+        // monitor leaves over (fork gives the child a copy-on-write snapshot of this window). The next one is started once the previous has finished.
+        { static long rds_n = 0; static pid_t rds_pid = -1;
+          if (rds_pid > 0 && waitpid(rds_pid, NULL, WNOHANG) == rds_pid) rds_pid = -1;
+          if (rds_pid < 0 && rds_enabled() && (rds_n++ & 3) == 0){
+              fflush(stdout);
+              pid_t cp = fork();
+              if (cp == 0){ if (setpriority(PRIO_PROCESS, 0, 19)){ } rds_analyze(x, win_fr); _exit(0); }
+              if (cp > 0) rds_pid = cp;
+          } }
         report_block(mh, fmh, g, dev, jumps, cov, &margin);
         { static double last_jmp = 0;                               // keep a capture rejected for phase jumps (at most every 10 s) for analysis
           if (jumps > 0 && t0 - last_jmp > 10.0){ FILE *jf = fopen("/tmp/mask_jump.iq", "wb"); if (jf){ fwrite(x, 2 * sizeof(int16_t), (size_t)win_fr, jf); fclose(jf); last_jmp = t0; } } }

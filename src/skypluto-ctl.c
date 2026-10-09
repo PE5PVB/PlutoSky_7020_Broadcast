@@ -1242,6 +1242,13 @@ static void handle(char *line){
         // ams=<age of the last group> ct=<clock time> ps="<8>" rt="<text>". The first ?RD enables the decoder (10 s; ask again within 10 s). rd=na without groups.
         if (!strcmp(cmd,"?RD")){
             { FILE *rf = fopen("/tmp/skypluto.rds", "w"); if (rf){ fputs("1\n", rf); fclose(rf); } }
+            {   // collect the groups the decoder appended since the last call (renamed first, so the decoder starts a new file)
+                if (rename("/tmp/skypluto.rdsg", "/tmp/skypluto.rdsg.r") == 0){
+                    FILE *gf = fopen("/tmp/skypluto.rdsg.r", "r"); char gl[64]; unsigned a1, b1, c1, d1;
+                    if (gf){ while (fgets(gl, sizeof gl, gf)) if (sscanf(gl, "RDSG %x %x %x %x", &a1, &b1, &c1, &d1) == 4) rds_group(a1, b1, c1, d1); fclose(gf); }
+                    unlink("/tmp/skypluto.rdsg.r");
+                }
+            }
             double age = mono() - rds_t;
             if (rds_pi < 0 || age > 30.0){ tx_str("rd=na\n"); return; }
             snprintf(buf, sizeof buf, "rd=ok pi=%04X pty=%d tp=%d ta=%d ms=%d gps=%.1f ams=%d ct=%s ps=\"%s\" rt=\"%s\"\n", rds_pi, rds_pty, rds_tp, rds_ta, rds_ms,
