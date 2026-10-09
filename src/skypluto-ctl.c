@@ -654,7 +654,9 @@ static void ir_finish(void){
     }
     unlink("/tmp/skypluto.hold");
 }
-// TX calibration of the AD9361 (LO leakage = rf_dc_offs, image = tx_quad). The chip's calibration is only valid for the LO frequency it ran at, so it is repeated in a child process
+// TX calibration of the AD9361: tx_quad (TX LO leakage and image, ~0.1 s). rf_dc_offs is the RX RF DC offset calibration (~1.7 s): it does nothing for the
+// output and only runs after a boot and when the LO moved by more than 100 MHz since it last ran (the RX2 measurement path follows the carrier).
+// The chip's calibration is only valid for the LO frequency it ran at, so it is repeated in a child process
 // after every tune and every time the transmitter opens and when the die temperature has drifted by 8 degC (the output is muted during all of them).
 static double cal_failed_t = 0.0;                          // when the calibration gave up: it is tried again after 30 s
 static int    cal_fail = 0, cal_failed = 0, cal_try = 0;      // cal_fail: consecutive failed attempts; cal_failed: gave up (the output stays muted until the next F/E); cal_try: fork failures
@@ -676,6 +678,7 @@ static void measure_finish(void);
 #define CS_NR      16
 #define CS_FORCE   0x09F                               // force bits: 0xFF = use 0x08E..0x09D as written (restore), 0x00 = the chip's own calibration result
 static long long cal_last_lo = 0;                     // TX LO frequency of the last calibration (or restore) in this session; 0 = none yet (after a boot)
+static long long rfdc_lo = 0;                         // LO frequency of the last RX RF DC offset calibration (rf_dc_offs); 0 = none yet
 static int       cal_force = 0, cal_restoring = 0;    // cal_force: the next calibration must be a real one; cal_restoring: the running child only tunes (restore)
 static char      cs_dbg[96] = "";
 static const char *cs_dbgfile(void){                  // debugfs direct_reg_access of ad9361-phy
@@ -1539,7 +1542,7 @@ static void handle(char *line){
         if (!has_iq){ tx_str("ERR nobit\n"); return; }
         iq_gain_ppm = g; iq_skew_ppm = k; iq_apply(); iq_conf_write(); tx_str("OK\n"); return;
     }
-    // NULL: LO/image nulling now, through the coupler TX1 -> RX2 (NULLRX 2, default) or a cable TX1 -> RX1 (NULLRX 1, output at most -15 dBm). About 5 s with a silent
+    // NULL: LO/image nulling now, through the coupler TX1 -> RX2 (NULLRX 2, default) or a cable TX1 -> RX1 (NULLRX 1, output at most -15 dBm). About 4 s with a silent
     // carrier 100 kHz off the LO; the result goes into DC (and gain/skew) and is kept. NULLAUTO <0|1>: run it automatically after every TX calibration. Stored.
     if (!strcmp(cmd,"NULL")){
         int e = null_start();
@@ -2147,8 +2150,9 @@ int main(int argc, char **argv){
                 char cs[900], mt[160] = "";
                 // a real calibration first clears the force bits (0x09F), otherwise the chip would keep using a restored set and ignore the new result
                 char cs_unforce[300];
-                if (cs_dbgfile()[0]) snprintf(cs_unforce, sizeof cs_unforce, "echo '0x%X 0x0' > %s && echo rf_dc_offs > $D/calib_mode && echo tx_quad > $D/calib_mode", CS_FORCE, cs_dbgfile());
-                else snprintf(cs_unforce, sizeof cs_unforce, "echo rf_dc_offs > $D/calib_mode && echo tx_quad > $D/calib_mode");
+                int rfdc = (rfdc_lo == 0 || llabs(lo_freq() - rfdc_lo) > 100000000LL);
+                if (cs_dbgfile()[0]) snprintf(cs_unforce, sizeof cs_unforce, "echo '0x%X 0x0' > %s && %secho tx_quad > $D/calib_mode", CS_FORCE, cs_dbgfile(), rfdc ? "echo rf_dc_offs > $D/calib_mode && " : "");
+                else snprintf(cs_unforce, sizeof cs_unforce, "%secho tx_quad > $D/calib_mode", rfdc ? "echo rf_dc_offs > $D/calib_mode && " : "");
                 // restore instead of calibrate: not forced, no frequency change (first opening after a boot, or the same LO as the last calibration), zero-IF, a stored set
                 { CalSet tmp; long long lo = lo_freq();
                   cal_restoring = (!cal_force && (cal_last_lo == 0 || cal_last_lo == lo) && fabs(lowif_khz) < 0.0005 && phy_find()[0] && cs_dbgfile()[0] && cs_find(lo, &tmp)) ? 1 : 0; }
@@ -2168,6 +2172,7 @@ int main(int argc, char **argv){
                 pid_t cp = fork();
                 if (cp == 0){ prctl(PR_SET_PDEATHSIG, SIGKILL); execl("/bin/sh", "sh", "-c", cs, (char *)NULL); _exit(127); }
                 if (cp > 0){
+                    if (!cal_restoring && phy_dir[0] && rfdc) rfdc_lo = lo_freq();       // (a failed calibration is retried with cal_force, rf_dc_offs included then only if still due)
                     cal_pid = cp; cal_t0 = now; cal_pending = 0; cal_try = 0; cal_expect_f = (cal_retune || cal_restoring) ? lo_freq() : 0; if (cal_retune == 2) lo_pd = 0; cal_retune = 0;
                     applied_a = ATTEN_MUTE; applied_a2 = ATTEN_MUTE;      // the child mutes TX1 and TX2 first
                     fprintf(stderr, cal_restoring ? "   -> opgeslagen kalibratie terugzetten (f=%lld, zender dicht)\n" : "   -> TX-kalibratie gestart (f=%lld, zender dicht)\n", last_f); fflush(stderr);

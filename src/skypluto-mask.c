@@ -1164,8 +1164,8 @@ static int nl_s12(uint32_t v){ v &= 0xFFF; return (v & 0x800) ? (int)v - 4096 : 
 #define NL_FS     3072000.0
 static double NL_X = 136533.0 * 12288000.0 / 16777216.0;      // the NCO offset in Hz (99 999.76 by default; other values when a line interferes)
 #define NL_B      4096                                   // block for the line correlations
-#define NL_SEG    0.14                                   // s per DC point
-#define NL_GUARD  0.06                                   // s at the start of each segment that are not used (the stream lags the register writes)
+#define NL_SEG    0.10                                   // s per DC point
+#define NL_GUARD  0.035                                  // s at the start of each segment that are not used (the stream lags the register writes by ~21 ms: 4 x 16384-sample buffers)
 #define NL_LEAD   0.10
 
 // one round: 10 points c, DC I +-, DC Q +-, gain +-, skew +-, c; per point the mean power of the LO line, the carrier, the image and the floor
@@ -1265,7 +1265,7 @@ static int null_main(long long carrier, int rx, const char *port, const char *ou
     // carrier power / 2^38. Steps 600 and 150 (an image of about -59 and -71 dBc), check with 40.
     double plo[NL_NP], pc[NL_NP], pim[NL_NP], pfl[NL_NP];
     int di = di0, dq = dq0, gg = gg0, gs = gs0, iq_ok = nl_hasiq;
-    double lo_before = 0, lo_after = 0, img_before = 0, img = 0, flo = 0, curv[2] = {0, 0}, curvi[2] = {0, 0}; int ok = 0;
+    double lo_before = 0, lo_after = 0, img_before = 0, img = 0, flo = 0, curv[2] = {0, 0}, curvi[2] = {0, 0}; int ok = 0, lo_kept = 0;
     const int dl[2] = { 60, 15 }, dg[2] = { 600, 150 };
     // offsets of the carrier from the LO: 100 kHz, and if the fit fails (an interfering line near the LO, the image or the carrier) 120, 80, 140 kHz
     static const uint32_t incs[4] = { 136533, 163840, 109227, 191147 };
@@ -1295,6 +1295,7 @@ static int null_main(long long carrier, int rx, const char *port, const char *ou
                 double cc = (pc[0] + pc[NL_NP - 1]) / 2.0;
                 lo_after = 10.0 * log10((plo[0] + plo[NL_NP - 1]) / 2.0 / cc); img = 10.0 * log10((pim[0] + pim[NL_NP - 1]) / 2.0 / cc); flo = 10.0 * log10((pfl[0] + pfl[NL_NP - 1]) / 2.0 / cc);
                 if (iq_ok && img > img_before + 1.0){ iq_ok = 0; gg = gg0; gs = gs0; }   // never leave the image worse than it was
+                if (lo_after > lo_before + 1.0){ di = di0; dq = dq0; lo_after = lo_before; lo_kept = 1; }   // nor the LO line (it wanders by a few DC units)
             }
         }
         if (ok) break;
@@ -1303,8 +1304,8 @@ static int null_main(long long carrier, int rx, const char *port, const char *ou
     nl_wr(0x04, o0); nl_wr(0x0C, k0);
     if (err) fprintf(of, "NULL err=%s gain=%d\n", err == 2 ? "level" : err == 3 ? "nosignal" : "capture", g);
     else if (!ok) fprintf(of, "NULL err=fit dci=%d dcq=%d curv=%.2f,%.2f gain=%d\n", di0, dq0, curv[0], curv[1], g);
-    else fprintf(of, "NULL ok dci=%d dcq=%d qg=%d qs=%d iq=%s before=%.1f after=%.1f imgb=%.1f image=%.1f floor=%.1f curv=%.2f,%.2f curvi=%.2f,%.2f gain=%d x=%.0f\n",
-                 di, dq, gg, gs, !nl_hasiq ? "na" : iq_ok ? "ok" : "fit", lo_before, lo_after, img_before, img, flo, curv[0], curv[1], curvi[0], curvi[1], g, NL_X / 1e3);
+    else fprintf(of, "NULL ok dci=%d dcq=%d qg=%d qs=%d iq=%s before=%.1f after=%.1f imgb=%.1f image=%.1f floor=%.1f curv=%.2f,%.2f curvi=%.2f,%.2f gain=%d x=%.0f lo=%s\n",
+                 di, dq, gg, gs, !nl_hasiq ? "na" : iq_ok ? "ok" : "fit", lo_before, lo_after, img_before, img, flo, curv[0], curv[1], curvi[0], curvi[1], g, NL_X / 1e3, lo_kept ? "kept" : "new");
     fclose(of);
     return ok ? 0 : 1;
 }

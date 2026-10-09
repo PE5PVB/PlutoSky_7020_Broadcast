@@ -70,7 +70,7 @@ and put it on the air** — with a small FPGA-only signal path (no ARM, no DMA, 
 - **Continuous mask monitoring** (4 spectra per second, 5-minute max-hold) and an optional automatic **mask guard** (off by default, `G 1`) that lowers
   the deviation ceiling when the 5-minute mask margin drops below +3.5 dB, and raises it again when there is room.
 - **TX calibration of the AD9361** (LO leakage, image) after every tune and every time the transmitter opens, **with the output muted** until it is done (about 2 s), and, if switched on with `CT 1`, again when the die temperature has drifted by 8 °C (off by default: during the warm-up after a cold start it would interrupt the programme). The result of every calibration is stored per frequency: after a boot (or when the transmitter is reopened) on the same frequency it is written back instead of calibrating again; a frequency change or `CAL` always calibrates.
-- **Automatic LO and image nulling** through the directional coupler right after every calibration (about 5 s, silent carrier): the LO leakage
+- **Automatic LO and image nulling** through the directional coupler right after every calibration (about 4 s, silent carrier): the LO leakage
   and the image are measured on RX2 and nulled with the digital corrections, typically **LO ≤ −70 dBc, image ≤ −75 dBc** on every frequency.
 - **Power meter** on RX1, used as a pure measurement bridge: you enter the attenuator value, the web interface and
   the serial protocol report dBm and watts.
@@ -139,7 +139,7 @@ Notes:
 4. A restart of just the daemon (an update, a crash) leaves the RF **on**; a power cycle always starts closed.
 5. The Pluto's clock has no battery: after a reboot it reads 1970. This does not affect operation.
 6. The **green LED** shows the transmitter state: **off** = closed (no RF), **blinking** (2 Hz) = tuning, calibrating or nulling (the output is muted or the carrier is silent), **on** = really on the air.
-   After every frequency change this takes about 7 s: ~2 s AD9361 calibration, then ~5 s LO/image nulling through the coupler. The encoder sees `cal=run` in `?E` meanwhile (the PicoAudio blinks its display).
+   After every frequency change this takes about 4.5 s: ~0.3 s AD9361 calibration, then ~4.2 s LO/image nulling through the coupler (the first calibration after a boot, or after a jump of more than 100 MHz, also runs the RX RF DC calibration: ~1.7 s more). The encoder sees `cal=run` in `?E` meanwhile (the PicoAudio blinks its display).
 7. A new Pluto needs no configuration for this: without configuration files the mask monitor measures through the coupler on RX2 and the nulling runs after every calibration.
 
 ---
