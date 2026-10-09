@@ -64,7 +64,8 @@
 #define U_CLR      0x1000C
 
 // ---- fixed settings -----------------------------------------------------
-#define KDEV_FIXED   100               // default (without conf): deviation = kdev x 750 Hz at full scale: 100 = +-75 kHz at 0 dBFS
+#define KDEV_FIXED   100               // deviation = kdev x 750 Hz at full scale: 100 = +-75 kHz at 0 dBFS; the most without a conditioner in the bitstream
+#define KDEV_DEFAULT 133               // default (without conf, until the encoder sends K): 0 dBFS = 99.75 kHz - the deviation follows the input, the channel filter guards the mask
                                        // (PicoAudio: 100 % deviation = full scale); 200 would give +-150 kHz, which is wrong.
                                        // With -6 dB headroom on the Pico side (100 % = -6 dBFS), kdev 200 = +-75 kHz.
 
@@ -195,8 +196,8 @@ static double dev_hold = 0.0, dev_hold_t = 0.0;                    // largest pe
 static int    dev_ok = 0; static double dev_pk_khz = 0.0, dev_last_t = 0.0; static unsigned long dev_seq = 0;
 static int    ceil_from_pico = 0;              // 1 once the Pico has sent an 'H <kHz>': then that value applies and the daemon ignores ceil_khz/adapt from the conf file
 static int    kdev_from_pico = 0;             // 1 once the Pico has sent a 'K <n>': then that value applies and the daemon ignores kdev= from the conf file
-static int    lim_user = 1;                    // chosen by the Pico with 'B 0/1': limiter on (1, default) or off (0); the soft fade is always on
-static int    kdev_cfg = KDEV_FIXED;           // desired kdev (from LIMCONF)
+static int    lim_user = 0;                    // chosen by the Pico with 'B 0/1': limiter on (1) or off (0, default: the channel filter guards the mask); the soft fade is always on
+static int    kdev_cfg = KDEV_DEFAULT;         // desired kdev (from LIMCONF)
 static double ceil_khz = 67.0;                 // peak deviation ceiling that the FPGA limiter enforces NOW (kHz)
 static double ceil_max_khz = 67.5;             // upper bound for ceil_khz (also for the adaptive control)
 // Mask protection (guard): the limit chosen by the Pico/conf is the MAXIMUM (ceil_user). ceil_khz is the limit the FPGA enforces now and is lowered by the
