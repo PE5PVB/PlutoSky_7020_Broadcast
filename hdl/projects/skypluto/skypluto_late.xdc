@@ -20,7 +20,8 @@ set_clock_groups -asynchronous \
 # actual l_clk period (valid as long as l_clk <= ~125 MHz -> all FM rates OK).
 # -----------------------------------------------------------------------------
 # The conditioner (u_sc: limiter + fade, 1 state per clock at the input rate, ~64 clocks per sample) is covered as well, and so is the
-# FM modulator (u_mod): its I/Q correction multipliers (DSP -> DSP, 0 logic levels) missed the 4 ns by ~0.1 ns on placement alone.
-set ups_cells [get_cells -hierarchical -filter {NAME =~ "*wfm/inst/u_ups/*" || NAME =~ "*wfm/inst/u_sc/*" || NAME =~ "*wfm/inst/u_mod/*"}]
+# FM modulator (u_mod): its I/Q correction multipliers (DSP -> DSP, 0 logic levels) missed the 4 ns by ~0.1 ns on placement alone; and the channel
+# filter (u_chf), whose MAC pipelines run on the same l_clk.
+set ups_cells [get_cells -hierarchical -filter {NAME =~ "*wfm/inst/u_ups/*" || NAME =~ "*wfm/inst/u_sc/*" || NAME =~ "*wfm/inst/u_mod/*" || NAME =~ "*wfm/inst/u_chf/*"}]
 set_multicycle_path 2 -setup -from $ups_cells -to $ups_cells
 set_multicycle_path 1 -hold  -from $ups_cells -to $ups_cells

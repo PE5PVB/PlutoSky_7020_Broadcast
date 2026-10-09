@@ -225,7 +225,7 @@ set skp $ad_hdl_dir/library/skypluto_wfm
 add_files -norecurse [list \
   $skp/skypluto_i2s_rx.v $skp/skypluto_sincos.v $skp/skypluto_fm_modulator.v \
   $skp/skypluto_async_fifo.v $skp/skypluto_interp.v $skp/skypluto_uart_hd.v \
-  $skp/skypluto_axi_regs.v $skp/skypluto_sigcond.v $skp/skypluto_wfm_exciter.v \
+  $skp/skypluto_axi_regs.v $skp/skypluto_sigcond.v $skp/skypluto_chanfilt.v $skp/skypluto_wfm_exciter.v \
   $skp/data/sine_lut.mem $skp/data/interp_coefs.mem]
 set_property file_type {Memory Initialization Files} [get_files sine_lut.mem]
 set_property file_type {Memory Initialization Files} [get_files interp_coefs.mem]

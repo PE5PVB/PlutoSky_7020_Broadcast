@@ -85,6 +85,7 @@
 #define R_DCQ        0x1C              // digital DC offset on Q
 #define R_QGAIN      0x58              // Q gain correction (signed 18 bit, units 2^-18) - bitstream B1D00019 and later
 #define R_QSKEW      0x5C              // I/Q phase correction (signed 18 bit, 2^-18 rad)
+#define R_CHF        0x60              // channel filter on the FM signal: 0 off, 1/2/3 = -6 dB at +-130/125/120 kHz - bitstream B1D0001C and later
 #define R_I2SCTRL    0x54              // manual I2S format (rw): [0] on, [2:1] alignment, [15:8] word width; 0 = automatic
 #define TCP_PORT     5555              // TCP console (localhost)
 #define SW_VERSION   "1.02"            // software version of this release (also in ?V, the SD-card image and the README)
@@ -119,6 +120,7 @@ static long long last_f   = -1;        // the carrier frequency of the last tune
 #define IQ_CONF "/mnt/jffs2/skypluto-iq.conf"
 static double lowif_khz = 0.0;
 static int    iq_dc_i = 0, iq_dc_q = 0, iq_gain_ppm = 0, iq_skew_ppm = 0, has_iq = 0;
+static int    chf_khz = 0, has_chf = 0;                     // CF: channel filter after the modulator (0 = off, 130/125/120 kHz)
 static int    cal_temp_auto = 0;                             // CT: recalibrate on a die temperature drift of 8 degC (default off: it interrupts the programme while the board warms up)
 // Digital carrier level in dBFS. Full scale drives the DAC and the analog baseband of the AD9361 into their non-linear range: at zero-IF the distortion
 // products land ON the carrier and sound like a second station underneath a quiet programme (gone at -6 dB). The attenuation is lowered by the same
@@ -560,6 +562,7 @@ static uint32_t iq_level(void){                                                 
     double lv = fs * (1.0 - 1.05 * mag - 0.002); if (lv > 65535.0) lv = 65535.0; if (lv < 50000.0 * fs / 65535.0) lv = 50000.0 * fs / 65535.0;
     return (uint32_t)lv;
 }
+static void chf_apply(void){ if (has_chf) wr(R_CHF, chf_khz == 130 ? 1u : chf_khz == 125 ? 2u : chf_khz == 120 ? 3u : 0u); }
 static void iq_apply(void){
     wr(R_DCI, (uint32_t)(iq_dc_i & 0xFFF)); wr(R_DCQ, (uint32_t)(iq_dc_q & 0xFFF));
     if (has_iq){
@@ -571,7 +574,7 @@ static void iq_apply(void){
 static void iq_conf_write(void){
     FILE *f = fopen(IQ_CONF ".new", "w"); if (!f) return;
     fprintf(f, "# digital I/Q corrections and low-IF offset (written by the DC / IQ / OFS commands)\n");
-    fprintf(f, "dc_i=%d\ndc_q=%d\nqgain_ppm=%d\nqskew_ppm=%d\nlowif_khz=%.3f\nlevel_db=%.1f\nnull_auto=%d\nnull_rx=%d\ncal_temp=%d\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, dig_db, null_auto, null_rx, cal_temp_auto);
+    fprintf(f, "dc_i=%d\ndc_q=%d\nqgain_ppm=%d\nqskew_ppm=%d\nlowif_khz=%.3f\nlevel_db=%.1f\nnull_auto=%d\nnull_rx=%d\ncal_temp=%d\nchf_khz=%d\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, dig_db, null_auto, null_rx, cal_temp_auto, chf_khz);
     fclose(f); rename(IQ_CONF ".new", IQ_CONF);
 }
 static void iq_conf_read(void){
@@ -587,6 +590,7 @@ static void iq_conf_read(void){
         else if (!strncmp(ln, "null_auto=", 10)) null_auto = atoi(ln + 10) ? 1 : 0;
         else if (!strncmp(ln, "null_rx=", 8)) null_rx = (atoi(ln + 8) == 1) ? 1 : 2;
         else if (!strncmp(ln, "cal_temp=", 9)) cal_temp_auto = atoi(ln + 9) ? 1 : 0;
+        else if (!strncmp(ln, "chf_khz=", 8)){ v = atoi(ln + 8); chf_khz = (v == 130 || v == 125 || v == 120) ? v : 0; }
         else if (!strncmp(ln, "level_db=", 9)){ d = atof(ln + 9); if (isfinite(d) && d >= -20.0 && d <= 0.0) dig_db = d; }
     }
     fclose(f);
@@ -1020,6 +1024,35 @@ static struct { double t, f, m, sm, th, pil; } sa_r[SA_N]; static int sa_i = 0, 
 // composite DC (?SD): 'SD dc=<Hz>' per window as long as /tmp/skypluto.sd is fresh; the last (up to) 8 are averaged
 #define SD_N 8
 static struct { double t, dc; } sd_r[SD_N]; static int sd_i = 0, sd_cnt = 0;
+// RDS (?RD): the mask monitor decodes the RDS groups of the own transmission ('RDSG A B C D') while /tmp/skypluto.rds is fresh; kept here
+static int    rds_pi = -1, rds_pty = 0, rds_tp = 0, rds_ta = 0, rds_ms = 0, rds_rtab = -1;
+static char   rds_ps[9] = "        ", rds_rt[65] = "", rds_ct[32] = "";
+static double rds_t = -100.0, rds_rate_t0 = 0.0; static unsigned long rds_n = 0, rds_rate_n0 = 0; static double rds_rate = 0.0;
+static char rds_chr(int c){ return (c >= 32 && c < 127 && c != '"') ? (char)c : (c == '"' ? '\'' : '?'); }
+static void rds_group(unsigned A, unsigned B, unsigned C, unsigned D){
+    double now = mono(); rds_t = now; rds_n++;
+    if (now - rds_rate_t0 >= 10.0){ if (rds_rate_t0 > 0) rds_rate = (rds_n - rds_rate_n0) / (now - rds_rate_t0); rds_rate_t0 = now; rds_rate_n0 = rds_n; }
+    rds_pi = (int)A; rds_tp = (B >> 10) & 1; rds_pty = (B >> 5) & 31;
+    unsigned gt = B >> 12, ver = (B >> 11) & 1;
+    if (gt == 0){                                              // 0A/0B: PS, TA, M/S
+        int seg = B & 3; rds_ta = (B >> 4) & 1; rds_ms = (B >> 3) & 1;
+        rds_ps[2 * seg] = rds_chr(D >> 8); rds_ps[2 * seg + 1] = rds_chr(D & 0xFF); rds_ps[8] = 0;
+    } else if (gt == 2){                                       // 2A (64 chars) / 2B (32 chars): RadioText; the A/B flag clears it
+        int ab = (B >> 4) & 1, seg = B & 15;
+        if (ab != rds_rtab){ memset(rds_rt, 0, sizeof rds_rt); rds_rtab = ab; }
+        unsigned ch[4] = { C >> 8, C & 0xFF, D >> 8, D & 0xFF }; int n = ver ? 2 : 4, base = ver ? 2 * seg : 4 * seg;
+        for (int i = 0; i < n; i++){
+            unsigned c = ver ? ch[2 + i] : ch[i];
+            if (base + i < 64){ if (c == 0x0D){ rds_rt[base + i] = 0; break; } rds_rt[base + i] = rds_chr((int)c); }
+        }
+        for (int i = 0; i < 64; i++) if (!rds_rt[i]){ int more = 0; for (int j = i + 1; j < 64; j++) if (rds_rt[j]) more = 1; if (more) rds_rt[i] = ' '; else break; }
+    } else if (gt == 4 && !ver){                               // 4A: clock time (UTC + local offset)
+        long mjd = ((long)(B & 3) << 15) | (C >> 1); int hh = (int)(((C & 1) << 4) | (D >> 12)), mm = (int)((D >> 6) & 63), off = (int)(D & 31), sg = (D >> 5) & 1;
+        long y = (long)((mjd - 15078.2) / 365.25), mo = (long)((mjd - 14956.1 - (long)(y * 365.25)) / 30.6001);
+        long dd = mjd - 14956 - (long)(y * 365.25) - (long)(mo * 30.6001), k = (mo == 14 || mo == 15) ? 1 : 0; y += k; mo = mo - 1 - k * 12;
+        snprintf(rds_ct, sizeof rds_ct, "%04ld-%02ld-%02ldT%02d:%02dZ%c%d.%d", 1900 + y, mo, dd, hh, mm, sg ? '-' : '+', off / 2, (off & 1) * 5);
+    }
+}
 static void mask_drain(void){
     for (;;){
         m_buf[m_len] = 0;
@@ -1029,6 +1062,13 @@ static void mask_drain(void){
             double pp, kk;
             if (sscanf(m_buf, "PWR p=%lf pk=%lf", &pp, &kk) == 2 && pw_en) pw_feed(pp, kk);
             int rest1 = m_len - (int)(e1 + 1 - m_buf); memmove(m_buf, e1 + 1, (size_t)rest1); m_len = rest1; continue;
+        }
+        if (!strncmp(m_buf, "RDSG ", 5)){
+            char *e4 = strchr(m_buf, '\n');
+            if (!e4) break;
+            unsigned a1, b1, c1, d1;
+            if (sscanf(m_buf, "RDSG %x %x %x %x", &a1, &b1, &c1, &d1) == 4) rds_group(a1, b1, c1, d1);
+            int rest4 = m_len - (int)(e4 + 1 - m_buf); memmove(m_buf, e4 + 1, (size_t)rest4); m_len = rest4; continue;
         }
         if (!strncmp(m_buf, "SD ", 3)){
             char *e3 = strchr(m_buf, '\n');
@@ -1194,14 +1234,25 @@ static void handle(char *line){
     char *cmd = line, *arg = line;
     while (*arg && *arg!=' ' && *arg!='\t') arg++;
     if (*arg){ *arg=0; arg++; while (*arg==' '||*arg=='\t') arg++; }
-    char buf[192];
+    char buf[320];
 
     // ---------- queries ----------
     if (cmd[0]=='?'){
+        // ?RD = RDS of the own transmission, decoded from the RX2 measurement path (one 0.25 s window per second): rd=ok pi= pty= tp= ta= ms= gps=<groups/s>
+        // ams=<age of the last group> ct=<clock time> ps="<8>" rt="<text>". The first ?RD enables the decoder (10 s; ask again within 10 s). rd=na without groups.
+        if (!strcmp(cmd,"?RD")){
+            { FILE *rf = fopen("/tmp/skypluto.rds", "w"); if (rf){ fputs("1\n", rf); fclose(rf); } }
+            double age = mono() - rds_t;
+            if (rds_pi < 0 || age > 30.0){ tx_str("rd=na\n"); return; }
+            snprintf(buf, sizeof buf, "rd=ok pi=%04X pty=%d tp=%d ta=%d ms=%d gps=%.1f ams=%d ct=%s ps=\"%s\" rt=\"%s\"\n", rds_pi, rds_pty, rds_tp, rds_ta, rds_ms,
+                     rds_rate, (int)(age * 1000.0), rds_ct[0] ? rds_ct : "-", rds_ps, rds_rt);
+            tx_str(buf); return;
+        }
+        if (!strcmp(cmd,"?CF")){ snprintf(buf, sizeof buf, "cf=%d hw=%d\n", chf_khz, has_chf); tx_str(buf); return; }
         if (!strcmp(cmd,"?CT")){ int dT = temp_mC - cal_temp_ref; snprintf(buf, sizeof buf, "ct=%d dt=%+.1f\n", cal_temp_auto, cal_temp_ref ? dT / 1000.0 : 0.0); tx_str(buf); return; }
         if (!strcmp(cmd,"?NL")){ snprintf(buf, sizeof buf, "%s auto=%d rx=%d\n", null_last, null_auto, null_rx); tx_str(buf); return; }
         if (!strcmp(cmd,"?IQ")){
-            snprintf(buf, sizeof buf, "dci=%d dcq=%d gain=%d skew=%d ofs=%.3f lvl=%.2f lo=%lld hw=%d\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, dig_db, lo_freq(), has_iq);
+            snprintf(buf, sizeof buf, "dci=%d dcq=%d gain=%d skew=%d ofs=%.3f lvl=%.2f lo=%lld hw=%d cf=%d cfhw=%d\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, dig_db, lo_freq(), has_iq, chf_khz, has_chf);
             tx_str(buf); return;
         }
         if (!strcmp(cmd,"?V")){
@@ -1476,6 +1527,15 @@ static void handle(char *line){
     }
     // CT <0|1>: recalibrate (and null) automatically when the die temperature has drifted by 8 degC since the last calibration. Default 0: calibration
     // only on a tune, on opening the transmitter and on CAL. Stored. ?CT -> ct=<0|1> dt=<drift since the last calibration, degC>.
+    // CF <0|130|125|120>: channel filter on the FM signal itself (after the modulator): -6 dB at +-130/125/120 kHz from the carrier, or 0 = off (default).
+    // Cuts the skirts that set the SM.1268 mask margin; costs some stereo separation at full deviation. Needs bitstream B1D0001C or later (ERR nobit). Stored.
+    if (!strcmp(cmd,"CF")){
+        int v = atoi(arg); if (v != 0 && v != 130 && v != 125 && v != 120){ tx_str("ERR range\n"); return; }
+        if (!has_chf){ tx_str("ERR nobit\n"); return; }
+        chf_khz = v; chf_apply(); iq_conf_write(); tx_str("OK\n");
+        fprintf(stderr, "   -> kanaalfilter %s\n", v ? (v == 130 ? "+-130 kHz" : v == 125 ? "+-125 kHz" : "+-120 kHz") : "uit"); fflush(stderr);
+        return;
+    }
     if (!strcmp(cmd,"CT")){
         cal_temp_auto = atoi(arg) ? 1 : 0; cal_drift = 0; iq_conf_write(); tx_str("OK\n"); return;
     }
@@ -1758,9 +1818,9 @@ static void web_handle(struct wconn *c){
             else { const char *r = web_cmd(body); web_send(c->fd, 200, "text/plain; charset=utf-8", r, strlen(r), NULL); }
         }
         else if (!post && !strcmp(path, "/api/state")){
-            static const char *k[] = {"S","T","P","E","V","M","D","B","J","R","O","IQ","NL"}; static const char *q[] = {"?S","?T","?P","?E","?V","?M","?D","?B","?J","?R","?O","?IQ","?NL"};
+            static const char *k[] = {"S","T","P","E","V","M","D","B","J","R","O","IQ","NL","RD"}; static const char *q[] = {"?S","?T","?P","?E","?V","?M","?D","?B","?J","?R","?O","?IQ","?NL","?RD"};
             int n = 0; out[n++] = '{';
-            for (int i = 0; i < 13; i++){ n = jadd(out, n, (int)sizeof out, k[i], web_cmd(q[i])); out[n++] = ','; }
+            for (int i = 0; i < 14; i++){ n = jadd(out, n, (int)sizeof out, k[i], web_cmd(q[i])); out[n++] = ','; }
             char idb[16] = "-"; if (has_dbg){ snprintf(idb, sizeof idb, "%08X", dbg_rd(12)); }
             n = jadd(out, n, (int)sizeof out, "id", idb); out[n++] = ',';
             n += snprintf(out + n, sizeof out - (size_t)n, "\"link\":{\"age\":%.1f,\"cmds\":%lu,\"boot\":", pico_last_rx < 0 ? -1.0 : mono() - pico_last_rx, pico_cmds);
@@ -1857,8 +1917,8 @@ int main(int argc, char **argv){
     // fixed modulation settings
     uint32_t off_hw = rd(R_OFFSET) & 0xFFFFFF;                         // the NCO offset a running transmitter has (the register survives a restart of the daemon)
     lim_probe();                                                        // read-only: has_dbg must be known before the build id is read
-    { uint32_t id = has_dbg ? dbg_rd(12) : 0; has_iq = (id >= 0xB1D00019u && id <= 0xB1D000FFu); }
-    iq_conf_read(); iq_apply();
+    { uint32_t id = has_dbg ? dbg_rd(12) : 0; has_iq = (id >= 0xB1D00019u && id <= 0xB1D000FFu); has_chf = (id >= 0xB1D0001Cu && id <= 0xB1D000FFu); }
+    iq_conf_read(); iq_apply(); chf_apply();
     pw_conf_read();
     lim_conf_read(); lim_probe(); lim_apply();          // kdev (from conf, without limiter never > 100) + limiter ceiling
     // The transmitter starts CLOSED (tx_off = 1): attenuation at maximum and TX-LO off, until the Pico sends a tune (F) (and E is not 0).

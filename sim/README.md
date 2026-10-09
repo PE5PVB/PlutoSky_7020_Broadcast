@@ -44,3 +44,6 @@ xsim tb_fm -runall
 ## Mask tool FFT (ARM only)
 
 `bench_mask_fft.c` checks the NEON radix-4 FFT of `src/skypluto-mask.c` against the scalar one and times both. Build it with the ARM cross compiler (`-O3 -mcpu=cortex-a9 -mfpu=neon -ffast-math -lm -lpthread`) and run it on the Pluto: `bench_mask_fft 256 3 2` compares the bins 56..112 (expect a difference below 0.001 dB), `bench_mask_fft 256 3 0` / `1` time the scalar / fast max-hold over one 0.25 s window.
+
+- **tb_chanfilt** (`python3 sim/chanfilt_check.py`) — the channel filter after the modulator against the bit-exact model of `scripts/gen_chanfilt.py`, all modes; off = unchanged.
+- **tb_i2s_lowfreq** — format detection with a 20 Hz tone + pilot (the composite stays positive for >5 ms): the format must not flip.
