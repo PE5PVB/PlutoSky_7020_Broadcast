@@ -203,6 +203,7 @@ for the encoder's splash screen. The encoder stays silent until `#B 100`. `?B` r
 | `?A` | strongest audio tone: frequency and deviation |
 | `?R` | measurement path (coupler → RX2): `r=ok` / `r=missing` / `r=na` |
 | `?IQ`, `?NL` | the digital corrections and level / the result of the last nulling (LO and image before/after in dBc) |
+| `TB <kHz>`, `?TB` | analog TX bandwidth of the AD9361 (default 1600 kHz; the driver's 18 MHz passes DAC noise far from the carrier); a change recalibrates |
 | `?O` | power meter: `o=<dBm at TX1> w=<watt> in=<dBm at RX1> att= cal= g= st=ok\|low\|high\|nosig\|off` |
 | `?B` | last boot step |
 

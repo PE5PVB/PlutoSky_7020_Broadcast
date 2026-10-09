@@ -122,6 +122,12 @@ static double lowif_khz = 0.0;
 static int    iq_dc_i = 0, iq_dc_q = 0, iq_gain_ppm = 0, iq_skew_ppm = 0, has_iq = 0;
 static int    chf_khz = 0, has_chf = 0;                     // CF: channel filter after the modulator (0 = off, or the -6 dB width in kHz); has_chf: 0 none, 1 = 3 widths, 2 = 7
 static const int chf_tab[8] = { 0, 130, 125, 120, 135, 140, 150, 160 };     // register value -> width
+// TB: analog TX baseband bandwidth of the AD9361 (out_voltage_rf_bandwidth, kHz). The driver's default is 18 MHz, which lets the DAC's quantisation
+// noise and images through up to many MHz from the carrier; 1.6 MHz (filter corner ~0.8 MHz) passes the FM signal flat and cuts that noise by
+// >45 dB at 5 MHz. A change shifts the I/Q balance, so it recalibrates (and stored calibrations only apply to the bandwidth they were made with).
+static int    tx_bw_khz = 1600;
+static int phy_write(const char *attr, const char *val);
+static void txbw_apply(void){ char v[16]; snprintf(v, sizeof v, "%d", tx_bw_khz * 1000); if (phy_write("out_voltage_rf_bandwidth", v) != 0){ fprintf(stderr, "   !! TX-bandbreedte %d kHz niet gezet\n", tx_bw_khz); fflush(stderr); } }
 static int chf_mode(int khz){ for (int m = 1; m < 8; m++) if (chf_tab[m] == khz) return m; return 0; }
 static int    cal_temp_auto = 0;                             // CT: recalibrate on a die temperature drift of 8 degC (default off: it interrupts the programme while the board warms up)
 // Digital carrier level in dBFS. Full scale drives the DAC and the analog baseband of the AD9361 into their non-linear range: at zero-IF the distortion
@@ -576,7 +582,7 @@ static void iq_apply(void){
 static void iq_conf_write(void){
     FILE *f = fopen(IQ_CONF ".new", "w"); if (!f) return;
     fprintf(f, "# digital I/Q corrections and low-IF offset (written by the DC / IQ / OFS commands)\n");
-    fprintf(f, "dc_i=%d\ndc_q=%d\nqgain_ppm=%d\nqskew_ppm=%d\nlowif_khz=%.3f\nlevel_db=%.1f\nnull_auto=%d\nnull_rx=%d\ncal_temp=%d\nchf_khz=%d\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, dig_db, null_auto, null_rx, cal_temp_auto, chf_khz);
+    fprintf(f, "dc_i=%d\ndc_q=%d\nqgain_ppm=%d\nqskew_ppm=%d\nlowif_khz=%.3f\nlevel_db=%.1f\nnull_auto=%d\nnull_rx=%d\ncal_temp=%d\nchf_khz=%d\ntx_bw_khz=%d\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, dig_db, null_auto, null_rx, cal_temp_auto, chf_khz, tx_bw_khz);
     fclose(f); rename(IQ_CONF ".new", IQ_CONF);
 }
 static void iq_conf_read(void){
@@ -593,6 +599,7 @@ static void iq_conf_read(void){
         else if (!strncmp(ln, "null_rx=", 8)) null_rx = (atoi(ln + 8) == 1) ? 1 : 2;
         else if (!strncmp(ln, "cal_temp=", 9)) cal_temp_auto = atoi(ln + 9) ? 1 : 0;
         else if (!strncmp(ln, "chf_khz=", 8)){ v = atoi(ln + 8); chf_khz = chf_mode(v) ? v : 0; }
+        else if (!strncmp(ln, "tx_bw_khz=", 10)){ v = atoi(ln + 10); if (v >= 600 && v <= 18000) tx_bw_khz = v; }
         else if (!strncmp(ln, "level_db=", 9)){ d = atof(ln + 9); if (isfinite(d) && d >= -20.0 && d <= 0.0) dig_db = d; }
     }
     fclose(f);
@@ -690,13 +697,14 @@ static int cs_reg_wr(int reg, int v){
     const char *fn = cs_dbgfile(); if (!fn[0]) return -1;
     FILE *f = fopen(fn, "w"); if (!f) return -1; fprintf(f, "0x%X 0x%X", reg, v & 0xFF); return fclose(f) == 0 ? 0 : -1;
 }
-typedef struct { long long f; int t_mC, r[CS_NR], dci, dcq, qg, qs; } CalSet;
+typedef struct { long long f; int t_mC, r[CS_NR], dci, dcq, qg, qs, bw; } CalSet;        // bw: TX analog bandwidth (kHz) it was made with
 static int cs_load(CalSet *a){
     int n = 0; FILE *f = fopen(CALSTORE, "r"); if (!f) return 0;
     char ln[400];
     while (n < CS_N && fgets(ln, sizeof ln, f)){
         CalSet c; char rh[CS_NR * 2 + 4] = "";
         if (sscanf(ln, "f=%lld t=%d r=%34s dci=%d dcq=%d qg=%d qs=%d", &c.f, &c.t_mC, rh, &c.dci, &c.dcq, &c.qg, &c.qs) != 7 || strlen(rh) != CS_NR * 2) continue;
+        { const char *b = strstr(ln, " bw="); c.bw = b ? atoi(b + 4) : 18000; }               // sets from before TB: the driver's 18 MHz
         int ok = 1; for (int i = 0; i < CS_NR; i++){ unsigned v; if (sscanf(rh + 2 * i, "%2x", &v) != 1){ ok = 0; break; } c.r[i] = (int)v; }
         if (ok) a[n++] = c;
     }
@@ -704,22 +712,22 @@ static int cs_load(CalSet *a){
 }
 static int cs_find(long long lo, CalSet *out){
     CalSet a[CS_N]; int n = cs_load(a);
-    for (int i = 0; i < n; i++) if (a[i].f == lo){ *out = a[i]; return 1; }
+    for (int i = 0; i < n; i++) if (a[i].f == lo && a[i].bw == tx_bw_khz){ *out = a[i]; return 1; }   // another TX bandwidth shifts the I/Q balance: calibrate
     return 0;
 }
 // store the set that is on the air now for TX LO frequency lo (the chip registers as they are, the daemon's digital corrections)
 static void cs_store(long long lo){
     if (lo <= 0 || fabs(lowif_khz) > 0.0005) return;
-    CalSet c; c.f = lo; c.t_mC = temp_mC; c.dci = iq_dc_i; c.dcq = iq_dc_q; c.qg = iq_gain_ppm; c.qs = iq_skew_ppm;
+    CalSet c; c.f = lo; c.t_mC = temp_mC; c.dci = iq_dc_i; c.dcq = iq_dc_q; c.qg = iq_gain_ppm; c.qs = iq_skew_ppm; c.bw = tx_bw_khz;
     for (int i = 0; i < CS_NR; i++) if (cs_reg_rd(CS_R0 + i, &c.r[i]) != 0) return;
     CalSet a[CS_N]; int n = cs_load(a);
     FILE *f = fopen(CALSTORE ".tmp", "w"); if (!f) return;
     char rh[CS_NR * 2 + 1]; for (int i = 0; i < CS_NR; i++) snprintf(rh + 2 * i, 3, "%02x", c.r[i]);
-    fprintf(f, "f=%lld t=%d r=%s dci=%d dcq=%d qg=%d qs=%d\n", c.f, c.t_mC, rh, c.dci, c.dcq, c.qg, c.qs);
+    fprintf(f, "f=%lld t=%d r=%s dci=%d dcq=%d qg=%d qs=%d bw=%d\n", c.f, c.t_mC, rh, c.dci, c.dcq, c.qg, c.qs, c.bw);
     for (int i = 0, k = 1; i < n && k < CS_N; i++){
         if (a[i].f == lo) continue;
         for (int j = 0; j < CS_NR; j++) snprintf(rh + 2 * j, 3, "%02x", a[i].r[j]);
-        fprintf(f, "f=%lld t=%d r=%s dci=%d dcq=%d qg=%d qs=%d\n", a[i].f, a[i].t_mC, rh, a[i].dci, a[i].dcq, a[i].qg, a[i].qs); k++;
+        fprintf(f, "f=%lld t=%d r=%s dci=%d dcq=%d qg=%d qs=%d bw=%d\n", a[i].f, a[i].t_mC, rh, a[i].dci, a[i].dcq, a[i].qg, a[i].qs, a[i].bw); k++;
     }
     if (fclose(f) == 0) rename(CALSTORE ".tmp", CALSTORE);
     fprintf(stderr, "   -> kalibratie bewaard voor %lld Hz (%.1f C)\n", lo, temp_mC / 1000.0); fflush(stderr);
@@ -1258,10 +1266,15 @@ static void handle(char *line){
             tx_str(buf); return;
         }
         if (!strcmp(cmd,"?CF")){ snprintf(buf, sizeof buf, "cf=%d hw=%d\n", chf_khz, has_chf); tx_str(buf); return; }
+        // ?TB -> tb=<set TX analog bandwidth, kHz> hw=<the driver's value, kHz; -1 = unreadable>
+        if (!strcmp(cmd,"?TB")){
+            char hv[32] = ""; int hw = -1; { char pth[160]; FILE *hf; snprintf(pth, sizeof pth, "%s/out_voltage_rf_bandwidth", phy_find()); if ((hf = fopen(pth, "r")) != NULL){ if (fgets(hv, sizeof hv, hf)) hw = atoi(hv) / 1000; fclose(hf); } }
+            snprintf(buf, sizeof buf, "tb=%d hw=%d\n", tx_bw_khz, hw); tx_str(buf); return;
+        }
         if (!strcmp(cmd,"?CT")){ int dT = temp_mC - cal_temp_ref; snprintf(buf, sizeof buf, "ct=%d dt=%+.1f\n", cal_temp_auto, cal_temp_ref ? dT / 1000.0 : 0.0); tx_str(buf); return; }
         if (!strcmp(cmd,"?NL")){ snprintf(buf, sizeof buf, "%s auto=%d rx=%d\n", null_last, null_auto, null_rx); tx_str(buf); return; }
         if (!strcmp(cmd,"?IQ")){
-            snprintf(buf, sizeof buf, "dci=%d dcq=%d gain=%d skew=%d ofs=%.3f lvl=%.2f lo=%lld hw=%d cf=%d cfhw=%d\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, dig_db, lo_freq(), has_iq, chf_khz, has_chf);
+            snprintf(buf, sizeof buf, "dci=%d dcq=%d gain=%d skew=%d ofs=%.3f lvl=%.2f lo=%lld hw=%d cf=%d cfhw=%d tb=%d\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, dig_db, lo_freq(), has_iq, chf_khz, has_chf, tx_bw_khz);
             tx_str(buf); return;
         }
         if (!strcmp(cmd,"?V")){
@@ -1649,6 +1662,19 @@ static void handle(char *line){
         fprintf(stderr, "   -> vermogensmeter gekalibreerd: cal %.2f dB (bekend %.2f dBm)\n", pw_cal, known); fflush(stderr);
         return;
     }
+    // TB <kHz>: analog TX bandwidth of the AD9361, 600..18000 (default 1600; 18000 = the driver's own default). Stored; recalibrates when the transmitter
+    // is open (the I/Q balance depends on it). ?TB: see the queries.
+    if (!strcmp(cmd,"TB")){
+        int v = atoi(arg); if (v < 600 || v > 18000){ tx_str("ERR range\n"); return; }
+        if (ir_pid > 0){ tx_str("ERR busy\n"); return; }
+        int changed = (v != tx_bw_khz); tx_bw_khz = v; txbw_apply(); iq_conf_write(); tx_str("OK\n");
+        fprintf(stderr, "   -> TX-bandbreedte %d kHz%s\n", v, changed && !tx_off ? ", herkalibratie" : ""); fflush(stderr);
+        if (changed && !tx_off && last_f > 0 && !cal_pending && cal_pid <= 0){
+            if (!cal_hold) cal_hold_t = mono();
+            cal_hold = 1; cal_pending = 1; cal_due = mono(); cal_failed = 0; cal_fail = 0; cal_force = 1;
+        }
+        return;
+    }
     // CAL: run the TX calibration (LO leakage, image) now, with the output muted (~2 s). Needs an open transmitter (ERR off otherwise) and no J/Y/Z measurement (ERR busy).
     if (!strcmp(cmd,"CAL")){
         if (tx_off || last_f <= 0){ tx_str("ERR off\n"); return; }
@@ -1928,7 +1954,7 @@ int main(int argc, char **argv){
     uint32_t off_hw = rd(R_OFFSET) & 0xFFFFFF;                         // the NCO offset a running transmitter has (the register survives a restart of the daemon)
     lim_probe();                                                        // read-only: has_dbg must be known before the build id is read
     { uint32_t id = has_dbg ? dbg_rd(12) : 0; has_iq = (id >= 0xB1D00019u && id <= 0xB1D000FFu); has_chf = (id >= 0xB1D0001Du && id <= 0xB1D000FFu) ? 2 : (id == 0xB1D0001Cu) ? 1 : 0; }
-    iq_conf_read(); iq_apply(); chf_apply();
+    iq_conf_read(); iq_apply(); chf_apply(); txbw_apply();       // the TX bandwidth before the first calibration
     pw_conf_read();
     lim_conf_read(); lim_probe(); lim_apply();          // kdev (from conf, without limiter never > 100) + limiter ceiling
     // The transmitter starts CLOSED (tx_off = 1): attenuation at maximum and TX-LO off, until the Pico sends a tune (F) (and E is not 0).
