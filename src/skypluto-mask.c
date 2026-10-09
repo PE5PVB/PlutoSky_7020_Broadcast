@@ -1122,8 +1122,8 @@ static int pwr_main(long long txlo, double secs){
 
 // ============================ LO NULLING (--null) ==========================================================================
 // skypluto-mask --null <carrier_Hz> <rx=1|2> <port> <out_file> [iq]
-// Nulls the transmitter's LO leakage with the exciter's digital DC offset. Needs a cable from the transmitter output to the RX
-// (TX1 -> RX1, at most -15 dBm). The carrier is silenced (kdev 0) and moved 100 kHz up with the NCO while the LO stays where it is
+// Nulls the transmitter's LO leakage with the exciter's digital DC offset. Needs a path from the transmitter output to the RX: normally
+// the directional coupler on TX1 into RX2 (rx=2), or a cable/attenuator TX1 -> RX1 (rx=1, at most -15 dBm). The carrier is silenced (kdev 0) and moved 100 kHz up with the NCO while the LO stays where it is
 // (the AD9361's calibration stays exactly as in operation); the LO leakage is then a line of its own at the LO frequency.
 // One continuous capture per round: the DC offset steps through c, c+D (I), c-D, c+D (Q), c-D, c while the stream is read; the line powers
 // of the segments give the vector u of the remaining leakage in DC units: p = k |u + d|^2, k from the carrier (digital amplitude known),

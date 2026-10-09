@@ -127,8 +127,8 @@ static int    cal_temp_auto = 0;                             // CT: recalibrate 
 // amount, so the output power is unchanged: all attenuation values in the daemon (applied_a, nom_a, ATTEN_FLOOR, ?S att=) stay 'full-scale equivalent'
 // and only the value written to the chip is dig_db lower.
 static double dig_db = -9.0;
-// LO nulling (NULL): the meter tool measures the LO leakage of TX1 through a cable TX1 -> RX1 and sets the DC offset. null_active keeps kdev at 0 meanwhile;
-// null_auto runs it after every TX calibration (needs the cable permanently, e.g. the power meter's attenuator).
+// LO/image nulling (NULL): the meter tool measures the LO leakage and the image of TX1 through the directional coupler TX1 -> RX2 (or, with NULLRX 1,
+// a cable TX1 -> RX1) and sets the DC offset and the gain/skew correction. null_active keeps kdev at 0 meanwhile; null_auto runs it after every TX calibration.
 static int    null_active = 0, null_auto = 1, null_pending = 0, null_rx = 2;     // null_rx: 2 = RX2 through a coupler on TX1 (no level limit), 1 = a cable TX1 -> RX1 (at most -15 dBm)
 static long long null_f = 0;
 static char   null_last[256] = "nl=idle";                    // -6 dB made it inaudible, -9 dB leaves margin; the noise floor is the same down to -12 dB (measured), and -9 dB still reaches P_MAX
@@ -1517,8 +1517,8 @@ static void handle(char *line){
         if (!has_iq){ tx_str("ERR nobit\n"); return; }
         iq_gain_ppm = g; iq_skew_ppm = k; iq_apply(); iq_conf_write(); tx_str("OK\n"); return;
     }
-    // NULL: LO nulling now - needs a cable TX1 -> RX1 (the output at most -15 dBm). About 4 s with a silent carrier 100 kHz off the LO; the result goes into DC and is kept.
-    // NULLAUTO <0|1>: run it automatically after every TX calibration (tune, temperature drift, CAL) - only with a permanent cable to RX1. Stored.
+    // NULL: LO/image nulling now, through the coupler TX1 -> RX2 (NULLRX 2, default) or a cable TX1 -> RX1 (NULLRX 1, output at most -15 dBm). About 5 s with a silent
+    // carrier 100 kHz off the LO; the result goes into DC (and gain/skew) and is kept. NULLAUTO <0|1>: run it automatically after every TX calibration. Stored.
     if (!strcmp(cmd,"NULL")){
         int e = null_start();
         if (e == 0) tx_str("OK\n");
