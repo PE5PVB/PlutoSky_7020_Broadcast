@@ -43,7 +43,7 @@ def best_match(hw, x, mode):
     return best
 
 if __name__ == '__main__':
-    modes = [int(m) for m in sys.argv[1:]] or [0, 1, 2, 3]
+    modes = [int(m) for m in sys.argv[1:]] or [0, 1, 2, 3, 4, 5, 6, 7]
     xi, xq = test_signal()
     ok = True
     for mode in modes:

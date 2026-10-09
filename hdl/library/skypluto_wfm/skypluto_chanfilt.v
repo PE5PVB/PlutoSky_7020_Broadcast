@@ -2,7 +2,7 @@
 // skypluto_chanfilt - channel filter on the FM signal (after the modulator)
 // -----------------------------------------------------------------------------
 // Band-limits the modulated I/Q so that the skirts 110-170 kHz from the carrier, which set the SM.1268 mask margin, are cut.
-// mode 0 = off: the input passes through unchanged (one register). mode 1/2/3 = -6 dB at +-130 / +-125 / +-120 kHz.
+// mode 0 = off: the input passes through unchanged (one register). mode 1..7 = -6 dB at +-130 / +-125 / +-120 / +-135 / +-140 / +-150 / +-160 kHz.
 //
 // The modulator delivers a new I/Q sample on every l_clk (4x the 3.072 MS/s DAC rate; the AD9361 core takes one in four). The filter
 // takes one sample in four, works at 3.072 MS/s and 768 kS/s, and holds each output for 4 clocks, so the core sees every filtered
@@ -17,7 +17,7 @@
 module skypluto_chanfilt (
     input  wire               clk,
     input  wire               rst,
-    input  wire [1:0]         mode,
+    input  wire [2:0]         mode,
     input  wire signed [15:0] i_in,
     input  wire signed [15:0] q_in,
     output reg  signed [15:0] i_out = 0,
@@ -31,8 +31,8 @@ module skypluto_chanfilt (
     skypluto_chanfilt_lane u_lq (.clk(clk), .c16(c16), .mode(mode), .x_in(q_in), .y_out(yq));
 
     always @(posedge clk) begin
-        i_out <= (mode == 2'd0) ? i_in : yi;
-        q_out <= (mode == 2'd0) ? q_in : yq;
+        i_out <= (mode == 3'd0) ? i_in : yi;
+        q_out <= (mode == 3'd0) ? q_in : yq;
     end
 endmodule
 
@@ -40,7 +40,7 @@ endmodule
 module skypluto_chanfilt_lane (
     input  wire               clk,
     input  wire [3:0]         c16,
-    input  wire [1:0]         mode,
+    input  wire [2:0]         mode,
     input  wire signed [15:0] x_in,
     output reg  signed [15:0] y_out = 0
 );
@@ -216,10 +216,161 @@ module skypluto_chanfilt_lane (
             default: c_ch3 = 0;
         endcase
     endfunction
+    function signed [17:0] c_ch4(input integer k);
+        case (k)
+            0: c_ch4 = 0;
+            1: c_ch4 = 4;
+            2: c_ch4 = 4;
+            3: c_ch4 = -6;
+            4: c_ch4 = -19;
+            5: c_ch4 = -12;
+            6: c_ch4 = 26;
+            7: c_ch4 = 57;
+            8: c_ch4 = 21;
+            9: c_ch4 = -79;
+            10: c_ch4 = -131;
+            11: c_ch4 = -18;
+            12: c_ch4 = 196;
+            13: c_ch4 = 250;
+            14: c_ch4 = -27;
+            15: c_ch4 = -414;
+            16: c_ch4 = -416;
+            17: c_ch4 = 162;
+            18: c_ch4 = 787;
+            19: c_ch4 = 617;
+            20: c_ch4 = -473;
+            21: c_ch4 = -1398;
+            22: c_ch4 = -828;
+            23: c_ch4 = 1125;
+            24: c_ch4 = 2438;
+            25: c_ch4 = 1017;
+            26: c_ch4 = -2608;
+            27: c_ch4 = -4688;
+            28: c_ch4 = -1148;
+            29: c_ch4 = 8248;
+            30: c_ch4 = 18561;
+            31: c_ch4 = 23040;
+            default: c_ch4 = 0;
+        endcase
+    endfunction
+    function signed [17:0] c_ch5(input integer k);
+        case (k)
+            0: c_ch5 = -1;
+            1: c_ch5 = 1;
+            2: c_ch5 = 7;
+            3: c_ch5 = 7;
+            4: c_ch5 = -9;
+            5: c_ch5 = -29;
+            6: c_ch5 = -15;
+            7: c_ch5 = 41;
+            8: c_ch5 = 75;
+            9: c_ch5 = 7;
+            10: c_ch5 = -124;
+            11: c_ch5 = -144;
+            12: c_ch5 = 53;
+            13: c_ch5 = 286;
+            14: c_ch5 = 212;
+            15: c_ch5 = -224;
+            16: c_ch5 = -546;
+            17: c_ch5 = -215;
+            18: c_ch5 = 589;
+            19: c_ch5 = 898;
+            20: c_ch5 = 38;
+            21: c_ch5 = -1255;
+            22: c_ch5 = -1299;
+            23: c_ch5 = 524;
+            24: c_ch5 = 2424;
+            25: c_ch5 = 1677;
+            26: c_ch5 = -1998;
+            27: c_ch5 = -4857;
+            28: c_ch5 = -1949;
+            29: c_ch5 = 7721;
+            30: c_ch5 = 18927;
+            31: c_ch5 = 23893;
+            default: c_ch5 = 0;
+        endcase
+    endfunction
+    function signed [17:0] c_ch6(input integer k);
+        case (k)
+            0: c_ch6 = 1;
+            1: c_ch6 = -3;
+            2: c_ch6 = -6;
+            3: c_ch6 = 2;
+            4: c_ch6 = 19;
+            5: c_ch6 = 14;
+            6: c_ch6 = -28;
+            7: c_ch6 = -54;
+            8: c_ch6 = 4;
+            9: c_ch6 = 102;
+            10: c_ch6 = 84;
+            11: c_ch6 = -101;
+            12: c_ch6 = -225;
+            13: c_ch6 = -29;
+            14: c_ch6 = 328;
+            15: c_ch6 = 317;
+            16: c_ch6 = -235;
+            17: c_ch6 = -664;
+            18: c_ch6 = -196;
+            19: c_ch6 = 808;
+            20: c_ch6 = 937;
+            21: c_ch6 = -406;
+            22: c_ch6 = -1678;
+            23: c_ch6 = -775;
+            24: c_ch6 = 1820;
+            25: c_ch6 = 2662;
+            26: c_ch6 = -555;
+            27: c_ch6 = -4805;
+            28: c_ch6 = -3452;
+            29: c_ch6 = 6515;
+            30: c_ch6 = 19565;
+            31: c_ch6 = 25601;
+            default: c_ch6 = 0;
+        endcase
+    endfunction
+    function signed [17:0] c_ch7(input integer k);
+        case (k)
+            0: c_ch7 = 0;
+            1: c_ch7 = 4;
+            2: c_ch7 = 2;
+            3: c_ch7 = -11;
+            4: c_ch7 = -14;
+            5: c_ch7 = 14;
+            6: c_ch7 = 40;
+            7: c_ch7 = 0;
+            8: c_ch7 = -77;
+            9: c_ch7 = -54;
+            10: c_ch7 = 99;
+            11: c_ch7 = 157;
+            12: c_ch7 = -60;
+            13: c_ch7 = -292;
+            14: c_ch7 = -94;
+            15: c_ch7 = 388;
+            16: c_ch7 = 388;
+            17: c_ch7 = -334;
+            18: c_ch7 = -780;
+            19: c_ch7 = 0;
+            20: c_ch7 = 1127;
+            21: c_ch7 = 700;
+            22: c_ch7 = -1188;
+            23: c_ch7 = -1753;
+            24: c_ch7 = 636;
+            25: c_ch7 = 3018;
+            26: c_ch7 = 979;
+            27: c_ch7 = -4243;
+            28: c_ch7 = -4747;
+            29: c_ch7 = 5134;
+            30: c_ch7 = 20071;
+            31: c_ch7 = 27306;
+            default: c_ch7 = 0;
+        endcase
+    endfunction
     // ---- END GENERATED ----
 
-    function signed [17:0] c_ch(input [1:0] md, input integer k);
-        c_ch = (md == 2'd1) ? c_ch1(k) : (md == 2'd2) ? c_ch2(k) : c_ch3(k);
+    function signed [17:0] c_ch(input [2:0] md, input integer k);
+        case (md)
+            3'd1: c_ch = c_ch1(k);  3'd2: c_ch = c_ch2(k);  3'd3: c_ch = c_ch3(k);  3'd4: c_ch = c_ch4(k);
+            3'd5: c_ch = c_ch5(k);  3'd6: c_ch = c_ch6(k);  default: c_ch = c_ch7(k);
+        endcase
     endfunction
     function signed [17:0] sat18(input signed [47:0] v);
         sat18 = (v > 48'sd131071) ? 18'sd131071 : (v < -48'sd131072) ? -18'sd131072 : v[17:0];

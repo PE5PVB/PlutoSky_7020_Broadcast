@@ -85,7 +85,7 @@
 #define R_DCQ        0x1C              // digital DC offset on Q
 #define R_QGAIN      0x58              // Q gain correction (signed 18 bit, units 2^-18) - bitstream B1D00019 and later
 #define R_QSKEW      0x5C              // I/Q phase correction (signed 18 bit, 2^-18 rad)
-#define R_CHF        0x60              // channel filter on the FM signal: 0 off, 1/2/3 = -6 dB at +-130/125/120 kHz - bitstream B1D0001C and later
+#define R_CHF        0x60              // channel filter on the FM signal: 0 off, 1..7 = -6 dB at +-130/125/120/135/140/150/160 kHz - 1..3 from bitstream B1D0001C, 4..7 from B1D0001D
 #define R_I2SCTRL    0x54              // manual I2S format (rw): [0] on, [2:1] alignment, [15:8] word width; 0 = automatic
 #define TCP_PORT     5555              // TCP console (localhost)
 #define SW_VERSION   "1.02"            // software version of this release (also in ?V, the SD-card image and the README)
@@ -120,7 +120,9 @@ static long long last_f   = -1;        // the carrier frequency of the last tune
 #define IQ_CONF "/mnt/jffs2/skypluto-iq.conf"
 static double lowif_khz = 0.0;
 static int    iq_dc_i = 0, iq_dc_q = 0, iq_gain_ppm = 0, iq_skew_ppm = 0, has_iq = 0;
-static int    chf_khz = 0, has_chf = 0;                     // CF: channel filter after the modulator (0 = off, 130/125/120 kHz)
+static int    chf_khz = 0, has_chf = 0;                     // CF: channel filter after the modulator (0 = off, or the -6 dB width in kHz); has_chf: 0 none, 1 = 3 widths, 2 = 7
+static const int chf_tab[8] = { 0, 130, 125, 120, 135, 140, 150, 160 };     // register value -> width
+static int chf_mode(int khz){ for (int m = 1; m < 8; m++) if (chf_tab[m] == khz) return m; return 0; }
 static int    cal_temp_auto = 0;                             // CT: recalibrate on a die temperature drift of 8 degC (default off: it interrupts the programme while the board warms up)
 // Digital carrier level in dBFS. Full scale drives the DAC and the analog baseband of the AD9361 into their non-linear range: at zero-IF the distortion
 // products land ON the carrier and sound like a second station underneath a quiet programme (gone at -6 dB). The attenuation is lowered by the same
@@ -562,7 +564,7 @@ static uint32_t iq_level(void){                                                 
     double lv = fs * (1.0 - 1.05 * mag - 0.002); if (lv > 65535.0) lv = 65535.0; if (lv < 50000.0 * fs / 65535.0) lv = 50000.0 * fs / 65535.0;
     return (uint32_t)lv;
 }
-static void chf_apply(void){ if (has_chf) wr(R_CHF, chf_khz == 130 ? 1u : chf_khz == 125 ? 2u : chf_khz == 120 ? 3u : 0u); }
+static void chf_apply(void){ int m = chf_mode(chf_khz); if (has_chf) wr(R_CHF, (has_chf >= 2 || m <= 3) ? (uint32_t)m : 0u); }
 static void iq_apply(void){
     wr(R_DCI, (uint32_t)(iq_dc_i & 0xFFF)); wr(R_DCQ, (uint32_t)(iq_dc_q & 0xFFF));
     if (has_iq){
@@ -590,7 +592,7 @@ static void iq_conf_read(void){
         else if (!strncmp(ln, "null_auto=", 10)) null_auto = atoi(ln + 10) ? 1 : 0;
         else if (!strncmp(ln, "null_rx=", 8)) null_rx = (atoi(ln + 8) == 1) ? 1 : 2;
         else if (!strncmp(ln, "cal_temp=", 9)) cal_temp_auto = atoi(ln + 9) ? 1 : 0;
-        else if (!strncmp(ln, "chf_khz=", 8)){ v = atoi(ln + 8); chf_khz = (v == 130 || v == 125 || v == 120) ? v : 0; }
+        else if (!strncmp(ln, "chf_khz=", 8)){ v = atoi(ln + 8); chf_khz = chf_mode(v) ? v : 0; }
         else if (!strncmp(ln, "level_db=", 9)){ d = atof(ln + 9); if (isfinite(d) && d >= -20.0 && d <= 0.0) dig_db = d; }
     }
     fclose(f);
@@ -1534,13 +1536,14 @@ static void handle(char *line){
     }
     // CT <0|1>: recalibrate (and null) automatically when the die temperature has drifted by 8 degC since the last calibration. Default 0: calibration
     // only on a tune, on opening the transmitter and on CAL. Stored. ?CT -> ct=<0|1> dt=<drift since the last calibration, degC>.
-    // CF <0|130|125|120>: channel filter on the FM signal itself (after the modulator): -6 dB at +-130/125/120 kHz from the carrier, or 0 = off (default).
-    // Cuts the skirts that set the SM.1268 mask margin; costs some stereo separation at full deviation. Needs bitstream B1D0001C or later (ERR nobit). Stored.
+    // CF <0|120|125|130|135|140|150|160>: channel filter on the FM signal itself (after the modulator): -6 dB at that many kHz from the carrier, or 0 = off
+    // (default). Cuts the skirts that set the SM.1268 mask margin; costs some stereo separation at full deviation. 120/125/130 need bitstream B1D0001C or later,
+    // 135..160 B1D0001D or later (ERR nobit). Stored.
     if (!strcmp(cmd,"CF")){
-        int v = atoi(arg); if (v != 0 && v != 130 && v != 125 && v != 120){ tx_str("ERR range\n"); return; }
-        if (!has_chf){ tx_str("ERR nobit\n"); return; }
+        int v = atoi(arg), m = chf_mode(v); if (v != 0 && !m){ tx_str("ERR range\n"); return; }
+        if (!has_chf || (m > 3 && has_chf < 2)){ tx_str("ERR nobit\n"); return; }
         chf_khz = v; chf_apply(); iq_conf_write(); tx_str("OK\n");
-        fprintf(stderr, "   -> kanaalfilter %s\n", v ? (v == 130 ? "+-130 kHz" : v == 125 ? "+-125 kHz" : "+-120 kHz") : "uit"); fflush(stderr);
+        if (v) fprintf(stderr, "   -> kanaalfilter +-%d kHz\n", v); else fprintf(stderr, "   -> kanaalfilter uit\n"); fflush(stderr);
         return;
     }
     if (!strcmp(cmd,"CT")){
@@ -1924,7 +1927,7 @@ int main(int argc, char **argv){
     // fixed modulation settings
     uint32_t off_hw = rd(R_OFFSET) & 0xFFFFFF;                         // the NCO offset a running transmitter has (the register survives a restart of the daemon)
     lim_probe();                                                        // read-only: has_dbg must be known before the build id is read
-    { uint32_t id = has_dbg ? dbg_rd(12) : 0; has_iq = (id >= 0xB1D00019u && id <= 0xB1D000FFu); has_chf = (id >= 0xB1D0001Cu && id <= 0xB1D000FFu); }
+    { uint32_t id = has_dbg ? dbg_rd(12) : 0; has_iq = (id >= 0xB1D00019u && id <= 0xB1D000FFu); has_chf = (id >= 0xB1D0001Du && id <= 0xB1D000FFu) ? 2 : (id == 0xB1D0001Cu) ? 1 : 0; }
     iq_conf_read(); iq_apply(); chf_apply();
     pw_conf_read();
     lim_conf_read(); lim_probe(); lim_apply();          // kdev (from conf, without limiter never > 100) + limiter ceiling

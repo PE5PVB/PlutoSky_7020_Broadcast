@@ -68,7 +68,7 @@ module skypluto_axi_regs #(
     output wire signed [DC_W-1:0]    dc_q,
     output wire signed [QC_W-1:0]    qgain,
     output wire signed [QC_W-1:0]    qskew,
-    output wire        [1:0]         chf_mode,
+    output wire        [2:0]         chf_mode,
     // from fabric
     input  wire                     status_overflow,
     input  wire                     status_underflow,
@@ -111,7 +111,7 @@ module skypluto_axi_regs #(
     assign dc_q          = reg_dcq[DC_W-1:0];
     assign qgain         = reg_qg[QC_W-1:0];
     assign qskew         = reg_qs[QC_W-1:0];
-    assign chf_mode      = reg_chf[1:0];
+    assign chf_mode      = reg_chf[2:0];
     assign lim_ceil      = reg_lceil[23:0];
     assign lim_en        = reg_lctrl[0];
     assign fade_en       = reg_lctrl[1];

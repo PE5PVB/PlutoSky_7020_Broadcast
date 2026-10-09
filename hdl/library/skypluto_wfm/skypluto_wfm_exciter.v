@@ -90,7 +90,7 @@ module skypluto_wfm_exciter #(
     wire [31:0] st_gmin_a, st_events_a, st_inpeak_a, st_state_a, st_uf_a;
     wire [4:0]  dbg_sel_a;  wire [31:0] st_dbg_a;
     wire signed [QC_W-1:0] qg_axi, qs_axi;
-    wire        [1:0]      chf_axi;
+    wire        [2:0]      chf_axi;
     wire imp_en_axi; wire [23:0] imp_thr_axi; wire [31:0] st_imp_stamp_a, st_imp_count_a; wire [31:0] st_fmt_a;
     skypluto_axi_regs #(.PHASE_W(PHASE_W), .LVL_W(LVL_W), .KDEV_W(KDEV_W), .DC_W(DC_W), .QC_W(QC_W)) u_regs (
         .s_axi_aclk(s_axi_aclk), .s_axi_aresetn(s_axi_aresetn),
@@ -118,7 +118,7 @@ module skypluto_wfm_exciter #(
     (* ASYNC_REG = "TRUE" *) reg signed [KDEV_W-1:0]  kd_s0=0,  kd_sr=0;   reg signed [KDEV_W-1:0] kd_s1=0;
     (* ASYNC_REG = "TRUE" *) reg signed [DC_W-1:0]    dci_s0=0, dci_sr=0, dcq_s0=0, dcq_sr=0;  reg signed [DC_W-1:0] dci_s1=0, dcq_s1=0;
     (* ASYNC_REG = "TRUE" *) reg signed [QC_W-1:0] qg_s0=0, qg_sr=0, qs_s0=0, qs_sr=0;  reg signed [QC_W-1:0] qg_s1=0, qs_s1=0;
-    (* ASYNC_REG = "TRUE" *) reg [1:0] chf_s0 = 0, chf_sr = 0;  reg [1:0] chf_s1 = 0;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] chf_s0 = 0, chf_sr = 0;  reg [2:0] chf_s1 = 0;
     (* ASYNC_REG = "TRUE" *) reg [23:0] lc_s0=24'h733333, lc_sr=24'h733333;  reg [23:0] lc_s1=24'h733333;
     (* ASYNC_REG = "TRUE" *) reg        le_s0=1, le_s1=1, fe_s0=1, fe_s1=1, ct_s0=0, ct_s1=0;
     reg ct_s2 = 0;
@@ -291,7 +291,7 @@ module skypluto_wfm_exciter #(
         w_seq, {8'd0, w_out_q}, {8'd0, w_out_c},                             // 21 = window sequence number, 20 = peak after limiter (q), 19 = peak at modulator input (comp), 20 ms
         sc_dbg_wd, sc_dbg_state, ups_dbg_state,                              // 18 = watchdog {wd_idle,wd_fsm}, 17 = conditioner state, 16 = interp state
         ups_ovf, ups_take, d_hb,                                             // 15 = interp overflow pulses, 14 = samples taken, 13 = l_clk heartbeat
-        32'hB1D0001C,                                                        // 12 = build id (identifies the bitstream)
+        32'hB1D0001D,                                                        // 12 = build id (identifies the bitstream)
         ups_sat,                {8'd0, d_pk_comp},                           // 11 = FIR saturations, 10 = peak |interp output|
         {8'd0, d_pk_q},         sc_dbg_nz,                                   // 9 = peak |conditioner output|, 8 = x_new != 0 (count)
         sc_dbg_pops,            sc_dbg_pulls,                                // 7 = FIFO pops, 6 = pulls

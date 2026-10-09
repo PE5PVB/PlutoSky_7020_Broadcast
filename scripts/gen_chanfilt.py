@@ -5,7 +5,7 @@ reference model used by sim/tb_chanfilt.v.
 The channel filter band-limits the FM signal itself (after the modulator) so that the skirts at 110-170 kHz from the carrier, which set the
 SM.1268 mask margin, are cut. Multirate, so it fits the FPGA:
     3.072 MS/s  --decimate x4, 32 taps-->  768 kS/s  --channel FIR, 63 taps-->  768 kS/s  --interpolate x4, 32 taps-->  3.072 MS/s
-Three channel filters, -6 dB at +-130 / +-125 / +-120 kHz (Kaiser beta 8). Coefficients 18 bit signed, CB fraction bits.
+Seven channel filters, -6 dB at +-130 / +-125 / +-120 / +-135 / +-140 / +-150 / +-160 kHz (modes 1..7, Kaiser beta 8). Coefficients 18 bit signed, CB fraction bits.
 
     python scripts/gen_chanfilt.py            rewrite the coefficient functions in the Verilog
     python scripts/gen_chanfilt.py --model    also print the model's self-check
@@ -17,7 +17,7 @@ from scipy.signal import firwin
 FS, FSD = 3072000, 768000
 ND, NC, NI = 32, 63, 32
 CB = 16
-BWS = (130, 125, 120)
+BWS = (130, 125, 120, 135, 140, 150, 160)                           # mode 1..7 (1..3 as in build 22)
 
 def q(h): return np.round(np.asarray(h) * 2**CB).astype(np.int64)
 
@@ -30,7 +30,7 @@ def sat(v, bits):
     return np.clip(v, lo, hi)
 
 def model(x, mode, ph=0):
-    """bit-exact model. x = int16 samples at 3.072 MS/s; mode 1/2/3 = 130/125/120 kHz. Returns int16 at 3.072 MS/s.
+    """bit-exact model. x = int16 samples at 3.072 MS/s; mode 1..7 = BWS[mode - 1] kHz. Returns int16 at 3.072 MS/s.
     ph = which input sample is the newest one of a decimation frame (0..3)."""
     x = np.asarray(x, np.int64); hc = HC[BWS[mode - 1]]
     n_out = (len(x) - ph) // 4
