@@ -22,6 +22,7 @@ int main(int argc, char **argv){
     if (!enc || !mod){ fprintf(stderr, "bad configuration\n"); return 2; }
     if (argc > 7) dabplus_enc_set_dls(enc, argv[7], 15);
     FILE *fi = fopen(argv[1], "rb"), *fo = fopen(argv[4], "wb");
+    FILE *fph = getenv("DAB_PHASES") ? fopen(getenv("DAB_PHASES"), "wb") : NULL;   // optional: the phase words per frame
     if (!fi || !fo){ perror("file"); return 2; }
     const int nf = dabplus_enc_frames(enc), ns = nf * 960 * 2, sfb = dabplus_total_bytes(&cfg), lfb = dab_mod_lf_bytes(mod, 0);
     float *pcm = calloc((size_t)ns, sizeof(float));
@@ -34,10 +35,13 @@ int main(int argc, char **argv){
         nsf++;
         for (int k = 0; k < 5; k++){                                   // a super frame is 5 logical frames (CIFs)
             const uint8_t *lf[1] = { sf + k * lfb };
-            if (dab_mod_push_cif(mod, lf)){ fwrite(dab_mod_frame(mod), sizeof(dab_cf), DAB_FRAME_SAMPLES, fo); frames++; }
+            if (dab_mod_push_cif(mod, lf)){
+                fwrite(dab_mod_frame(mod), sizeof(dab_cf), DAB_FRAME_SAMPLES, fo); frames++;
+                if (fph) fwrite(dab_mod_phase_words(mod), sizeof(uint32_t), DAB_PHASE_WORDS, fph);   // FPGA form, for the HDL model
+            }
         }
     }
-    fclose(fi); fclose(fo);
+    fclose(fi); fclose(fo); if (fph) fclose(fph);
     printf("%d super frames, %d transmission frames (%.1f s), %d of 864 CU used\n", nsf, frames, frames * 0.096, dab_mod_cu_used(mod));
     dab_mod_close(mod); dabplus_enc_close(enc); free(pcm); free(sf);
     return 0;

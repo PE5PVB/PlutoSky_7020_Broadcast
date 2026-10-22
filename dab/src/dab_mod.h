@@ -38,6 +38,10 @@ int      dab_mod_lf_bytes(const dab_mod *m, int i);
 // complete; then dab_mod_frame() gives its DAB_FRAME_SAMPLES complex samples (RMS amplitude about 1).
 int      dab_mod_push_cif(dab_mod *m, const uint8_t *const lf[]);
 const dab_cf *dab_mod_frame(const dab_mod *m);
+// the same frame in the form the FPGA takes: 76 symbols x 96 words, each word 16 carriers x 2-bit phase index p
+// (carrier a: phase 45 degrees x (l + 2p) in symbol l; carrier order +1..+768, -768..-1); the null symbol is not included
+const uint32_t *dab_mod_phase_words(const dab_mod *m);
+#define DAB_PHASE_WORDS (76 * 96)
 // capacity units used by the sub-channels (of 864)
 int      dab_mod_cu_used(const dab_mod *m);
 

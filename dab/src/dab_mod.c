@@ -56,6 +56,8 @@ struct dab_mod {
     uint8_t *frame_bits;                   // FIC (4 x 2304) + MSC (4 x 55296) bits of the frame being built
     int fidx[K];                           // frequency interleaver: QPSK symbol n -> carrier index
     dab_cf prs[K];
+    uint8_t prs_ph[K];                     // phase reference in units of 90 degrees
+    uint32_t phw[NSYM * K / 16];           // FPGA form of the frame: per symbol and carrier the 2-bit phase index p
     fft_plan fft;
     dab_cf *iq;
     // FIG carousel
@@ -220,7 +222,7 @@ dab_mod *dab_mod_open(const dab_ensemble *ens){
     for (int a = 0; a < K; a++){
         int row = a / 32, k = a % 32, ph = (PRS_H[PRS_IN[row][0]][k] + PRS_IN[row][1]) & 3;
         static const float re[4] = { 1, 0, -1, 0 }, im[4] = { 0, 1, 0, -1 };
-        m->prs[a].re = re[ph]; m->prs[a].im = im[ph];
+        m->prs[a].re = re[ph]; m->prs[a].im = im[ph]; m->prs_ph[a] = (uint8_t)ph;
     }
     build_figs(m);
     return m;
@@ -235,6 +237,7 @@ void dab_mod_close(dab_mod *m){
 int dab_mod_lf_bytes(const dab_mod *m, int i){ return 3 * m->sc[i].bitrate; }
 int dab_mod_cu_used(const dab_mod *m){ return m->cu_used; }
 const dab_cf *dab_mod_frame(const dab_mod *m){ return m->iq; }
+const uint32_t *dab_mod_phase_words(const dab_mod *m){ return m->phw; }
 
 static void ofdm_symbol(dab_mod *m, const dab_cf *z, dab_cf *out){
     static cpx in[NFFT], X[NFFT];
@@ -249,16 +252,36 @@ static void ofdm_symbol(dab_mod *m, const dab_cf *z, dab_cf *out){
     memcpy(out, out + NFFT, sizeof(dab_cf) * TGUARD);              // cyclic prefix
 }
 
+// FPGA form: symbol l carries per carrier zp = 45 degrees x (l + 2p) (the differential QPSK adds 45 degrees per symbol),
+// so p = (zp - l) / 2 is sent, 2 bits per carrier, 16 carriers per word (carrier a in bits 2(a%16)+1..2(a%16))
+static void pack_phases(dab_mod *m, int l, const uint8_t *zp){
+    uint32_t *w = m->phw + (size_t)l * (K / 16);
+    for (int i = 0; i < K / 16; i++){
+        uint32_t v = 0;
+        for (int k = 0; k < 16; k++) v |= (uint32_t)(((zp[16 * i + k] - l) & 7) >> 1) << (2 * k);
+        w[i] = v;
+    }
+}
+
 static void modulate_frame(dab_mod *m){
     dab_cf *o = m->iq;
     memset(o, 0, sizeof(dab_cf) * TNULL); o += TNULL;               // null symbol
     static dab_cf z[K], y[K];
+    static uint8_t zp[K], yc[K];                                    // the same phases in units of 45 degrees
     memcpy(z, m->prs, sizeof z);
+    for (int a = 0; a < K; a++) zp[a] = (uint8_t)(2 * m->prs_ph[a]);
+    pack_phases(m, 0, zp);
     ofdm_symbol(m, z, o); o += TGUARD + NFFT;
     const float h = (float)M_SQRT1_2;
     for (int l = 0; l < NSYM - 1; l++){
         const uint8_t *b = m->frame_bits + (size_t)l * 2 * K;
-        for (int n = 0; n < K; n++){ dab_cf q = { h * (1 - 2 * b[n]), h * (1 - 2 * b[n + K]) }; y[m->fidx[n]] = q; }
+        for (int n = 0; n < K; n++){
+            dab_cf q = { h * (1 - 2 * b[n]), h * (1 - 2 * b[n + K]) }; y[m->fidx[n]] = q;
+            static const uint8_t code[4] = { 1, 7, 3, 5 };            // (b_re, b_im) = 00: 45, 01: 315, 10: 135, 11: 225 degrees
+            yc[m->fidx[n]] = code[2 * b[n] + b[n + K]];
+        }
+        for (int a = 0; a < K; a++) zp[a] = (uint8_t)((zp[a] + yc[a]) & 7);
+        pack_phases(m, l + 1, zp);
         for (int a = 0; a < K; a++){                               // differential modulation
             float re = z[a].re * y[a].re - z[a].im * y[a].im, im = z[a].re * y[a].im + z[a].im * y[a].re;
             z[a].re = re; z[a].im = im;
