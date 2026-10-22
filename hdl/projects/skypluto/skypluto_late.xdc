@@ -22,6 +22,10 @@ set_clock_groups -asynchronous \
 # The conditioner (u_sc: limiter + fade, 1 state per clock at the input rate, ~64 clocks per sample) is covered as well, and so is the
 # FM modulator (u_mod): its I/Q correction multipliers (DSP -> DSP, 0 logic levels) missed the 4 ns by ~0.1 ns on placement alone; and the channel
 # filter (u_chf), whose MAC pipelines run on the same l_clk.
-set ups_cells [get_cells -hierarchical -filter {NAME =~ "*wfm/inst/u_ups/*" || NAME =~ "*wfm/inst/u_sc/*" || NAME =~ "*wfm/inst/u_mod/*" || NAME =~ "*wfm/inst/u_chf/*"}]
-set_multicycle_path 2 -setup -from $ups_cells -to $ups_cells
-set_multicycle_path 1 -hold  -from $ups_cells -to $ups_cells
+#
+# Since the DAB block (u_dab: its 3/2 interpolator chains 6 MACs in one clock, ~17 ns) this is widened to EVERY rx_clk path that ends
+# in the exciter, with a budget of 6 clocks (24 ns). Safe: the exciter only works at l_clk = 12.288 MHz anyway (STEP of the I2S
+# interpolator, the OFDM timing), and 24 ns << 81 ns. Paths that leave the exciter (i_out/q_out into the AD9361 core) keep 4 ns.
+set wfm_cells [get_cells -hierarchical -filter {NAME =~ "*system_i/wfm/inst/*"}]
+set_multicycle_path 6 -setup -from [get_clocks rx_clk] -to $wfm_cells
+set_multicycle_path 5 -hold  -from [get_clocks rx_clk] -to $wfm_cells

@@ -323,7 +323,7 @@ module skypluto_wfm_exciter #(
     wire [13:0] ofdm_level; wire ofdm_uf;
     wire pw_move = ~pw_empty & (ofdm_level < 14'd8180);
     // the DAB reset (0x64 bit 1) clears both sides of this FIFO (write side directly, read side through dab_rst); the ARM holds it a few us
-    skypluto_async_fifo #(.DW(32), .AW(8)) u_pwfifo (
+    skypluto_async_fifo_bram #(.DW(32), .AW(8)) u_pwfifo (
         .wr_clk(s_axi_aclk), .wr_rst(a_rst | dab_ctrl_a[1]), .wr_en(dab_wr_a & ~pw_full), .wr_data(dab_wdata_a), .wr_full(pw_full),
         .rd_clk(l_clk), .rd_rst(dab_rst), .rd_en(pw_move), .rd_data(pw_data), .rd_empty(pw_empty), .rd_count(pw_cnt), .wr_pos(pw_wpos)
     );
@@ -348,7 +348,7 @@ module skypluto_wfm_exciter #(
     (* ASYNC_REG = "TRUE" *) reg dm_b0 = 0, dm_b1 = 0;
     always @(posedge i2s_in_bclk) begin dm_b0 <= dab_ctrl_a[0]; dm_b1 <= dm_b0; end
     wire aud_full, aud_empty; wire [10:0] aud_cnt, aud_wpos;
-    skypluto_async_fifo #(.DW(32), .AW(10)) u_audfifo (
+    skypluto_async_fifo_bram #(.DW(32), .AW(10)) u_audfifo (
         .wr_clk(i2s_in_bclk), .wr_rst(b_rst), .wr_en(i2s_valid & dm_b1 & ~aud_full),
         .wr_data({i2s_left[DW-1 -: 16], i2s_right[DW-1 -: 16]}), .wr_full(aud_full),
         .rd_clk(s_axi_aclk), .rd_rst(a_rst), .rd_en(aud_rd_a & ~aud_empty), .rd_data(aud_data_a), .rd_empty(aud_empty),

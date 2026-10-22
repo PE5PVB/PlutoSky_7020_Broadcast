@@ -8,7 +8,7 @@ SRC="$HERE/hdl/library/skypluto_wfm"
 DST="$DK/firmware/src/hdl/library/skypluto_wfm"
 mkdir -p "$DST/data"
 for f in skypluto_wfm_exciter skypluto_interp skypluto_uart_hd skypluto_async_fifo \
-         skypluto_fm_modulator skypluto_sincos skypluto_axi_regs skypluto_i2s_rx skypluto_sigcond skypluto_chanfilt skypluto_dab_ofdm; do
+         skypluto_fm_modulator skypluto_sincos skypluto_axi_regs skypluto_i2s_rx skypluto_sigcond skypluto_chanfilt skypluto_dab_ofdm skypluto_async_fifo_bram; do
     tr -d '\r' < "$SRC/$f.v" > "$DST/$f.v"
 done
 for f in skypluto_dab_twiddle skypluto_dab_interp_coefs; do
