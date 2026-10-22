@@ -226,7 +226,10 @@ add_files -norecurse [list \
   $skp/skypluto_i2s_rx.v $skp/skypluto_sincos.v $skp/skypluto_fm_modulator.v \
   $skp/skypluto_async_fifo.v $skp/skypluto_interp.v $skp/skypluto_uart_hd.v \
   $skp/skypluto_axi_regs.v $skp/skypluto_sigcond.v $skp/skypluto_chanfilt.v $skp/skypluto_wfm_exciter.v \
+  $skp/skypluto_dab_ofdm.v $skp/skypluto_dab_twiddle.vh $skp/skypluto_dab_interp_coefs.vh \
   $skp/data/sine_lut.mem $skp/data/interp_coefs.mem]
+set_property file_type {Verilog Header} [get_files {skypluto_dab_twiddle.vh skypluto_dab_interp_coefs.vh}]
+set_property include_dirs $skp [get_filesets sources_1]
 set_property file_type {Memory Initialization Files} [get_files sine_lut.mem]
 set_property file_type {Memory Initialization Files} [get_files interp_coefs.mem]
 create_bd_cell -type module -reference skypluto_wfm_exciter wfm

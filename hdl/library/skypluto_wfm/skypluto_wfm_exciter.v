@@ -4,6 +4,8 @@
 //   I2S-RX (bclk) -> async FIFO (CDC) -> conditioner -> interpolator (l_clk) -> FM modulator
 //                 -> channel filter (optional, off by default) -> i_out/q_out  (to axi_ad9361 dac_data_i0/q0)
 //   + skypluto_axi_regs: enable / freq_offset (zero-IF) / carrier_level / kdev
+//   DAB mode (0x64 bit 0): the ARM writes OFDM phase words (0x68) -> skypluto_dab_ofdm -> the modulator's I/Q input (level, I/Q correction
+//   and DC as for FM; the channel filter is bypassed); the I2S stereo samples go to the ARM through an audio FIFO (0x6C, 0x70).
 //
 // The carrier is ALWAYS on (even without I2S): at comp=0 the phase keeps running
 // with freq_offset. Level and offset are adjustable at runtime via AXI (ssh/devmem).
@@ -92,6 +94,7 @@ module skypluto_wfm_exciter #(
     wire signed [QC_W-1:0] qg_axi, qs_axi;
     wire        [2:0]      chf_axi;
     wire imp_en_axi; wire [23:0] imp_thr_axi; wire [31:0] st_imp_stamp_a, st_imp_count_a; wire [31:0] st_fmt_a;
+    wire [3:0] dab_ctrl_a; wire dab_wr_a, aud_rd_a, pw_full; wire [31:0] dab_wdata_a, dab_status_a, aud_data_a, aud_count_a;
     skypluto_axi_regs #(.PHASE_W(PHASE_W), .LVL_W(LVL_W), .KDEV_W(KDEV_W), .DC_W(DC_W), .QC_W(QC_W)) u_regs (
         .s_axi_aclk(s_axi_aclk), .s_axi_aresetn(s_axi_aresetn),
         .s_axi_awaddr(s_axi_awaddr), .s_axi_awvalid(s_axi_awvalid), .s_axi_awready(s_axi_awready),
@@ -105,6 +108,8 @@ module skypluto_wfm_exciter #(
         .lim_ceil(lim_ceil_axi), .lim_en(lim_en_axi), .fade_en(fade_en_axi), .lim_clr_tog(clr_tog_axi),
         .st_gmin(st_gmin_a), .st_events(st_events_a), .st_inpeak(st_inpeak_a), .st_state(st_state_a), .st_uf(st_uf_a),
         .dbg_sel(dbg_sel_a), .st_dbg(st_dbg_a),
+        .dab_ctrl(dab_ctrl_a), .dab_wr(dab_wr_a), .dab_wdata(dab_wdata_a), .dab_status(dab_status_a), .dab_wfull(pw_full),
+        .aud_rd(aud_rd_a), .aud_data(aud_data_a), .aud_count(aud_count_a),
         .i2s_ctrl(i2s_ctrl_axi), .imp_en(imp_en_axi), .imp_thr(imp_thr_axi), .st_imp_stamp(st_imp_stamp_a), .st_imp_count(st_imp_count_a), .st_fmt(st_fmt_a)
     );
 
@@ -291,7 +296,7 @@ module skypluto_wfm_exciter #(
         w_seq, {8'd0, w_out_q}, {8'd0, w_out_c},                             // 21 = window sequence number, 20 = peak after limiter (q), 19 = peak at modulator input (comp), 20 ms
         sc_dbg_wd, sc_dbg_state, ups_dbg_state,                              // 18 = watchdog {wd_idle,wd_fsm}, 17 = conditioner state, 16 = interp state
         ups_ovf, ups_take, d_hb,                                             // 15 = interp overflow pulses, 14 = samples taken, 13 = l_clk heartbeat
-        32'hB1D0001D,                                                        // 12 = build id (identifies the bitstream)
+        32'hB1D0001E,                                                        // 12 = build id (identifies the bitstream)
         ups_sat,                {8'd0, d_pk_comp},                           // 11 = FIR saturations, 10 = peak |interp output|
         {8'd0, d_pk_q},         sc_dbg_nz,                                   // 9 = peak |conditioner output|, 8 = x_new != 0 (count)
         sc_dbg_pops,            sc_dbg_pulls,                                // 7 = FIFO pops, 6 = pulls
@@ -306,6 +311,51 @@ module skypluto_wfm_exciter #(
     // ---- FM-modulator ---------------------------------------------------------
     wire mod_en = en_s1 & dac_enable_i0;
     wire signed [OUT_W-1:0] mod_i, mod_q;
+    // ---- DAB: control to l_clk, phase words AXI -> l_clk, OFDM, audio bclk -> AXI -----------------------------------------
+    (* ASYNC_REG = "TRUE" *) reg [3:0] dab_s0 = 0, dab_s1 = 0;
+    always @(posedge l_clk) begin dab_s0 <= dab_ctrl_a; dab_s1 <= dab_s0; end
+    wire dab_mode = dab_s1[0], dab_rst = dab_s1[1] | l_rst;
+    reg [1:0] arst_sync = 2'b11;
+    always @(posedge s_axi_aclk or negedge s_axi_aresetn)
+        if (!s_axi_aresetn) arst_sync <= 2'b11; else arst_sync <= {arst_sync[0], 1'b0};
+    wire a_rst = arst_sync[1];
+    wire [31:0] pw_data; wire pw_empty; wire [8:0] pw_cnt, pw_wpos;
+    wire [13:0] ofdm_level; wire ofdm_uf;
+    wire pw_move = ~pw_empty & (ofdm_level < 14'd8180);
+    // the DAB reset (0x64 bit 1) clears both sides of this FIFO (write side directly, read side through dab_rst); the ARM holds it a few us
+    skypluto_async_fifo #(.DW(32), .AW(8)) u_pwfifo (
+        .wr_clk(s_axi_aclk), .wr_rst(a_rst | dab_ctrl_a[1]), .wr_en(dab_wr_a & ~pw_full), .wr_data(dab_wdata_a), .wr_full(pw_full),
+        .rd_clk(l_clk), .rd_rst(dab_rst), .rd_en(pw_move), .rd_data(pw_data), .rd_empty(pw_empty), .rd_count(pw_cnt), .wr_pos(pw_wpos)
+    );
+    wire signed [OUT_W-1:0] dab_i, dab_q;
+    skypluto_dab_ofdm u_dab (
+        .clk(l_clk), .rst(dab_rst), .enable(dab_mode), .wr_en(pw_move), .wr_data(pw_data),
+        .fifo_level(ofdm_level), .underflow(ofdm_uf), .i_out(dab_i), .q_out(dab_q),
+        .dbg_x_valid(), .dbg_x_re(), .dbg_x_im()
+    );
+    // DAB gain 2^dab_s1[3:2] with saturation (the OFDM output peaks around -11 dBFS, rms -22 dBFS)
+    wire signed [OUT_W+6:0] dgi = $signed(dab_i) <<< dab_s1[3:2], dgq = $signed(dab_q) <<< dab_s1[3:2];
+    localparam signed [OUT_W+6:0] DMAX = (1 <<< (OUT_W-1)) - 1, DMIN = -(1 <<< (OUT_W-1));
+    reg signed [OUT_W-1:0] dab_gi = 0, dab_gq = 0;
+    always @(posedge l_clk) begin
+        dab_gi <= (dgi > DMAX) ? DMAX[OUT_W-1:0] : (dgi < DMIN) ? DMIN[OUT_W-1:0] : dgi[OUT_W-1:0];
+        dab_gq <= (dgq > DMAX) ? DMAX[OUT_W-1:0] : (dgq < DMIN) ? DMIN[OUT_W-1:0] : dgq[OUT_W-1:0];
+    end
+    (* ASYNC_REG = "TRUE" *) reg [31:0] dst0 = 0, dst1 = 0;
+    always @(posedge s_axi_aclk) begin dst0 <= {14'd0, pw_full, ofdm_uf, 2'd0, ofdm_level}; dst1 <= dst0; end
+    assign dab_status_a = dst1;
+    // audio for the ARM's AAC encoder: {left[23:8], right[23:8]} per stereo frame, only in DAB mode
+    (* ASYNC_REG = "TRUE" *) reg dm_b0 = 0, dm_b1 = 0;
+    always @(posedge i2s_in_bclk) begin dm_b0 <= dab_ctrl_a[0]; dm_b1 <= dm_b0; end
+    wire aud_full, aud_empty; wire [10:0] aud_cnt, aud_wpos;
+    skypluto_async_fifo #(.DW(32), .AW(10)) u_audfifo (
+        .wr_clk(i2s_in_bclk), .wr_rst(b_rst), .wr_en(i2s_valid & dm_b1 & ~aud_full),
+        .wr_data({i2s_left[DW-1 -: 16], i2s_right[DW-1 -: 16]}), .wr_full(aud_full),
+        .rd_clk(s_axi_aclk), .rd_rst(a_rst), .rd_en(aud_rd_a & ~aud_empty), .rd_data(aud_data_a), .rd_empty(aud_empty),
+        .rd_count(aud_cnt), .wr_pos(aud_wpos)
+    );
+    assign aud_count_a = {21'd0, aud_cnt};
+
     skypluto_fm_modulator #(
         .COMP_W(DW), .KDEV_W(KDEV_W), .KSHIFT(KSHIFT), .PHASE_W(PHASE_W),
         .LUT_ADDR_W(LUT_ADDR_W), .OUT_W(OUT_W), .LVL_W(LVL_W), .DC_W(DC_W), .QC_W(QC_W), .LUT_FILE(LUT_FILE)
@@ -314,15 +364,16 @@ module skypluto_wfm_exciter #(
         .kdev(kd_s1), .offset_inc(off_s1), .level(lvl_s1),
         .dc_i(dci_s1), .dc_q(dcq_s1), .qgain(qg_s1), .qskew(qs_s1),
         .comp(ups_comp), .comp_valid(ups_valid),
+        .ext_en(dab_mode), .ext_i(dab_gi), .ext_q(dab_gq),
         .i_out(mod_i), .q_out(mod_q), .iq_valid()
     );
 
-    // ---- channel filter on the FM signal (mode 0 = off: the modulator output passes unchanged) ----
+    // ---- channel filter on the FM signal (mode 0 = off: the modulator output passes unchanged; always off for DAB) ----
     skypluto_chanfilt u_chf (
-        .clk(l_clk), .rst(l_rst), .mode(chf_s1),
+        .clk(l_clk), .rst(l_rst), .mode(dab_mode ? 3'd0 : chf_s1),
         .i_in(mod_i), .q_in(mod_q), .i_out(i_out), .q_out(q_out)
     );
 
-    wire _unused = &{1'b0, i2s_right, fifo_full};
+    wire _unused = &{1'b0, fifo_full, pw_cnt, pw_wpos, aud_wpos};
 
 endmodule

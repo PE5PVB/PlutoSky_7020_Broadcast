@@ -89,6 +89,15 @@ module skypluto_axi_regs #(
     input  wire        [31:0]       st_imp_count,     // number of impulses
     input  wire        [31:0]       st_fmt,           // I2S format (slot length, word width)
     output wire        [4:0]        dbg_sel,          // diagnostics: which word (0..31) is read at 0x3C
+    // DAB (0x64 control, 0x68 phase words / status, 0x6C audio sample (read pops), 0x70 audio count)
+    output wire        [3:0]        dab_ctrl,         // [0] DAB mode (instead of FM), [1] DAB reset, [3:2] DAB gain 2^n (saturating)
+    output reg                      dab_wr = 1'b0,    // pulse: one phase word written to 0x68
+    output reg         [31:0]       dab_wdata = 32'd0,
+    input  wire        [31:0]       dab_status,       // [13:0] OFDM FIFO level, [16] underflow, [17] CDC FIFO full
+    input  wire                     dab_wfull,        // phase word FIFO full: a write to 0x68 waits (at most 1024 clocks, then it is dropped)
+    output reg                      aud_rd = 1'b0,    // pulse: the audio sample at 0x6C was read
+    input  wire        [31:0]       aud_data,         // {left[15:0], right[15:0]} (the head of the audio FIFO)
+    input  wire        [31:0]       aud_count,        // audio samples waiting
     input  wire        [31:0]       st_dbg            // the selected diagnostic word
 );
 
@@ -96,7 +105,8 @@ module skypluto_axi_regs #(
 
     reg [31:0] reg_ctrl, reg_offset, reg_level, reg_kdev, reg_dci, reg_dcq, reg_lceil, reg_lctrl;
     reg [4:0]  reg_dbgsel;
-    reg [31:0] reg_impctrl, reg_impthr, reg_i2sctrl, reg_qg, reg_qs, reg_chf;
+    reg [31:0] reg_impctrl, reg_impthr, reg_i2sctrl, reg_qg, reg_qs, reg_chf, reg_dab;
+    assign dab_ctrl = reg_dab[3:0];
     assign i2s_ctrl = reg_i2sctrl[15:0];
     assign imp_en  = reg_impctrl[0];
     assign imp_thr = reg_impthr[23:0];
@@ -118,7 +128,12 @@ module skypluto_axi_regs #(
     assign lim_clr_tog   = clr_tog;
 
     wire rst = ~s_axi_aresetn;
-    wire wr_fire = s_axi_awvalid & s_axi_wvalid & ~s_axi_bvalid;
+    // a phase word write (0x68) waits while the CDC FIFO is full, so the ARM can write at bus speed without losing words; never longer
+    // than 1024 clocks (the bus must not hang when the OFDM block does not drain)
+    reg [10:0] dab_wait = 11'd0;
+    wire dab_hold = (s_axi_awaddr[6:2] == 5'h1A) & dab_wfull & ~dab_wait[10];
+    always @(posedge s_axi_aclk) dab_wait <= (s_axi_awvalid & s_axi_wvalid & ~s_axi_bvalid & dab_hold) ? dab_wait + 11'd1 : 11'd0;
+    wire wr_fire = s_axi_awvalid & s_axi_wvalid & ~s_axi_bvalid & ~dab_hold;
 
     always @(posedge s_axi_aclk) begin
         if (rst) begin
@@ -131,8 +146,9 @@ module skypluto_axi_regs #(
             reg_dci    <= 32'h0;
             reg_dcq    <= 32'h0;
             reg_lceil  <= 32'h733333; reg_lctrl <= 32'h3; clr_tog <= 1'b0; reg_dbgsel <= 5'd0;
-            reg_impctrl <= 32'h0; reg_impthr <= 32'h0F5C28; reg_i2sctrl <= 32'h0; reg_qg <= 32'h0; reg_qs <= 32'h0; reg_chf <= 32'h0;
+            reg_impctrl <= 32'h0; reg_impthr <= 32'h0F5C28; reg_i2sctrl <= 32'h0; reg_qg <= 32'h0; reg_qs <= 32'h0; reg_chf <= 32'h0; reg_dab <= 32'h0; dab_wr <= 1'b0;
         end else begin
+            dab_wr <= 1'b0;
             if (wr_fire) begin
                 s_axi_awready <= 1'b1;
                 s_axi_wready  <= 1'b1;
@@ -150,6 +166,8 @@ module skypluto_axi_regs #(
                     5'h16: reg_qg      <= s_axi_wdata;
                     5'h17: reg_qs      <= s_axi_wdata;
                     5'h18: reg_chf     <= s_axi_wdata;
+                    5'h19: reg_dab     <= s_axi_wdata;
+                    5'h1A: begin dab_wr <= 1'b1; dab_wdata <= s_axi_wdata; end
                     5'h09: begin reg_lctrl <= {s_axi_wdata[31:3], 1'b0, s_axi_wdata[1:0]};      // bit 2 = clear pulse (reads as 0)
                                 if (s_axi_wdata[2]) clr_tog <= ~clr_tog; end
                     5'h0F: reg_dbgsel <= s_axi_wdata[4:0];
@@ -169,8 +187,9 @@ module skypluto_axi_regs #(
     always @(posedge s_axi_aclk) begin
         if (rst) begin
             s_axi_arready <= 1'b0; s_axi_rvalid <= 1'b0;
-            s_axi_rresp   <= 2'b00; s_axi_rdata  <= 32'd0;
+            s_axi_rresp   <= 2'b00; s_axi_rdata  <= 32'd0; aud_rd <= 1'b0;
         end else begin
+            aud_rd <= 1'b0;
             if (s_axi_arvalid & ~s_axi_rvalid) begin
                 s_axi_arready <= 1'b1;
                 s_axi_rvalid  <= 1'b1;
@@ -201,6 +220,10 @@ module skypluto_axi_regs #(
                     5'h16: s_axi_rdata <= reg_qg;
                     5'h17: s_axi_rdata <= reg_qs;
                     5'h18: s_axi_rdata <= reg_chf;
+                    5'h19: s_axi_rdata <= reg_dab;
+                    5'h1A: s_axi_rdata <= dab_status;
+                    5'h1B: begin s_axi_rdata <= aud_data; aud_rd <= 1'b1; end
+                    5'h1C: s_axi_rdata <= aud_count;
                     default: s_axi_rdata <= 32'd0;
                 endcase
             end else begin

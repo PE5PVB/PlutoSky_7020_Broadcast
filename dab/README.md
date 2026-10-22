@@ -24,19 +24,32 @@ pas later en alleen na een octrooicheck. Dit is geen juridisch advies; voor een 
 ## 2. Keten
 
 ```
-I2S stereo 48 kHz ─► FPGA I2S-ontvanger ─► (DMA) ─► ARM
-ARM:  [optioneel 48 → 32 kHz] ─► AAC-LC-encoder (960-punts, CPE met M/S) ─► audio-eenheden (AU)
-      ─► DAB+-superframe (120 ms): header + fire code, AU's met CRC, RS(120,110) met virtuele interleaving
-      ─► multiplex: FIC (FIG 0/0, 0/1, 0/2, 0/9, 0/10, 1/0, 1/1, PTy) + MSC-subkanaal, DLS-tekst als PAD
-      ─► per 24 ms één CIF ─► FPGA
-FPGA: energiespreiding ─► convolutiecode (K=7, R=1/4) + puncturering (EEP) ─► tijdinterleaving (16 CIF's)
-      ─► frequentie-interleaving ─► QPSK + differentiële modulatie (fase-referentiesymbool)
-      ─► IFFT 2048 (1536 draaggolven) ─► cyclisch prefix 504, nulsymbool 2656 ─► 2,048 MS/s
-      ─► interpolatie + maskerfilter ─► AD9361 (Band III 174–240 MHz)
+I2S stereo 48 kHz ─► FPGA I2S-ontvanger ─► audio-FIFO (1024 × {L16, R16}) ─► ARM (0x6C/0x70)
+ARM (skypluto-dab): resampler 48 kHz × (1 ± ppm) naar de zenderklok ─► AAC-LC-encoder (960, CPE met M/S)
+      ─► DAB+-superframe (120 ms): header + fire code, AU's met CRC, RS(120,110), DLS-tekst als X-PAD
+      ─► multiplex: FIC + MSC-subkanaal, energiespreiding, convolutiecode + puncturering (EEP-A),
+         tijd- en frequentie-interleaving, DQPSK ─► per draaggolf een fase-index van 2 bit (16 per 32-bit woord)
+      ─► fasewoorden (7296 per 96 ms) ─► FPGA (0x68, met handshake op de bus)
+FPGA: FIFO 8192 woorden ─► IFFT 2048 (1536 draaggolven) ─► cyclisch prefix 504, nulsymbool 2656 ─► 2,048 MS/s
+      ─► 3/2-interpolator (72 taps) ─► 3,072 MS/s ─► × 2^gain ─► I/Q-pad van de modulator (niveau, I/Q-correctie,
+      DC-nulling, zoals bij FM; kanaalfilter uit) ─► AD9361 (Band III 174–240 MHz)
 ```
 
-Eerste fase: de **hele keten in software op de pc**, uitvoer naar een IQ-bestand, gecontroleerd met een DAB+-decoder.
-Pas daarna de verdeling ARM/FPGA.
+De verdeling: alles wat bits verwerkt draait op de ARM (~1/10 van realtime op de pc), de rekenintensieve OFDM
+(IFFT, 3/2-interpolatie) in de FPGA. Zo blijft de configuratie van de AD9361 en de maskerbewaking gelijk aan FM.
+
+### Registers (WFM-blok, 0x7C440000)
+
+| Adres | Lezen | Schrijven |
+|---|---|---|
+| 0x64 | DAB-besturing | [0] DAB-stand (in plaats van FM), [1] reset van het OFDM-blok, [3:2] versterking 2^n (verzadigend) |
+| 0x68 | status: [13:0] vulling OFDM-FIFO, [16] onderloop (blijft tot reset), [17] CDC-FIFO vol | één fasewoord (wacht op de bus zolang de CDC-FIFO vol is, hooguit 1024 klokken) |
+| 0x6C | audiosample {L[15:0], R[15:0]} (lezen haalt het uit de FIFO) | – |
+| 0x70 | aantal wachtende audiosamples | – |
+
+Het OFDM-signaal piekt rond −11 dBFS (rms −22 dBFS); versterking 1 (×2) geeft −5 dBFS piek. Het draaggolfniveau (0x08) en
+de I/Q- en DC-correctie werken zoals bij FM. Na een onderloop zet `skypluto-dab` het blok in reset en begint het op een
+framegrens opnieuw.
 
 ## 3. AAC-encoder (eigen ontwerp)
 
@@ -67,15 +80,25 @@ gelijk aan FM).
    welle-cli (welle.io, met FAAD2) ontvangt het IQ-bestand: OFDM-synchronisatie, FIC (ensemble, dienst, DAB+, subkanaal),
    superframe-synchronisatie, AAC-LC 48 kHz stereo, **DLS-tekst** (X-PAD) – S/N gelijk aan de FFmpeg-decodering.
    Op de pc kosten encoder + modulator ~1/10 van realtime; de OFDM is op de ARM te zwaar → FPGA (fase 6).
-5. Cross-compileren voor de Pluto-ARM, processortijd meten. *(Vereist toestemming voor de Pluto.)*
-6. Kanaalcodering + OFDM in de **FPGA**, bit-exact tegen het C-model. *(Nieuwe bitstream: vereist toestemming.)*
-7. Daemon/webinterface, DAB-masker en MER via RX2, Pico in stereo-I2S-modus.
+5. Cross-compileren voor de Pluto-ARM ✔ *(bouwt zonder waarschuwingen)*; processortijd meten op de Pluto. *(Vereist toestemming.)*
+6. OFDM in de **FPGA**, bit-exact tegen het model. ✔ *(2026-10-22)* `hdl/skypluto_dab_ofdm.v`: bit-exact over twee frames,
+   los gesynthetiseerd 1875 LUT, 14 BRAM, 16 DSP. **Ingebouwd in de exciter** (branch `dab-integration`, build-id B1D0001E):
+   `hdl/tb_dab_top.v` stuurt de hele exciter via AXI zoals de ARM: het modulatorpad is bit-exact (0 fouten over 1,16 miljoen
+   samples), de audio komt foutloos via de FIFO bij de ARM. *(Flashen: vereist toestemming.)*
+7. **skypluto-dab** (ARM-programma) ✔ *eerste versie*: audio uit de FIFO, resampler met snelheidsregeling op de totale
+   vertraging (PI, tijdconstante ~1 minuut, ±500 ppm), encoder + multiplex in een eigen thread, fasewoorden met
+   stroomregeling, herstart na onderloop. Simulatiestand zonder hardware (`-f`): +80 ppm klokverschil, 60 s, geen onderloop,
+   welle-cli decodeert (tonen S/N ~38 dB). Nog: daemon/webinterface, DAB-masker en MER via RX2, Pico in stereo-I2S-modus.
 
 ## 5. Bouwen en testen (pc)
 
 ```
 make -C dab                        # bouwt de bibliotheek en de testprogramma's (gcc, WSL)
 make -C dab test                   # superframe-test (Reed-Solomon via reedsolo)
+tests/check_chain.sh in.f32        # dab_tx_file → welle-cli
+tests/check_app.sh [ppm] [s]       # skypluto-dab in simulatiestand → FPGA-model → welle-cli
+python3 hdl/check_hdl.py build/ph.bin 2         # OFDM-blok tegen het model (iverilog)
+TOP=1 python3 hdl/check_hdl.py build/ph.bin 2   # de hele exciter in DAB-stand (tb_dab_top.v)
 build/test_mdct                    # snelle MDCT tegen de directe definitie
 python tests/check_aac.py build    # coderen + decoderen met FFmpeg (PyAV), S/N en niveau
 ```
@@ -96,6 +119,9 @@ zelf gebouwd met faad2, mpg123 en LAME onder `~/dablocal` (geen root nodig).
 | `src/dab_mod.*` | DAB modus I: FIC (FIG 0/0, 0/1, 0/2, 0/9, 1/0, 1/1), EEP-A, energiespreiding, convolutiecode, tijd- en
   frequentie-interleaving, DQPSK, OFDM (IFFT 2048) → IQ 2,048 MS/s |
 | `tests/dab_tx_file.c`, `tests/check_chain.sh` | complete zender op een bestand; ketentest met welle-cli |
+| `app/skypluto_dab.c` | het zendprogramma op de ARM (registers, resampler, snelheidsregeling, threads; `-f` = simulatie) |
+| `tests/check_app.sh` | skypluto-dab in simulatie → FPGA-model → welle-cli |
+| `hdl/` | `skypluto_dab_ofdm.v` (kopie in `hdl/library/skypluto_wfm`), model, generatoren, testbanken, OOC-synthese |
 | `tools/build_arm.sh` | cross-build voor de ARM van de Pluto (alleen bouwen) |
 | `tools/gen_aac_huff.py` | genereert en controleert de codeboeken |
 | `tests/` | `test_sf`, `check_sf.py`, `test_mdct`, `enc_file`, `check_aac.py` |

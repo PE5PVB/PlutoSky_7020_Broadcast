@@ -41,6 +41,9 @@ module skypluto_fm_modulator #(
     input  wire signed [QC_W-1:0]    qskew,
     input  wire signed [COMP_W-1:0]  comp,
     input  wire                      comp_valid,
+    input  wire                      ext_en,          // 1: ext_i/ext_q replace cos/sin (DAB): same level, I/Q correction and DC
+    input  wire signed [OUT_W-1:0]   ext_i,
+    input  wire signed [OUT_W-1:0]   ext_q,
     output reg  signed [OUT_W-1:0]   i_out,
     output reg  signed [OUT_W-1:0]   q_out,
     output reg                       iq_valid
@@ -90,7 +93,7 @@ module skypluto_fm_modulator #(
             phase_inc_r <= prod_sh[PHASE_W-1:0] + offset_inc; v2  <= v1;
             if (v2) phase <= phase + phase_inc_r;             v3  <= v2;
             v4  <= v3;
-            cos_r <= cos_raw; sin_r <= sin_raw; level_r <= level; v4b <= v4;
+            cos_r <= ext_en ? ext_i : cos_raw; sin_r <= ext_en ? ext_q : sin_raw; level_r <= level; v4b <= v4;
             i_sc <= i_scaled >>> LVL_SHIFT;  q_sc <= q_scaled >>> LVL_SHIFT;  v5 <= v4b;
             m_q <= q_sc * qgain;             m_i <= i_sc * qskew;
             i_d1 <= i_sc;                    q_d1 <= q_sc;                    v5b <= v5;

@@ -2,7 +2,7 @@
 """Runs tb_dab_ofdm (iverilog) on the first frames of a phase word file and compares with dab_ofdm_model.py, sample by sample:
 the 2.048 MS/s stream (after the leading zeros the HDL plays before the first frame) and the 3.072 MS/s output (the model's
 interpolator run on the HDL's own 2.048 MS/s stream, any delay).
-  python3 check_hdl.py <phase words .bin> [frames]"""
+  python3 check_hdl.py <phase words .bin> [frames]        (TOP=1: the whole exciter in DAB mode, tb_dab_top.v)"""
 import os, sys, subprocess, tempfile
 import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -15,10 +15,18 @@ w = ph[:nfr * M.NSYM * 96]
 d = tempfile.mkdtemp()
 open(os.path.join(d, 'w.hex'), 'w').write('\n'.join('%08x' % v for v in w) + '\n')
 nclk = int((nfr * 196608 + 4000) * 6)
-subprocess.run(['iverilog', '-g2012', '-I', HERE, '-o', os.path.join(d, 'tb.vvp'), os.path.join(HERE, 'tb_dab_ofdm.v'),
-                os.path.join(HERE, 'skypluto_dab_ofdm.v')], check=True)
+if os.environ.get('TOP') == '1':
+    # the whole exciter in DAB mode (tb_dab_top.v), with the library's copy of skypluto_dab_ofdm (must equal this directory's)
+    LIB = os.path.normpath(os.path.join(HERE, '..', '..', 'hdl', 'library', 'skypluto_wfm'))
+    for f in ('skypluto_dab_ofdm.v', 'skypluto_dab_twiddle.vh', 'skypluto_dab_interp_coefs.vh'):
+        assert open(os.path.join(HERE, f), 'rb').read() == open(os.path.join(LIB, f), 'rb').read(), f + ' differs from the library copy'
+    srcs = [os.path.join(HERE, 'tb_dab_top.v')] + sorted(os.path.join(LIB, f) for f in os.listdir(LIB) if f.endswith('.v'))
+    subprocess.run(['iverilog', '-g2012', '-I', LIB, '-o', os.path.join(d, 'tb.vvp')] + srcs, check=True)
+else:
+    subprocess.run(['iverilog', '-g2012', '-I', HERE, '-o', os.path.join(d, 'tb.vvp'), os.path.join(HERE, 'tb_dab_ofdm.v'),
+                    os.path.join(HERE, 'skypluto_dab_ofdm.v')], check=True)
 subprocess.run(['vvp', '-n', os.path.join(d, 'tb.vvp'), '+WORDS=' + os.path.join(d, 'w.hex'), '+X=' + os.path.join(d, 'x.txt'),
-                '+Y=' + os.path.join(d, 'y.txt'), '+NCLK=%d' % nclk], check=True)
+                '+Y=' + os.path.join(d, 'y.txt'), '+NCLK=%d' % nclk], check=True, cwd=HERE)
 hx = np.loadtxt(os.path.join(d, 'x.txt'), dtype=np.int64)
 hy = np.loadtxt(os.path.join(d, 'y.txt'), dtype=np.int64)
 mr, mi = M.frames_2048(w)

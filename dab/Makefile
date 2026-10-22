@@ -8,7 +8,10 @@ SRC     := src/dab_crc.c src/dab_rs.c src/dabplus_sf.c src/aac_mdct.c src/aac_hu
 OBJ     := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 PY      ?= python3
 
-all: $(BUILD)/test_sf $(BUILD)/test_mdct $(BUILD)/enc_file $(BUILD)/dab_tx_file
+all: $(BUILD)/test_sf $(BUILD)/test_mdct $(BUILD)/enc_file $(BUILD)/dab_tx_file $(BUILD)/skypluto-dab
+
+$(BUILD)/skypluto-dab: app/skypluto_dab.c $(OBJ) | $(BUILD)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS) -lpthread
 
 $(BUILD)/dab_tx_file: tests/dab_tx_file.c $(OBJ) | $(BUILD)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
