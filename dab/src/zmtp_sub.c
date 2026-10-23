@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Minimal ZeroMQ (ZMTP 3.0, NULL security) SUB endpoint that LISTENS for a publisher, as ODR-DabMux's "zmq+tcp://*:port"
-// input does for ODR-AudioEnc. Own implementation of the wire protocol (RFC 23/ZMTP); no libzmq. One publisher at a time.
+// input does for ODR-AudioEnc. Own implementation of the wire protocol (RFC 23/ZMTP); no libzmq. One publisher at a time: a new
+// connection replaces the old one, and a connection on which nothing arrives for IDLE_S seconds is closed (a sender that went
+// away without closing, or a connection that a NAT router forgot), so that the publisher's automatic reconnection gets through.
 #define _GNU_SOURCE
 #include "zmtp_sub.h"
 #include <arpa/inet.h>
@@ -11,7 +13,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
+
+#define IDLE_S 10.0
 
 enum { ST_GREET, ST_HANDSHAKE, ST_RUN };
 
@@ -20,7 +25,10 @@ struct zmtp_sub {
     uint8_t *buf; size_t len, cap;          // received, not yet parsed
     uint8_t *msg; size_t mlen, mcap;        // the message being assembled (frames with the MORE flag)
     char peer[48];
+    double last_rx;                         // when the last bytes arrived (monotonic seconds)
 };
+
+static double mono_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 
 static int send_all(int fd, const uint8_t *p, size_t n){
     while (n){ ssize_t w = send(fd, p, n, MSG_NOSIGNAL); if (w < 0){ if (errno == EINTR) continue; if (errno == EAGAIN) { usleep(1000); continue; } return -1; } p += w; n -= (size_t)w; }
@@ -61,22 +69,27 @@ static int send_ready_and_subscribe(zmtp_sub *z){
 }
 
 int zmtp_sub_poll(zmtp_sub *z, uint8_t *out, size_t outcap){
-    if (z->cfd < 0){
+    {   // a waiting connection: the newest publisher wins (the old connection is often dead without having been closed)
         struct sockaddr_in p; socklen_t pl = sizeof p;
         int c = accept4(z->lfd, (struct sockaddr *)&p, &pl, SOCK_CLOEXEC);
-        if (c < 0) return 0;
-        fcntl(c, F_SETFL, O_NONBLOCK); int one = 1; setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-        z->cfd = c; z->state = ST_GREET; z->len = 0; z->mlen = 0;
-        inet_ntop(AF_INET, &p.sin_addr, z->peer, sizeof z->peer);
-        if (send_greeting(z)){ drop_peer(z); return 0; }
+        if (c >= 0){
+            drop_peer(z);
+            fcntl(c, F_SETFL, O_NONBLOCK); int one = 1; setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+            setsockopt(c, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
+            z->cfd = c; z->state = ST_GREET; z->len = 0; z->mlen = 0; z->last_rx = mono_s();
+            inet_ntop(AF_INET, &p.sin_addr, z->peer, sizeof z->peer);
+            if (send_greeting(z)){ drop_peer(z); return 0; }
+        }
     }
+    if (z->cfd < 0) return 0;
     for (;;){                                                     // read what is there
         if (z->len == z->cap){ size_t nc = z->cap * 2; uint8_t *nb = realloc(z->buf, nc); if (!nb){ drop_peer(z); return -1; } z->buf = nb; z->cap = nc; }
         ssize_t r = recv(z->cfd, z->buf + z->len, z->cap - z->len, 0);
-        if (r > 0){ z->len += (size_t)r; continue; }
+        if (r > 0){ z->len += (size_t)r; z->last_rx = mono_s(); continue; }
         if (r == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)){ drop_peer(z); return -1; }
         break;
     }
+    if (mono_s() - z->last_rx > IDLE_S){ drop_peer(z); return -1; }   // silent too long: closed, the publisher reconnects
     size_t pos = 0; int got = 0;
     if (z->state == ST_GREET){
         if (z->len < 64) return 0;
