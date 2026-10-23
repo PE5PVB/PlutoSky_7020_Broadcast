@@ -209,6 +209,15 @@ the last one counts). `DTN` restarts the multiplex (receivers lose the ensemble 
 meaningless. `F` takes the channel's centre frequency in Hz (Band III: 1 kHz resolution, e.g. 5A = `F 174928000`); `P` is the RMS
 power of the FM carrier setting, and the DAB ensemble lies about 16 dB below it (crest factor).
 
+**A second service from outside.** When `/mnt/jffs2/dab-ext.conf` exists (lines `port=2491`, `br=128`, `sid=8F02`,
+`label=…`), the ensemble carries a second service: complete DAB+ super frames (with their PAD) as ODR-AudioEnc sends them
+over ZeroMQ (`odr-audioenc … -o tcp://<pluto>:2491`; ZMTP 3, NULL security, no CURVE). They are buffered for ~0.6 s;
+when none arrive a silent super frame of the same bitrate goes out, and the clock difference with the remote encoder is
+taken up by dropping a super frame now and then. `br` must match the encoder's bitrate (super frames of another size are
+counted as `x2bad` and not used). The file is read when the program starts (at `M DAB`). `?DAB` then also shows
+`x2=` buffered super frames, `x2rx` received, `x2sil` sent silent, `x2drop` dropped, `x2bad` unusable and `x2from` the sender.
+Anyone who can reach the port can feed this service: open it to the internet only towards the encoder's address.
+
 Switching to DAB: `E 0` → `F <channel>` → the encoder's I2S to 48 kHz stereo → `M DAB` → `E 1`. Back: `E 0` → `M FM` → I2S to
 MPX 192 kHz → `F <FM frequency>` → `E 1`. After a restart of the Pluto (see `up`), send `M` and the D settings with the rest.
 

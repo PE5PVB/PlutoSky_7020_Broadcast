@@ -1249,6 +1249,7 @@ static void set_level(double dbm){
 #define DAB_DLS     "/tmp/dab_dls.txt"
 #define DAB_STATUS  "/tmp/dab_status"
 #define DAB_LOG     "/tmp/dab.log"
+#define DAB_EXT     "/mnt/jffs2/dab-ext.conf"   // present: a second service from outside (port= br= sid= label=), see dab/src/ext_stream.h
 #define DAB_CFG     "/tmp/dab_cfg"     // read by the running program every super frame: labels at once, bitrate/SId announced
 #define DAB_TB_KHZ  3000
 static int    has_dab = 0, dab_kbps = 96, dab_restarts = 0, dab_tone = 0;   // dab_tone: test tone in Hz instead of I2S (0 = I2S)
@@ -1284,6 +1285,8 @@ static void dab_start(void){
         prctl(PR_SET_PDEATHSIG, SIGTERM);                         // the daemon ends: the program ends too and leaves the exciter in FM
         struct sched_param sp; sp.sched_priority = 0; sched_setscheduler(0, SCHED_OTHER, &sp);   // not the daemon's real-time class
         int lf = open(DAB_LOG, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (lf >= 0){ dup2(lf, 2); close(lf); }
+        if (access(DAB_EXT, R_OK) == 0)                           // a second service, encoded outside and sent over ZeroMQ (see skypluto-dab -x)
+            execl(DAB_BIN, DAB_BIN, "-v", "-b", br, "-s", dab_svc, "-e", dab_ens, "-i", sid, "-t", DAB_DLS, "-S", DAB_STATUS, "-c", DAB_CFG, "-T", tone, "-x", DAB_EXT, (char *)NULL);
         execl(DAB_BIN, DAB_BIN, "-v", "-b", br, "-s", dab_svc, "-e", dab_ens, "-i", sid, "-t", DAB_DLS, "-S", DAB_STATUS, "-c", DAB_CFG, "-T", tone, (char *)NULL);
         _exit(127);
     }

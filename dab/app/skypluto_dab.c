@@ -18,6 +18,7 @@
 // 0x70 = audio samples waiting, 0x08 = carrier level (16 bit, 65535 = x1), 0x00 bit 0 = enable.
 #include "../src/dabplus_enc.h"
 #include "../src/dab_mod.h"
+#include "../src/ext_stream.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -59,7 +60,7 @@ static unsigned ph_fill(void){ return atomic_load(&ph_w) - atomic_load(&ph_r); }
 
 // ---- configuration and state ---------------------------------------------------------------------------------------------------
 static int   o_kbps = 96, o_gain = 1, o_level = -1, o_verbose = 0;
-static const char *o_svc = "PlutoSky", *o_ens = "PlutoSky DAB", *o_dls = NULL, *o_dlsfile = NULL, *o_status = NULL, *o_cfgfile = NULL;
+static const char *o_svc = "PlutoSky", *o_ens = "PlutoSky DAB", *o_dls = NULL, *o_dlsfile = NULL, *o_status = NULL, *o_cfgfile = NULL, *o_extconf = NULL;
 static unsigned o_sid = 0x8F01;
 static const char *o_simin = NULL, *o_simout = NULL;
 static double o_ppm = 0.0, o_secs = 0.0, o_tone = 0.0;
@@ -179,6 +180,8 @@ static void cfg_poll(void){
     }
 }
 
+static ext_stream *g_ext = NULL; static uint8_t g_ext_sf[120 * 24];   // a second service, encoded outside (-x)
+
 static double now_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 static double g_t_enc = 0.0, g_t_mod = 0.0;   // seconds spent in the AAC encoder and in the DAB multiplex/modulation (-v)
 
@@ -222,10 +225,11 @@ static int produce_superframe(void){
     }
     dls_poll(g_enc);
     if (dabplus_enc_superframe(g_enc, g_pcm, g_sf)) return -1;
+    if (g_ext) memcpy(g_ext_sf, ext_next(g_ext), (size_t)(120 * ext_kbps(g_ext) / 8));   // the outside service's next super frame (or silence)
     double t1 = now_s(); g_t_enc += t1 - t0;
     int frames = 0;
     for (int k = 0; k < 5; k++){
-        const uint8_t *lf[1] = { g_sf + k * g_lfb };
+        const uint8_t *lf[2] = { g_sf + k * g_lfb, g_ext_sf + k * (g_ext ? 3 * ext_kbps(g_ext) : 0) };
         if (dab_mod_push_cif(g_mod, lf)){
             const uint32_t *w = dab_mod_phase_words(g_mod);
             unsigned p = atomic_load(&ph_w);
@@ -278,6 +282,7 @@ static void hw_restart(void){
 }
 static unsigned long long g_in_total = 0; static unsigned g_in_nmax = 0;   // audio words read from the FPGA, the largest batch (-v)
 static void hw_io_step(void){
+    if (g_ext) ext_poll(g_ext);                                      // the outside service's super frames from the network
     unsigned n = o_tone > 0 ? 0 : rd(R_AUDCNT);                       // with the test tone the I2S audio is left in the FIFO
     // Bitstream B1D0001E (fixed in B1D0001F) reports 1024 while the FIFO's write pointer has wrapped and its read pointer not yet (23 times per second
     // at 48 kHz, for a few ms): never read more than can have arrived since the last read (98 % of 48 kHz; the rest stays for the
@@ -320,7 +325,7 @@ static void usage(void){
 
 int main(int argc, char **argv){
     int c;
-    while ((c = getopt(argc, argv, "b:s:e:i:d:t:c:g:L:T:S:vf:o:p:n:h")) != -1){
+    while ((c = getopt(argc, argv, "b:s:e:i:d:t:c:x:g:L:T:S:vf:o:p:n:h")) != -1){
         switch (c){
         case 'b': o_kbps = atoi(optarg); break;
         case 's': o_svc = optarg; break;
@@ -333,6 +338,7 @@ int main(int argc, char **argv){
         case 'i': o_sid = (unsigned)strtoul(optarg, NULL, 16) & 0xFFFF; break;
         case 'S': o_status = optarg; break;
         case 'c': o_cfgfile = optarg; break;
+        case 'x': o_extconf = optarg; break;
         case 'v': o_verbose = 1; break;
         case 'f': o_simin = optarg; break;
         case 'o': o_simout = optarg; break;
@@ -349,6 +355,15 @@ int main(int argc, char **argv){
     ens.ecc = 0xE3; ens.lto_halfhours = 2; ens.nsvc = 1;
     ens.svc[0].sid = (uint16_t)o_sid; snprintf(ens.svc[0].label, sizeof ens.svc[0].label, "%s", o_svc);
     ens.svc[0].bitrate = o_kbps; ens.svc[0].prot_level = 3;
+    if (o_extconf){
+        g_ext = ext_open(o_extconf);
+        if (!g_ext) fprintf(stderr, "outside service: %s unusable (port in use, bad bitrate?), going on without it\n", o_extconf);
+        else {
+            ens.nsvc = 2; ens.svc[1].sid = (uint16_t)ext_sid(g_ext); snprintf(ens.svc[1].label, sizeof ens.svc[1].label, "%s", ext_label(g_ext));
+            ens.svc[1].bitrate = ext_kbps(g_ext); ens.svc[1].prot_level = 3;
+            fprintf(stderr, "outside service \"%s\" (SId %04X, %d kbit/s) from %s\n", ext_label(g_ext), ext_sid(g_ext), ext_kbps(g_ext), o_extconf);
+        }
+    }
     g_mod = dab_mod_open(&ens); g_ens = ens;
     if (!g_enc || !g_mod){ fprintf(stderr, "bad configuration\n"); return 2; }
     dab_mod_set_phases_only(g_mod, 1);                               // the FPGA does the OFDM
@@ -372,6 +387,7 @@ int main(int argc, char **argv){
                 if (aud_fill() < AUD_RING - RS_TAPS){ unsigned w = atomic_load(&aud_w); aud_ring[w % AUD_RING][0] = s[0]; aud_ring[w % AUD_RING][1] = s[1]; atomic_store(&aud_w, w + 1); }
                 else atomic_fetch_add(&st_audio_ovf, 1);
             }
+            if (g_ext) ext_poll(g_ext);
             while (producer_wants()) if (produce_superframe() < 0) return 1;
             wacc += WORDS_PER_S * 0.004; int take = (int)wacc; wacc -= take;   // the FPGA consumes
             if ((unsigned)take > fifo){ if (words > FRAME_WORDS) atomic_fetch_add(&st_underflow, 1); fifo = 0; } else fifo -= take;
@@ -426,14 +442,22 @@ int main(int argc, char **argv){
             char tmp[256]; snprintf(tmp, sizeof tmp, "%s.new", o_status);
             FILE *sf = fopen(tmp, "w");
             if (sf){
-                fprintf(sf, "fifo=%u uf=%u rst=%u aud=%u ppm=%+.0f sil=%u cpu=%.0f\n", rd(R_PHASE) & 0x3FFF, atomic_load(&st_underflow), atomic_load(&st_resets),
+                fprintf(sf, "fifo=%u uf=%u rst=%u aud=%u ppm=%+.0f sil=%u cpu=%.0f", rd(R_PHASE) & 0x3FFF, atomic_load(&st_underflow), atomic_load(&st_resets),
                         aud_fill(), g_ppm_now, atomic_load(&st_silence), 100 * (g_t_enc + g_t_mod) / t);
+                if (g_ext){   // the outside service: buffered super frames, received / sent silent / dropped / not usable, its sender
+                    ext_stats es; ext_get_stats(g_ext, &es);
+                    fprintf(sf, " x2=%d x2rx=%lu x2sil=%lu x2drop=%lu x2bad=%lu x2from=%s", es.fill, es.received, es.silent, es.dropped, es.bad, es.peer ? es.peer : "-");
+                }
+                fputc('\n', sf);
                 fclose(sf); rename(tmp, o_status);
             }
         }
         if (o_verbose && t - last >= 5.0){
             static unsigned long long in_last = 0;
             fprintf(stderr, "    audio in %.0f samples/s, largest batch %u\n", (g_in_total - in_last) / (t - last), g_in_nmax);
+            if (g_ext){ ext_stats es; ext_get_stats(g_ext, &es);
+                fprintf(stderr, "    outside service: %d buffered, %lu received, %lu sent, %lu silent, %lu dropped, %lu unusable, from %s, level %d/%d\n",
+                        es.fill, es.received, es.used, es.silent, es.dropped, es.bad, es.peer ? es.peer : "-", es.level_l, es.level_r); }
             in_last = g_in_total; g_in_nmax = 0;
             last = t;
             fprintf(stderr, "t=%.0f s audio %u ratio %+.1f ppm phase queue %u OFDM FIFO %u silence %u resync %u underflow %u restarts %u audio-ovf %u cpu enc %.0f%% mux %.0f%%\n",
