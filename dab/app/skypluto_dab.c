@@ -196,7 +196,7 @@ static int produce_superframe(void){
         unsigned need = (unsigned)ceil(SF_SAMPLES * ratio + rs_pos) + RS_TAPS;
         // start (and restart after a gap) only with AUD_TARGET in the buffer
         if (!g_primed && aud_fill() >= AUD_TARGET + need) g_primed = 1;
-        if (g_primed && aud_fill() < need){ g_primed = 0; g_integ = 0; g_ppm_now = 0; }
+        if (g_primed && aud_fill() < need) g_primed = 0;            // a gap in the audio: silence until the buffer is full again; the clock estimate (g_integ) stays
         if (g_primed){
             // far too much audio (the start, or a stall of this program): skip the excess instead of slewing it away at the rate limit.
             // Once running this is judged on the latency: the audio buffer alone swings by thousands of samples with the 120/96 ms

@@ -57,6 +57,13 @@ Pluto → encoder :  OK<LF> | ERR <reason><LF> | <key>=<val> …<LF>
 
 One line per command, one line per reply. Unknown command → `ERR parse`; unknown query → `ERR query`.
 
+**Check sum (optional, recommended).** A line may end in `*hh`: two hex digits, the XOR of all characters before the `*`
+(as in NMEA), e.g. `E 1*54`, `DSV PicoAudio*02`. A line whose sum does not match is refused with `ERR crc` and changes
+nothing; send it again. Lines without a sum are accepted as before. A bit error on the link can otherwise turn a label
+into another one or a digit of `F` into another frequency, which no range check can see. Values that are always checked
+anyway: `E`/`B`/`G`/`CT`/`NULLAUTO` take only `0` or `1`, the numeric commands only a well-formed number (else `ERR range`).
+A DLS text that itself ends in `*` and two hex digits must carry a sum.
+
 **Reply before execution.** `E`, `F` and `P` are answered with `OK` immediately (within a few ms) and only then executed: the execution
 (`iio_attr` to the AD9361) takes 130–280 ms, especially when the mask monitor loads the CPU, and that would otherwise approach the 300 ms timeout. Consequence:
 an `OK` means *received and accepted*, not *already executed*. Whether the effect has taken place can be seen from `?S` (`att=`, `tx=`, `f=`) and `?P`. Only a

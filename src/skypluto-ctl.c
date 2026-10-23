@@ -25,6 +25,7 @@
 // Build (buildroot toolchain, dynamic):
 //   arm-linux-gnueabihf-gcc -O2 -Wall -o skypluto-ctl skypluto-ctl.c -lm
 // =============================================================================
+#include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1323,6 +1324,15 @@ static int dab_label_ok(const char *s){ size_t n = strlen(s); if (n < 1 || n > 1
 static void handle(char *line){
     while (*line==' '||*line=='\t') line++;
     if (*line==0) return;
+    // optional check sum as in NMEA: "<command>*hh", hh = XOR of all characters before the '*' in hex. A line that carries one
+    // and does not match is refused (ERR crc): a bit error in a text (a label, DLS) or a digit cannot be seen otherwise.
+    { char *star = strrchr(line, '*'); size_t n = strlen(line);
+      if (star && line + n - star == 3 && isxdigit((unsigned char)star[1]) && isxdigit((unsigned char)star[2])){
+          unsigned want = (unsigned)strtoul(star + 1, NULL, 16), x = 0;
+          for (const char *c = line; c < star; c++) x ^= (unsigned char)*c;
+          if (x != want){ fprintf(stderr, "   !! regel '%s': controlesom klopt niet, genegeerd\n", line); fflush(stderr); tx_str("ERR crc\n"); return; }
+          *star = 0; while (star > line && (star[-1] == ' ' || star[-1] == '\t')) *--star = 0;
+      } }
     // queries and F repeat every poll cycle: do not log (ramdisk log)
     if (line[0] != '?' && line[0] != 'F'){ fprintf(stderr,"rx: %s\n", line); fflush(stderr); }
 
