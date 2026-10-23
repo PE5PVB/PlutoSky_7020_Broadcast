@@ -18,7 +18,7 @@ N, K, TG, TNULL, NSYM = 2048, 1536, 504, 2656, 76
 C0, C1 = 16384, 11585
 DW, TWS = 18, 16
 SCALED = [s < 6 for s in range(11)]
-NTAP, CB = 72, 17
+NTAP, CB = 144, 17
 
 CONST = np.array([(C0, 0), (C1, C1), (0, C0), (-C1, C1), (-C0, 0), (-C1, -C1), (0, -C0), (C1, -C1)], np.int64)
 BIN = np.array([a + 1 if a < K // 2 else a + 512 for a in range(K)])
@@ -31,7 +31,9 @@ def sat(v, bits):
 
 def interp_coefs():
     from scipy.signal import remez
-    h = remez(NTAP, [0, 770e3, 1280e3, 3.072e6], [1, 0], weight=[1, 30], fs=6.144e6)
+    # passband to the outermost carriers (768 kHz, ripple 0.1 dB), stopband from 900 kHz: besides the images this also takes the
+    # sidelobes of the rectangular OFDM symbols (the 'shoulders': -47 dB at 850 kHz, -73 dB at 970 kHz instead of -32 / -38 dB)
+    h = remez(NTAP, [0, 768e3, 900e3, 3.072e6], [1, 0], weight=[1, 20], fs=6.144e6)
     return np.round(h * 3 * 2 ** CB).astype(np.int64)
 HI = interp_coefs()
 

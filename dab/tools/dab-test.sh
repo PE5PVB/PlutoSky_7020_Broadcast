@@ -17,7 +17,7 @@ F=${1:?usage: dab-test.sh <frequency Hz> [tone Hz | i2s]}
 T=${2:-1000}
 
 [ -x $D ] || { echo "$D is missing"; exit 1; }
-$C -c "?V" | grep -qE "bit=B1D0001[E-F]" || { echo "the DAB bitstream (B1D0001E or later) is not loaded: $($C -c '?V')"; exit 1; }
+$C -c "?V" | grep -qE "bit=B1D000(1E|1F|2.)" || { echo "the DAB bitstream (B1D0001E or later) is not loaded: $($C -c '?V')"; exit 1; }
 
 tb_old=$($C -c "?TB" | sed -n 's/^tb=\([0-9]*\).*/\1/p'); tb_old=${tb_old:-1600}
 # a TB change and a tune both close the transmitter, calibrate and open it again; a tune sent while the TB calibration

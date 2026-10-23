@@ -8,7 +8,8 @@
 //   - computes the 2048-point inverse FFT (radix-2, decimation in frequency, 18 bit, one butterfly per clock, three
 //     memory banks: X and Y alternate as source/destination per stage, the third is being played out),
 //   - plays out per frame a null symbol (2656 zeros) and 76 x (504 cyclic prefix + 2048) samples at 2.048 MS/s,
-//   - interpolates 3/2 to 3.072 MS/s (72-tap polyphase FIR, 6 products per lane per clock over 4 clocks).
+//   - interpolates 3/2 to 3.072 MS/s (144-tap polyphase FIR, 12 products per lane per clock over 4 clocks, pipelined),
+//     flat to the outermost carriers and stopping from 900 kHz (no images, and the OFDM sidelobes around the ensemble cut).
 // clk is the AD9361 data clock l_clk (12.288 MHz); the output changes every 4 clocks (3.072 MS/s), like the FM path.
 // Per symbol: load ~1100 + 11 stages x 1031 clocks = ~12.5k clocks (1.02 ms) against a symbol period of 1.246 ms.
 // =============================================================================
@@ -235,43 +236,58 @@ module skypluto_dab_ofdm (
         dbg_x_valid <= x_new; dbg_x_re <= xr; dbg_x_im <= xi;
     end
 
-    // ---------------------------------------------------------------- 3/2 interpolator (72 taps, 24 per phase)
+    // ---------------------------------------------------------------- 3/2 interpolator (144 taps, 48 per phase)
+    // The filter keeps the carriers flat to 768 kHz and stops from 900 kHz: it removes the images and also the sidelobes of the
+    // rectangular OFDM symbols around the ensemble (the "shoulders").
     `include "skypluto_dab_interp_coefs.vh"        // function signed [17:0] c_int(input integer k) (generated)
-    reg signed [15:0] dl_r [0:23], dl_i [0:23];     // the last 24 input samples, dl[0] newest
-    reg signed [15:0] sn_r [0:23], sn_i [0:23];     // snapshot for the output being computed
-    initial for (ii = 0; ii < 24; ii = ii + 1) begin dl_r[ii] = 0; dl_i[ii] = 0; sn_r[ii] = 0; sn_i[ii] = 0; end
+    localparam integer TPP = 48;                    // taps per phase
+    reg signed [15:0] dl_r [0:TPP-1], dl_i [0:TPP-1];   // the last 48 input samples, dl[0] newest
+    reg signed [15:0] sn_r [0:TPP-1], sn_i [0:TPP-1];   // snapshot for the output being computed
+    initial for (ii = 0; ii < TPP; ii = ii + 1) begin dl_r[ii] = 0; dl_i[ii] = 0; sn_r[ii] = 0; sn_i[ii] = 0; end
     always @(posedge clk) if (x_new) begin : shift
         integer k;
-        for (k = 23; k > 0; k = k - 1) begin dl_r[k] <= dl_r[k - 1]; dl_i[k] <= dl_i[k - 1]; end
+        for (k = TPP - 1; k > 0; k = k - 1) begin dl_r[k] <= dl_r[k - 1]; dl_i[k] <= dl_i[k - 1]; end
         dl_r[0] <= xr; dl_i[0] <= xi;
     end
     // the inputs enter dl at the end of c12 = 3 and 9; outputs r = 0, 1, 2 (phases 0, 2, 1) start at c12 = 4, 8, 0 with dl[0]
-    // holding their base sample x[2p], x[2p], x[2p+1]; each takes 4 clocks with 6 taps per clock
+    // holding their base sample x[2p], x[2p], x[2p+1]; each takes 4 clocks with 12 taps per clock, as two registered sums of 6
+    // (the same depth per clock as 6 taps) that are accumulated one clock later
     reg        mac_act = 0;
     reg [1:0]  mac_c = 0, mac_ph = 0;
+    reg        p_val = 0, p_first = 0, p_last = 0;  // the pipeline stage: partial sums of this clock's 12 products
+    reg signed [39:0] pa_r = 0, pb_r = 0, pa_i = 0, pb_i = 0;
     reg signed [39:0] acc_r = 0, acc_i = 0;
     always @(posedge clk) begin : mac
         integer k, t;
-        reg signed [39:0] sr, si;
+        reg signed [39:0] sar, sbr, sai, sbi, nr, ni;
         if (c12 == 4'd4 || c12 == 4'd8 || c12 == 4'd0) begin
-            for (k = 0; k < 24; k = k + 1) begin sn_r[k] <= dl_r[k]; sn_i[k] <= dl_i[k]; end
+            for (k = 0; k < TPP; k = k + 1) begin sn_r[k] <= dl_r[k]; sn_i[k] <= dl_i[k]; end
             mac_ph <= (c12 == 4'd4) ? 2'd0 : (c12 == 4'd8) ? 2'd2 : 2'd1;
             mac_act <= 1; mac_c <= 0;
         end
+        // stage 1: 12 products of this clock, as two sums of 6
+        p_val <= mac_act; p_first <= mac_act && mac_c == 2'd0; p_last <= mac_act && mac_c == 2'd3;
         if (mac_act) begin
-            sr = 0; si = 0;
+            sar = 0; sbr = 0; sai = 0; sbi = 0;
             for (k = 0; k < 6; k = k + 1) begin
-                t = 6 * mac_c + k;
-                sr = sr + c_int(mac_ph + 3 * t) * sn_r[t];
-                si = si + c_int(mac_ph + 3 * t) * sn_i[t];
+                t = 12 * mac_c + k;
+                sar = sar + c_int(mac_ph + 3 * t) * sn_r[t];
+                sai = sai + c_int(mac_ph + 3 * t) * sn_i[t];
+                sbr = sbr + c_int(mac_ph + 3 * (t + 6)) * sn_r[t + 6];
+                sbi = sbi + c_int(mac_ph + 3 * (t + 6)) * sn_i[t + 6];
             end
-            acc_r <= (mac_c == 2'd0 ? 40'sd0 : acc_r) + sr;
-            acc_i <= (mac_c == 2'd0 ? 40'sd0 : acc_i) + si;
+            pa_r <= sar; pb_r <= sbr; pa_i <= sai; pb_i <= sbi;
             mac_c <= mac_c + 2'd1;
-            if (mac_c == 2'd3) begin
-                mac_act <= (c12 == 4'd4 || c12 == 4'd8 || c12 == 4'd0);
-                i_out <= enable ? sat16((acc_r + sr + 40'sd65536) >>> 17) : 16'sd0;
-                q_out <= enable ? sat16((acc_i + si + 40'sd65536) >>> 17) : 16'sd0;
+            if (mac_c == 2'd3) mac_act <= (c12 == 4'd4 || c12 == 4'd8 || c12 == 4'd0);
+        end
+        // stage 2: accumulate; the 4th step of an output gives the sample
+        if (p_val) begin
+            nr = (p_first ? 40'sd0 : acc_r) + pa_r + pb_r;
+            ni = (p_first ? 40'sd0 : acc_i) + pa_i + pb_i;
+            acc_r <= nr; acc_i <= ni;
+            if (p_last) begin
+                i_out <= enable ? sat16((nr + 40'sd65536) >>> 17) : 16'sd0;
+                q_out <= enable ? sat16((ni + 40'sd65536) >>> 17) : 16'sd0;
             end
         end
     end
