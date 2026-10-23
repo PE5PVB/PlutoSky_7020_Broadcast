@@ -217,9 +217,9 @@ ODR-AudioEnc sends them over ZeroMQ (`odr-audioenc … -o tcp://<pluto>:<port>`;
 unchanged. At most one service is encoded on the Pluto; the sum must fit in 864 CU. `DBR`, `DSV` and `DSI` change the service
 encoded on the Pluto (`ERR nolocal` when the layout has none, `ERR range` when it would no longer fit), `DEN` the ensemble label;
 they are stored in the same file. Outside streams are buffered ~0.6 s; when none arrive a silent super frame of the same
-bitrate goes out, and a super frame is dropped now and then when the remote clock runs ahead. Their bitrate must match the
-layout (super frames of another size are counted as unusable). `?DAB` then shows `svc=` services, `cu=` capacity in use, `chg=`
-an announced reconfiguration, and per outside service `z<n>=<port>:<buffered>/<received>/<silent>/<dropped>/<unusable>/<sender>`.
+bitrate goes out, and a super frame is dropped now and then when the remote clock runs ahead. Their bitrate is the sender's
+(`odr-audioenc -b`): the Pluto measures it from the super frame size and, when it changes, takes it into the layout by itself (EEP-B falls back to the same EEP-A level when the new bitrate is no multiple of 32; when it no longer fits the 864 CU it stays and is reported). The web interface shows it but does not set it. `?DAB` then shows `svc=` services, `cu=` capacity in use, `chg=`
+an announced reconfiguration, and per outside service `z<n>=<port>:<buffered>/<received>/<silent>/<dropped>/<unusable>/<sender>/<kbit/s the sender uses>`.
 Anyone who can reach a ZeroMQ port can feed that service: open it to the internet only towards the encoder's address.
 
 Switching to DAB: `E 0` → `F <channel>` → the encoder's I2S to 48 kHz stereo → `M DAB` → `E 1`. Back: `E 0` → `M FM` → I2S to

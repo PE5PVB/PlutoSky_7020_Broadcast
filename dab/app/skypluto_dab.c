@@ -250,11 +250,12 @@ static void apply_switch(void){
         nrt[i].x = NULL;
         if (g_next.s[i].src != MUX_SRC_ZMQ) continue;
         for (int j = 0; j < g_mux.n; j++)
-            if (!kept[j] && g_rt[j].x && g_mux.s[j].src == MUX_SRC_ZMQ && g_mux.s[j].port == g_next.s[i].port && g_mux.s[j].kbps == g_next.s[i].kbps){
-                nrt[i].x = g_rt[j].x; kept[j] = 1; break;
+            if (!kept[j] && g_rt[j].x && g_mux.s[j].src == MUX_SRC_ZMQ && g_mux.s[j].port == g_next.s[i].port){
+                nrt[i].x = g_rt[j].x; kept[j] = 1; break;          // the same sender: the connection stays, only the super frame size may change
             }
     }
     pthread_mutex_lock(&g_rt_lock);
+    for (int i = 0; i < g_next.n; i++) if (nrt[i].x && ext_set_kbps(nrt[i].x, g_next.s[i].kbps)) fprintf(stderr, "service %d: bitrate %d kbit/s refused by its stream\n", i + 1, g_next.s[i].kbps);
     for (int j = 0; j < g_mux.n; j++) if (g_rt[j].x && !kept[j]){ ext_close(g_rt[j].x); g_rt[j].x = NULL; }
     for (int i = 0; i < g_next.n; i++) if (g_next.s[i].src == MUX_SRC_ZMQ && !nrt[i].x) nrt[i].x = open_stream(&g_next.s[i]);
     for (int i = 0; i < MUX_MAX_SVC; i++){ g_rt[i].x = i < g_next.n ? nrt[i].x : NULL; g_rt[i].silent_made = 0; }
@@ -407,7 +408,7 @@ static void hw_io_step(void){
     g_words_out += space;
 }
 
-// the outside services in the status line: z<n>=<port>:<buffered>/<received>/<silent>/<dropped>/<unusable>/<sender>
+// the outside services in the status line: z<n>=<port>:<buffered>/<received>/<silent>/<dropped>/<unusable>/<sender>/<kbit/s the sender uses>
 static void print_streams(FILE *f, int verbose){
     pthread_mutex_lock(&g_rt_lock);
     for (int i = 0; i < g_mux.n; i++){
@@ -415,7 +416,8 @@ static void print_streams(FILE *f, int verbose){
         ext_stats es; memset(&es, 0, sizeof es); if (g_rt[i].x) ext_get_stats(g_rt[i].x, &es);
         if (verbose) fprintf(f, "    service %d (%04X, port %d): %d buffered, %lu received, %lu sent, %lu silent, %lu dropped, %lu unusable, from %s\n",
                              i + 1, g_mux.s[i].sid, g_mux.s[i].port, es.fill, es.received, es.used, es.silent, es.dropped, es.bad, es.peer ? es.peer : "-");
-        else fprintf(f, " z%d=%d:%d/%lu/%lu/%lu/%lu/%s", i + 1, g_mux.s[i].port, es.fill, es.received, es.silent, es.dropped, es.bad, es.peer ? es.peer : "-");
+        else fprintf(f, " z%d=%d:%d/%lu/%lu/%lu/%lu/%s/%d", i + 1, g_mux.s[i].port, es.fill, es.received, es.silent, es.dropped, es.bad, es.peer ? es.peer : "-",
+                     g_rt[i].x ? es.kbps_in : 0);
     }
     pthread_mutex_unlock(&g_rt_lock);
 }

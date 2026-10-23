@@ -16,6 +16,7 @@ typedef struct {
     int fill;                                              // super frames waiting
     int level_l, level_r;                                  // the encoder's last audio levels (0..32767)
     const char *peer;                                      // the sender, or NULL
+    int kbps_in;                                           // the bitrate the sender uses (= the sub-channel's unless it changed)
 } ext_stats;
 
 // config file: port=<tcp port> br=<kbit/s> sid=<hex> label=<up to 16 chars> [sls=0|1, default 1] [file=<recorded messages, for the simulation>]
@@ -31,5 +32,7 @@ const char *ext_label(const ext_stream *e);
 void        ext_poll(ext_stream *e);                       // I/O side: take what arrived (non-blocking)
 const uint8_t *ext_next(ext_stream *e);                    // mux side: the next super frame (120 * kbps / 8 bytes), never NULL
 void        ext_get_stats(const ext_stream *e, ext_stats *s);
+// another bitrate for the sub-channel (the sender changed): what is buffered is dropped. Not while ext_poll() runs.
+int         ext_set_kbps(ext_stream *e, int kbps);
 
 #endif

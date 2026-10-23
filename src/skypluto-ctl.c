@@ -1292,6 +1292,39 @@ static int dab_mux_store(const mux_conf *c){
     return 0;
 }
 
+// A ZeroMQ service's bitrate is the sender's (ODR-AudioEnc -b): the program reports what arrives (z<n>=.../<kbit/s>) and a
+// different bitrate is taken into the layout, which the program then puts on the air through the announced reconfiguration.
+// EEP-B needs a multiple of 32: otherwise the same level of EEP-A. When it no longer fits the 864 CU it stays and is reported.
+static void dab_follow_streams(double now){
+    static double next = 0.0; static int refused_port = 0, refused_kbps = 0;
+    if (!dab_mode || dab_pid <= 0 || now < next) return;
+    next = now + 2.0;
+    char sl[700] = ""; FILE *sf = fopen(DAB_STATUS, "r");
+    if (!sf) return;
+    if (!fgets(sl, sizeof sl, sf)) sl[0] = 0;
+    fclose(sf);
+    if (strstr(sl, " chg=")) return;                              // a reconfiguration is under way: wait for it
+    for (char *t = strstr(sl, " z"); t; t = strstr(t + 2, " z")){
+        int idx = atoi(t + 2), port = 0; char *colon = strchr(t, ':'), *end = strchr(t + 1, ' ');
+        if (idx < 1 || idx > dmux.n || !colon || (end && colon > end)) continue;
+        port = atoi(strchr(t, '=') + 1);
+        char *slash = NULL; for (char *p = colon; *p && (!end || p < end); p++) if (*p == '/') slash = p;
+        int kin = slash ? atoi(slash + 1) : 0;
+        mux_service *s = &dmux.s[idx - 1];
+        if (s->src != MUX_SRC_ZMQ || s->port != port || kin <= 0 || kin == s->kbps) continue;
+        mux_conf c = dmux; mux_service *n = &c.s[idx - 1]; char err[160], txt[4096];
+        n->kbps = kin; if (n->prot > 4 && kin % 32) n->prot -= 4;
+        if (mux_format(&c, txt, sizeof txt) < 0 || mux_parse(txt, &c, err, sizeof err)){
+            if (refused_port != port || refused_kbps != kin){ fprintf(stderr, "   !! poort %d stuurt nu %d kbit/s: past niet (%s)\n", port, kin, err); fflush(stderr); refused_port = port; refused_kbps = kin; }
+            continue;
+        }
+        fprintf(stderr, "   -> poort %d stuurt nu %d kbit/s (was %d): overgenomen in de indeling\n", port, kin, s->kbps); fflush(stderr);
+        refused_port = refused_kbps = 0;
+        dab_mux_store(&c);
+        return;                                                   // one change at a time
+    }
+}
+
 // the TX bandwidth for this session only (not stored): recalibrates like TB when the transmitter is open
 static void tb_set_now(int khz){
     if (khz == tx_bw_khz) return;
@@ -2093,10 +2126,22 @@ static void web_handle(struct wconn *c){
             if (!xrw){ web_send(c->fd, 403, "text/plain", "no", 2, NULL); }
             else {
                 mux_conf nc; char err[160], r[200];
-                if (!has_dab) snprintf(r, sizeof r, "ERR this bitstream has no DAB");
-                else if (mux_parse(body, &nc, err, sizeof err)) snprintf(r, sizeof r, "ERR %s", err);
-                else if (dab_mux_store(&nc)) snprintf(r, sizeof r, "ERR the layout could not be written");
-                else snprintf(r, sizeof r, "OK %d services, %d of 864 CU%s", nc.n, mux_cu_total(&nc), dab_mode ? "" : " (DAB is off: takes effect with M DAB)");
+                int bad = !has_dab;
+                if (bad) snprintf(r, sizeof r, "ERR this bitstream has no DAB");
+                else if ((bad = mux_parse(body, &nc, err, sizeof err))) snprintf(r, sizeof r, "ERR %s", err);
+                else {
+                    // a ZeroMQ service keeps the bitrate its sender uses (as in the stored layout); a new port starts with what was sent
+                    for (int i = 0; i < nc.n; i++) if (nc.s[i].src == MUX_SRC_ZMQ) for (int j = 0; j < dmux.n; j++)
+                        if (dmux.s[j].src == MUX_SRC_ZMQ && dmux.s[j].port == nc.s[i].port){
+                            nc.s[i].kbps = dmux.s[j].kbps; if (nc.s[i].prot > 4 && nc.s[i].kbps % 32) nc.s[i].prot -= 4;
+                        }
+                    char t2[4096];
+                    if ((bad = mux_format(&nc, t2, sizeof t2) < 0 || mux_parse(t2, &nc, err, sizeof err))) snprintf(r, sizeof r, "ERR %s", err);
+                }
+                if (!bad){
+                    if (dab_mux_store(&nc)) snprintf(r, sizeof r, "ERR the layout could not be written");
+                    else snprintf(r, sizeof r, "OK %d services, %d of 864 CU%s", nc.n, mux_cu_total(&nc), dab_mode ? "" : " (DAB is off: takes effect with M DAB)");
+                }
                 web_send(c->fd, 200, "text/plain; charset=utf-8", r, strlen(r), NULL);
             }
         }
@@ -2433,7 +2478,7 @@ int main(int argc, char **argv){
             snprintf(pth, sizeof pth, "%s/out_altvoltage1_TX_LO_powerdown", phy_dir);
             if ((rf = fopen(pth, "r")) != NULL){ int pd = 1; if (fscanf(rf, "%d", &pd) != 1) pd = 1; fclose(rf); if (pd == 0 && cal_pid <= 0){ phy_write("out_altvoltage1_TX_LO_powerdown", "1"); lo_pd = 1; fprintf(stderr, "   !! zender dicht maar de TX-LO stond aan: uitgezet\n"); fflush(stderr); } }
           } }
-        dab_poll(now);
+        dab_poll(now); dab_follow_streams(now);
         if (!dab_mode && m_pid <= 0 && cal_pid <= 0 && !cal_pending && !tx_off && last_f > 0 && now >= m_next) measure_start();
         // mask monitor: only if no ALC measurement is running and the level/frequency has been stable for ~4 s. NOT dependent on an ALC reference:
         // at low TX levels (high attenuation) the TX_MONITOR is too weak for the ALC, and the mask monitor would otherwise never start.
