@@ -15,6 +15,7 @@ typedef struct {
     int      bitrate;                      // kbit/s, multiple of 8
     int      prot_level;                   // EEP-A protection level 1..4 (3 = rate 1/2, the usual one)
     int      pty;                          // programme type (0 = none)
+    int      sls;                          // 1: the PAD carries a MOT slideshow (signalled in FIG 0/13, else radios do not show it)
 } dab_service;
 
 typedef struct {

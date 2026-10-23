@@ -13,7 +13,7 @@
 #define HDR      12                        // ODR-AudioEnc's ZMQ frame header
 
 struct ext_stream {
-    int port, kbps, sfbytes; unsigned sid; char label[17]; char file[128];
+    int port, kbps, sfbytes, sls; unsigned sid; char label[17]; char file[128];
     zmtp_sub *z; FILE *sim;
     uint8_t *ring; atomic_uint w, r; int running;
     uint8_t *silence, *msg;
@@ -24,12 +24,13 @@ struct ext_stream {
 ext_stream *ext_open(const char *conf_file){
     FILE *f = fopen(conf_file, "r"); if (!f) return NULL;
     ext_stream *e = calloc(1, sizeof *e); if (!e){ fclose(f); return NULL; }
-    e->port = 2491; e->kbps = 128; e->sid = 0x8F02; snprintf(e->label, sizeof e->label, "Extern");
+    e->port = 2491; e->kbps = 128; e->sls = 1; e->sid = 0x8F02; snprintf(e->label, sizeof e->label, "Extern");
     char ln[160];
     while (fgets(ln, sizeof ln, f)){
         ln[strcspn(ln, "\r\n")] = 0;
         if (!strncmp(ln, "port=", 5)) e->port = atoi(ln + 5);
         else if (!strncmp(ln, "br=", 3)) e->kbps = atoi(ln + 3);
+        else if (!strncmp(ln, "sls=", 4)) e->sls = atoi(ln + 4) ? 1 : 0;
         else if (!strncmp(ln, "sid=", 4)) e->sid = (unsigned)strtoul(ln + 4, NULL, 16) & 0xFFFF;
         else if (!strncmp(ln, "label=", 6)) snprintf(e->label, sizeof e->label, "%.16s", ln + 6);
         else if (!strncmp(ln, "file=", 5)) snprintf(e->file, sizeof e->file, "%.127s", ln + 5);
@@ -53,6 +54,7 @@ ext_stream *ext_open(const char *conf_file){
 
 void ext_close(ext_stream *e){ if (!e) return; zmtp_sub_close(e->z); if (e->sim) fclose(e->sim); free(e->ring); free(e->silence); free(e->msg); free(e); }
 int ext_kbps(const ext_stream *e){ return e->kbps; }
+int ext_sls(const ext_stream *e){ return e->sls; }
 unsigned ext_sid(const ext_stream *e){ return e->sid; }
 const char *ext_label(const ext_stream *e){ return e->label; }
 

@@ -360,7 +360,7 @@ int main(int argc, char **argv){
         if (!g_ext) fprintf(stderr, "outside service: %s unusable (port in use, bad bitrate?), going on without it\n", o_extconf);
         else {
             ens.nsvc = 2; ens.svc[1].sid = (uint16_t)ext_sid(g_ext); snprintf(ens.svc[1].label, sizeof ens.svc[1].label, "%s", ext_label(g_ext));
-            ens.svc[1].bitrate = ext_kbps(g_ext); ens.svc[1].prot_level = 3;
+            ens.svc[1].bitrate = ext_kbps(g_ext); ens.svc[1].prot_level = 3; ens.svc[1].sls = ext_sls(g_ext);
             fprintf(stderr, "outside service \"%s\" (SId %04X, %d kbit/s) from %s\n", ext_label(g_ext), ext_sid(g_ext), ext_kbps(g_ext), o_extconf);
         }
     }
