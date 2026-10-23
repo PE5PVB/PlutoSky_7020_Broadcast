@@ -1288,14 +1288,16 @@ static void dab_stop(void){
     for (int i = 0; i < 40 && waitpid(dab_pid, &st, WNOHANG) == 0; i++) usleep(50000);
     if (waitpid(dab_pid, &st, WNOHANG) == 0){ kill(dab_pid, SIGKILL); waitpid(dab_pid, &st, 0); }
     dab_pid = -1;
-    wr(0x64, 0x2); usleep(20); wr(0x64, 0x0);                     // the exciter in FM, also when the program was killed
+    if (dab_mode) wr(0x64, 0x3);                                  // a restart: no output until the program runs again
+    else { wr(0x64, 0x2); usleep(20); wr(0x64, 0x0); }            // the exciter in FM, also when the program was killed
     unlink(DAB_STATUS);
 }
 // main loop: keep the program running while DAB is chosen (restart after a crash, at most every 2 s)
 static void dab_poll(double now){
     if (dab_pid > 0){
         int st; if (waitpid(dab_pid, &st, WNOHANG) == dab_pid){
-            dab_pid = -1; wr(0x64, 0x0);
+            dab_pid = -1;
+            wr(0x64, dab_mode ? 0x3 : 0x0);                   // in DAB mode: the OFDM block held in reset (no output) until the restart, not an FM carrier in Band III
             if (dab_mode){ dab_restarts++; dab_next = now + 2.0; fprintf(stderr, "   !! DAB-programma gestopt (status %d): opnieuw over 2 s\n", st); fflush(stderr); }
         }
     } else if (dab_mode && now >= dab_next) dab_start();

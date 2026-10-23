@@ -39,13 +39,18 @@ int dabplus_enc_frames(const dabplus_enc *e){ return e->n; }
 
 int dabplus_enc_superframe(dabplus_enc *e, const float *pcm, uint8_t *out){
     const int ch = e->cfg.stereo ? 2 : 1;
+    // the largest AU: what an AAC decoder must accept (6144 bits per channel), within our buffer
+    const int cap = 768 * ch < (int)sizeof e->au[0] ? 768 * ch : (int)sizeof e->au[0];
     int remaining = dabplus_payload_budget(&e->cfg);
     for (int i = 0; i < e->n; i++){
         const int left = e->n - 1 - i;
         int maxb = remaining - left * MIN_AU, target = remaining / (e->n - i), pad = 0;
-        if (left == 0){ target = remaining; pad = remaining; }
-        if (maxb > (int)sizeof e->au[i]) maxb = (int)sizeof e->au[i];
+        if (maxb > cap) maxb = cap;
         if (target > maxb) target = maxb;
+        // fill: what the AUs after this one cannot hold has to go into this one (after quiet AUs, at high bitrates, the
+        // last AU alone could not take the rest of the super frame); the last AU takes all that remains
+        const int need = remaining - left * cap;
+        if (need > 0){ pad = need > target ? need : target; if (pad > cap) return -1; maxb = pad; if (target > pad) target = pad; }
         if (i == 0){                                               // one DLS segment per super frame, in the first AU
             uint8_t padb[64]; int pl = dab_dls_next_pad(&e->dls, padb, sizeof padb);
             if (pl > 0) aacenc_set_dse(e->aac, padb, pl);

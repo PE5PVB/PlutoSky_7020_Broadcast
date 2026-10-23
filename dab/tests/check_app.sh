@@ -5,9 +5,10 @@
 # IQ at 2.048 MS/s, then welle-cli decodes them. Checks: the rate control locks, no underflow, and the audio comes out.
 #   tests/check_app.sh [ppm] [seconds]
 #   TONE=1000 tests/check_app.sh    the built-in test tone (-T) instead of the audio file: left TONE Hz, right 1.5 x TONE Hz
+#   BR=192 tests/check_app.sh      another bitrate (default 96 kbit/s)
 # Needs welle-cli (WELLE=<path>, LD_LIBRARY_PATH for its libraries) and numpy.
 set -e
-PPM=${1:-80}; SECS=${2:-30}; TONE=${TONE:-0}
+PPM=${1:-80}; SECS=${2:-30}; TONE=${TONE:-0}; BR=${BR:-96}
 WELLE=${WELLE:-welle-cli}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 W=$(mktemp -d)
@@ -19,7 +20,7 @@ l = sum(0.08 * np.sin(2 * np.pi * f * t) for f in (310, 1020, 3150, 7030))
 r = sum(0.08 * np.sin(2 * np.pi * f * t) for f in (440, 1500, 5000, 11000))
 np.stack([l, r], 1).astype(np.float32).tofile(sys.argv[1])
 EOF
-"$HERE/build/skypluto-dab" -f "$W/in.f32" -o "$W/ph.bin" -p "$PPM" -T "$TONE" -b 96 -s "PlutoSky Test" -e "PlutoSky DAB" -d "skypluto-dab simulatie" -v
+"$HERE/build/skypluto-dab" -f "$W/in.f32" -o "$W/ph.bin" -p "$PPM" -T "$TONE" -b "$BR" -s "PlutoSky Test" -e "PlutoSky DAB" -d "skypluto-dab simulatie" -v
 python3 - "$W/ph.bin" "$W/tx.cf32.iq" <<EOF
 import sys, numpy as np
 sys.path.insert(0, "$HERE/hdl")

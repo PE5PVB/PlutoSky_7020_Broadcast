@@ -343,7 +343,7 @@ int main(int argc, char **argv){
     if (m == MAP_FAILED){ perror("mmap"); return 1; }
     g_reg = (volatile uint32_t *)m;
     if (o_level >= 0) wr(R_LEVEL, (uint32_t)o_level);
-    wr(R_DAB, (uint32_t)(0x2 | (o_gain << 2)));                     // reset the OFDM block, FM stays on until the first frame is ready
+    wr(R_DAB, (uint32_t)(0x3 | (o_gain << 2)));                     // DAB mode with the OFDM block in reset: no output until the first frame is ready
     for (int i = 0; i < 2; i++) if (produce_superframe() < 0) return 1;
     wr(R_DAB, (uint32_t)(0x1 | (o_gain << 2)));                     // DAB mode
     while (rd(R_AUDCNT)) (void)rd(R_AUDIO);                           // stale audio
