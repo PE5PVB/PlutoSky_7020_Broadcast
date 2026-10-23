@@ -16,12 +16,12 @@ section.tab{display:none}section.tab.on{display:block}
 .cw{background:var(--card);border-radius:14px;padding:8px 12px;margin-top:8px}.cw canvas{width:100%;height:190px;display:block}
 .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.chip.good{color:var(--ok)}.chip.badc{color:var(--bad)}.chip.warnc{color:var(--warn)}
 #login{max-width:340px;margin:60px auto}
-#t-ct.dab .fmonly,#t-ov.dab .fmonly{display:none!important}#t-ct:not(.dab) .dabonly{display:none!important}
+body.dab .fmonly{display:none!important}body:not(.dab) .dabonly{display:none!important}
 </style></head><body>
 <header><div class="ttl"><h1>Pluto WFM Broadcast</h1><span class="pill" id="st"><i aria-hidden="true"></i><span id="stt">connecting</span></span></div>
-<div class="tabs" role="tablist"><button data-t="ov" aria-selected="true">Overview</button><button data-t="ct" aria-selected="false">Control</button><button data-t="ms" aria-selected="false">Measure</button><button data-t="cn" aria-selected="false">Console</button></div>
+<div class="tabs" role="tablist"><button data-t="ov" aria-selected="true">Overview</button><button data-t="ct" aria-selected="false">Control</button><button data-t="ms" aria-selected="false" class="fmonly">Measure</button><button data-t="cn" aria-selected="false">Console</button></div>
 <div class="chips" id="chips"></div>
-<p id="lpw" role="alert" style="display:none;background:var(--card);border-radius:12px;padding:10px 14px;margin:10px 0 0;color:var(--bad);font-weight:600">&#9888; No measurement signal on RX2 — check the directional coupler between TX1 and RX2. The SM.1268-5 mask measurement is not valid until it is restored.</p>
+<p id="lpw" class="fmonly" role="alert" style="display:none;background:var(--card);border-radius:12px;padding:10px 14px;margin:10px 0 0;color:var(--bad);font-weight:600">&#9888; No measurement signal on RX2 — check the directional coupler between TX1 and RX2. The SM.1268-5 mask measurement is not valid until it is restored.</p>
 <p id="err" role="alert" style="display:none;color:var(--bad)">No connection to the exciter. The page retries every second.</p></header>
 <main>
 <div id="login" style="display:none"><div class="g"><div class="f"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password"></div></div><button class="btn" id="lg">Log in</button><p class="note" id="lgm"></p></div>
@@ -32,11 +32,11 @@ section.tab{display:none}section.tab.on{display:block}
 <h2 class="fmonly">Deviation</h2><section class="dm fmonly"><div class="dmt"><span id="dmt1">Peak deviation</span><span id="dmt2"></span></div><canvas id="dmc"></canvas></section>
 <h2 class="fmonly">SM.1268-5 mask</h2><div class="mm fmonly" id="mkbox"><button type="button" id="mkreset" class="btn" style="position:absolute;right:12px;top:8px;width:auto;margin:0;padding:3px 10px;font-size:12px;z-index:2" title="Forget the max-hold and start the measurement afresh">Reset</button><canvas id="mkc"></canvas></div>
 <div class="chips fmonly" id="mkchips"></div>
-<h2>Exciter</h2><div class="g"><div id="rows"></div><details><summary>Raw replies</summary><div id="raw" class="note" style="white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;margin:0 0 12px"></div></details></div>
+<h2>Exciter</h2><div class="g"><div id="rows" class="fmonly"></div><div id="drows" class="dabonly"></div><details><summary>Raw replies</summary><div id="raw" class="note" style="white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;margin:0 0 12px"></div></details></div>
 </section>
 
 <section class="tab" id="t-ct">
-<p class="note">Changes apply immediately and are <b>not stored</b>. The PicoAudio controller re-sends E / F / P / K / B / H at every link resync and then overrides what you set here.</p>
+<p class="note">Changes apply immediately and are <b>not stored</b>. The PicoAudio controller re-sends <span class="fmonly">E / F / P / K / B / H</span><span class="dabonly">E / F / P / M and its DAB settings</span> at every link resync and then overrides what you set here.</p>
 <h2>Mode</h2><div class="g"><div class="f"><label>Broadcast</label><span class="seg" id="sg_m"><button data-v="FM">FM</button><button data-v="DAB">DAB+</button></span></div></div>
 <p class="note" id="mnote"></p>
 <h2>Transmitter</h2><div class="g">
@@ -49,7 +49,7 @@ section.tab{display:none}section.tab.on{display:block}
 <div class="f"><label>Test tone <small style="color:var(--tx2)">(for the service encoded here, instead of the I2S input)</small></label><span class="seg" id="sg_dtn"><button data-v="0">Off</button><button data-v="1000">1 kHz</button></span></div>
 <div class="r"><span class="k">Multiplex</span><span class="v" id="dabsum">&ndash;</span></div>
 <div class="f"><label>Ensemble, services, bitrates, protection</label><button class="go" id="b_mux">Multiplex settings</button></div></div>
-<p class="note dabonly">In DAB+ the TX bandwidth is 3 MHz by itself; deviation, limiter, mask guard, channel filter and the mask monitor apply to FM only.</p>
+<p class="note dabonly">In DAB+ the TX bandwidth is 3 MHz by itself.</p>
 <div id="t-db" class="dabonly" hidden style="border-left:3px solid var(--ac);padding-left:4px;margin-top:8px">
 <p class="note">The DAB+ multiplex: up to 8 services in 864 capacity units (CU). One service can be encoded here (the I2S input or a test tone); the others arrive already encoded from ODR-AudioEnc over ZeroMQ (<code>odr-audioenc … -o tcp://&lt;pluto&gt;:&lt;port&gt;</code>). <b>Apply</b> stores the layout; on the air labels change at once, everything else through an announced reconfiguration about 3 s later, so radios follow without a new scan.</p>
 <p class="badnote" id="dbno" style="display:none">This bitstream has no DAB.</p>
@@ -75,11 +75,12 @@ section.tab{display:none}section.tab.on{display:block}
 <div class="f"><label for="i_ofs">Low-IF offset (kHz) <small style="color:var(--tx2)">the LO sits this far below the carrier; 0 = zero-IF</small></label><span><input id="i_ofs" type="number" step="1" min="-250" max="250"> <button class="go" data-set="ofs">Set</button></span></div>
 <div class="f"><label for="i_lvl">Digital level (dBFS) <small style="color:var(--tx2)">-9 = default; the attenuation follows, the output power stays the same</small></label><span><input id="i_lvl" type="number" step="0.5" min="-20" max="0"> <button class="go" data-set="lvl">Set</button></span></div>
 <div class="f"><label>Digital DC offset I / Q (LSB)</label><span><input id="i_dci" type="number" step="1" min="-2047" max="2047" style="width:5.5em"> <input id="i_dcq" type="number" step="1" min="-2047" max="2047" style="width:5.5em"> <button class="go" data-set="dc">Set</button></span></div>
-<div class="f"><label>LO / image nulling <small style="color:var(--tx2)">measured through the directional coupler TX1 &rarr; RX2; about 4 s with a silent carrier</small></label><span><button class="go" id="b_null">Null LO now</button></span></div>
-<div class="f"><label>LO nulling after every calibration</label><span class="seg" id="sg_na"><button data-v="0">Off</button><button data-v="1">On</button></span></div>
-<div class="r"><span class="k">Last LO nulling</span><span class="v" id="nlres">&ndash;</span></div><div class="r"><span class="k">Carrier S/N <small style="color:var(--tx2)">(residual FM of the silent carrier at the last nulling; 75 kHz ref, 50 &micro;s, 30 Hz&ndash;15 kHz, unweighted)</small></span><span class="v" id="nlsnr">&ndash;</span></div>
+<div class="f fmonly"><label>LO / image nulling <small style="color:var(--tx2)">measured through the directional coupler TX1 &rarr; RX2; about 4 s with a silent carrier</small></label><span><button class="go" id="b_null">Null LO now</button></span></div>
+<div class="f fmonly"><label>LO nulling after every calibration</label><span class="seg" id="sg_na"><button data-v="0">Off</button><button data-v="1">On</button></span></div>
+<div class="r fmonly"><span class="k">Last LO nulling</span><span class="v" id="nlres">&ndash;</span></div><div class="r fmonly"><span class="k">Carrier S/N <small style="color:var(--tx2)">(residual FM of the silent carrier at the last nulling; 75 kHz ref, 50 &micro;s, 30 Hz&ndash;15 kHz, unweighted)</small></span><span class="v" id="nlsnr">&ndash;</span></div>
 <div class="f"><label>I/Q gain / skew (ppm)</label><span><input id="i_qg" type="number" step="10" min="-400000" max="400000" style="width:6.5em"> <input id="i_qs" type="number" step="10" min="-400000" max="400000" style="width:6.5em"> <button class="go" data-set="iq">Set</button></span></div></div>
-<p class="note">Digital correction of the analog LO leakage and I/Q image, stored in the Pluto. Nulling procedure: set an offset of 100 kHz, then adjust DC I/Q for the lowest line at the LO frequency (carrier minus the offset) and gain/skew for the lowest image (carrier minus 2 x the offset) on a spectrum analyser; then set the offset back to 0 or keep it. Gain/skew need bitstream B1D00019 or later.</p>
+<p class="note dabonly">Digital level, DC and I/Q correction apply to the DAB+ signal as well. LO nulling runs in FM (it needs the silent carrier); the values it finds stay in use here.</p>
+<p class="note fmonly">Digital correction of the analog LO leakage and I/Q image, stored in the Pluto. Nulling procedure: set an offset of 100 kHz, then adjust DC I/Q for the lowest line at the LO frequency (carrier minus the offset) and gain/skew for the lowest image (carrier minus 2 x the offset) on a spectrum analyser; then set the offset back to 0 or keep it. Gain/skew need bitstream B1D00019 or later.</p>
 <h2 class="fmonly">Mask monitor</h2><div class="g fmonly"><div class="f"><label>5-minute max-hold</label><button class="go alt" id="b_x">Reset</button></div></div>
 <h2>Power meter (RX1)</h2><div class="g">
 <div class="f"><label>Meter</label><span class="seg" id="sg_q"><button data-v="0">Off</button><button data-v="1">On</button></span></div>
@@ -102,7 +103,8 @@ section.tab{display:none}section.tab.on{display:block}
 </section>
 
 <section class="tab" id="t-cn">
-<p class="note">The same commands as on the serial line (docs/serial-protocol.md): E, F, P, K, B, H, X, J and the queries ?T ?S ?P ?E ?V ?M ?L ?W ?N ?D ?G ?A ?B ?J.</p>
+<p class="note fmonly">The same commands as on the serial line (docs/serial-protocol.md): E, F, P, K, B, H, X, J and the queries ?T ?S ?P ?E ?V ?M ?L ?W ?N ?D ?G ?A ?B ?J.</p>
+<p class="note dabonly">The same commands as on the serial line (docs/serial-protocol.md): E, F, P, M, DBR, DSV, DEN, DSI, DLS, DTN and the queries ?S ?P ?V ?T ?O ?DAB.</p>
 <div id="con" role="log" aria-live="polite"></div>
 <div class="g" style="margin-top:8px"><div class="f"><input id="cmd" type="text" placeholder="?S" autocomplete="off" spellcheck="false" style="width:100%"><button class="go" id="csend">Send</button></div></div>
 <div class="chips" id="quick"></div>
@@ -134,7 +136,7 @@ function render(st){
  const tx=S.tx==='on',en=S.en==='1';
  const pill=$('st');pill.className='pill '+(tx?'on':(S.tx?'off':''));$('stt').textContent=tx?'Transmitting':(S.tx?'RF off':'connecting');
  const f=+S.f/1e6;$('freq').innerHTML=(S.f>0?f.toFixed(3):'–')+'<small>MHz</small>';
- $('sub').textContent=tx?('Output '+(+S.p).toFixed(1)+' dBm · attenuation '+(+S.att).toFixed(2)+' dB · kdev '+S.kdev+' (0 dBFS = ±'+(0.75*S.kdev).toFixed(1)+' kHz)'):('RF output closed'+(S.f>0?'':' — waiting for the carrier (F) from the controller'));
+ const dm=kv(st.DAB||'').m==='DAB';$('sub').textContent=tx?('Output '+(+S.p).toFixed(1)+' dBm · attenuation '+(+S.att).toFixed(2)+' dB · '+(dm?'DAB+ channel '+chName(+S.f):'kdev '+S.kdev+' (0 dBFS = ±'+(0.75*S.kdev).toFixed(1)+' kHz)')):('RF output closed'+(S.f>0?'':' — waiting for the carrier (F) from the controller'));
  const age=st.link&&st.link.age>=0?st.link.age:-1,linkTxt=age<0?'no controller yet':(age<5?'controller active':'controller idle '+Math.round(age)+' s');
  $('chips').innerHTML=chip(st.T?('Die '+val(st.T).trim()+' °C'):'')+chip('Up '+fmtUp(S.up))+chip(esc(kv(st.V).fw||'')+' · '+(st.id||''))+chip(linkTxt,age>=0&&age<5?'good':'warnc')+(E.i2s&&E.i2s!=='0/0'?chip('I2S '+E.i2s.split('/')[0]+'-bit (slot '+E.i2s.split('/')[1]+')'):'')+(st.link&&st.link.boot?chip('Boot: '+st.link.boot):'');
  const O=kv(st.O),pbox=$('pwrbox');
@@ -147,8 +149,11 @@ function render(st){
  const mm=(M.m&&M.m!=='na')?M:null,w=mm?parseFloat(M.w):NaN;
  const mage=mm?parseFloat(M.age):NaN,mstale=!!mm&&(isNaN(mage)||mage>15),minc=!!mm&&M.c==='0';
  const rows=[['Limiter',(E.bg==='on'?'on':E.bg==='off'?'off':'n/a')+(E.ceil&&E.ceil!=='off'?' · ceiling '+E.ceil+' kHz':'')],['Mask guard',E.gd==='act'?'ACTIVE: ceiling lowered from '+E.cmax+' to '+E.ceil+' kHz':(E.gd==='on'?((kv(st.R).r==='missing'||!mm||mstale||minc)?'on, but NOT PROTECTING: '+(!mm||kv(st.R).r==='missing'?'no valid mask measurement'+(kv(st.R).r==='missing'?' (no signal from the coupler on RX2)':''):mstale?'the mask data is '+M.age+' s old':'the measurement is inconclusive (signal too weak?)')+' (ceiling at the chosen maximum '+E.cmax+' kHz)':'on (ceiling at the chosen maximum '+E.cmax+' kHz)'):E.gd==='off'?(E.bg==='off'?'off (limiter is off: no protection)':'off'):E.gd==='init'?'initialising (collecting mask data, ~1 min)':'–')],['Gain reduction',(E.lim||'–')+' dB (last 10 s)'],['Limited samples',E.limn||'–'],['Input peak',(E.pk||'–')+' % FS'],['I2S dropouts',E.uf||'–'],['FIFO under / overflow',(E.unf||'0')+' / '+(E.ovf||'0')],['Peak deviation (0.25 s)',(D.d?D.d+' kHz':'–')],['Mask margin now / 5 min',mm?(M.m+' / '+M.w+' dB'):'–'],...(function(){const r=(ST&&ST.RD)||'';if(r.indexOf('rd=ok')!==0)return [['RDS (on air)','– (no groups decoded)']];const R=kv(r),g=(n)=>{const m=r.match(new RegExp(n+'="([^"]*)"'));return m?m[1]:'';};return [['RDS PI / PTY','PI '+R.pi+' · PTY '+R.pty+(R.tp==='1'?' · TP':'')+(R.ta==='1'?' · TA':'')+' · '+(R.ms==='1'?'music':'speech')+' · '+R.gps+' groups/s'],['RDS PS','“'+g('ps')+'”'],['RDS RadioText',g('rt')||'–'],['RDS clock',R.ct&&R.ct!=='-'?R.ct:'–']];})()];
+ const Q=kv(st.DAB||'');if(Q.m==='DAB'){const zs=Object.keys(Q).filter(k=>/^z\d+$/.test(k)).map(k=>{const z=Q[k].split(/[:\/]/);return ['Service '+k.slice(1)+' (ZeroMQ :'+z[0]+')',(z[6]&&z[6]!=='-'?'from '+z[6]:'no sender')+(z[7]?' · '+z[7]+' kbit/s':'')+' · buffer '+z[1]+' · received '+z[2]+' · silent '+z[3]];});
+  const dr=[['Program',Q.run==='1'?'running'+(+Q.rs?' · restarted '+Q.rs+'x':''):'NOT running'],['Multiplex',(Q.svc||'?')+' services · '+(Q.cu||'?')+' of 864 CU'+(Q.chg?' · reconfiguration at CIF '+Q.chg:'')],['Service encoded here',Q.src==='none'?'none':(Q.src==='tone'?'test tone':'I2S input')+' · '+Q.br+' kbit/s'],['Audio buffer / clock correction',(Q.aud||'–')+' samples · '+(Q.ppm||'–')+' ppm'],['Silent super frames',Q.sil||'0'],['OFDM FIFO / underflows / restarts',(Q.fifo||'–')+' / '+(Q.uf||'0')+' / '+(Q.rst||'0')],['CPU',(Q.cpu||'–')+' %'],...zs];
+  $('drows').innerHTML=dr.map(r=>'<div class="r"><span class="k">'+esc(r[0])+'</span><span class="v">'+esc(r[1])+'</span></div>').join('');}
  $('rows').innerHTML=rows.map(r=>'<div class="r"><span class="k">'+esc(r[0])+'</span><span class="v">'+esc(r[1])+'</span></div>').join('');
- $('raw').textContent=['S','E','M','D','P','B','J','V','T','R','O'].map(k=>'?'+k+'  '+(st[k]||'')).join('\n');
+ $('raw').textContent=(dm?['S','DAB','P','V','T','O']:['S','E','M','D','P','B','J','V','T','R','O']).map(k=>'?'+k+'  '+(st[k]||'')).join('\n');
  let mc=chip(mm?('now '+M.m+' dB'):'now –')+chip(mm?('5 min '+M.w+' dB'+(mstale?' (old)':minc?' (inconclusive)':'')):'5 min –',(isNaN(w)||mstale||minc)?'':(w>=3?'good':'badc'));
  if(mm)mc+=chip('shoulder '+M.sh+' dB')+chip('floor '+M.fl+' dB')+chip('est. dev '+M.dev+' kHz')+chip('n '+M.n);
  $('mkchips').innerHTML=mc;
@@ -156,7 +161,7 @@ function render(st){
  const jt=(st.J||'').replace(/^j=/,'');$('j_st').textContent=jt;$('j_go').disabled=/^run/.test(jt);
  if(/^ok/.test(jt)&&!jDone){jDone=true;loadIR();}
  if(/^run/.test(jt))jDone=false;
- const R=kv(st.R);$('lpw').style.display=(R.r==='missing')?'block':'none';$('mkbox').dataset.lp=R.r||'';
+ const R=kv(st.R);$('lpw').style.display=(R.r==='missing'&&!dm)?'block':'none';$('mkbox').dataset.lp=R.r||'';
  drawMaskBox();drawDev();
 }
 let jDone=false;
@@ -214,7 +219,7 @@ const B3=[['5A',174928],['5B',176640],['5C',178352],['5D',180064],['6A',181936],
 $('i_ch').innerHTML=B3.map(c=>'<option value="'+c[1]*1000+'">'+c[0]+' \u00b7 '+(c[1]/1000).toFixed(3)+' MHz</option>').join('');
 function chName(f){const c=B3.find(x=>Math.abs(x[1]*1000-f)<1000);return c?c[0]+' ('+(f/1e6).toFixed(3)+' MHz)':(f/1e6).toFixed(3)+' MHz (no Band III channel)';}
 function isDab(){return !!(ST&&kv(ST.DAB||'').m==='DAB');}
-function modeUi(){if(!ST)return;const d=isDab(),D=kv(ST.DAB||'');$('t-ct').classList.toggle('dab',d);$('t-ov').classList.toggle('dab',d);seg('sg_m',d?'DAB':'FM');
+function modeUi(){if(!ST)return;const d=isDab(),D=kv(ST.DAB||'');document.body.classList.toggle('dab',d);if(d&&tab==='ms')document.querySelector('.tabs button[data-t="ov"]').click();seg('sg_m',d?'DAB':'FM');
  if(d){$('dabsum').textContent=(D.svc||'?')+' services \u00b7 '+(D.cu||'?')+' of 864 CU'+(D.chg?' \u00b7 reconfiguration under way':'')+(D.run==='1'?'':' \u00b7 the DAB program is not running');seg('sg_dtn',D.src==='tone'?'1000':'0');
   if(document.activeElement!==$('i_ch')&&B3.some(x=>Math.abs(x[1]*1000-S.f)<1000))$('i_ch').value=String(B3.find(x=>Math.abs(x[1]*1000-S.f)<1000)[1]*1000);}
  else if(S.f>=65e6&&S.f<=110e6){try{localStorage.setItem('fmf',String(S.f));}catch(e){}}
@@ -246,7 +251,7 @@ const hist=[];let hp=0;
 function log(c,a){const d=$('con');d.insertAdjacentHTML('beforeend','<b>&gt; '+esc(c)+'</b>\n'+(/^ERR/.test(a)?'<span class="e">':'<span>')+esc(a)+'</span>\n');d.scrollTop=d.scrollHeight;}
 async function send(){const i=$('cmd'),c=i.value.trim();if(!c)return;hist.push(c);hp=hist.length;i.value='';try{log(c,await cmd(c));}catch(e){log(c,'(no connection)');}}
 $('csend').onclick=send;$('cmd').onkeydown=e=>{if(e.key==='Enter')send();else if(e.key==='ArrowUp'&&hp>0){$('cmd').value=hist[--hp];e.preventDefault();}else if(e.key==='ArrowDown'&&hp<hist.length-1){$('cmd').value=hist[++hp];e.preventDefault();}};
-$('quick').innerHTML=['?S','?E','?M','?D','?G','?A','?B','?J','?V','?T','?P','?O','?R'].map(q=>'<span class="chip bit" style="cursor:pointer" data-q="'+q+'">'+q+'</span>').join('');
+$('quick').innerHTML=['?S','?E','?M','?D','?G','?A','?B','?J','?V','?T','?P','?O','?R','?DAB'].map(q=>'<span class="chip bit '+(q==='?DAB'?'dabonly':/^\?[EMDGABJR]$/.test(q)?'fmonly':'')+'" style="cursor:pointer" data-q="'+q+'">'+q+'</span>').join('');
 document.querySelectorAll('#quick .chip').forEach(c=>c.onclick=()=>{$('cmd').value=c.dataset.q;send();});
 // ---------------- login ----------------
 $('lg').onclick=async()=>{const r=await fetch('/login',{method:'POST',body:$('pw').value,headers:{'X-Requested-With':'skypluto'}});if(r.ok){authNeeded=false;$('login').style.display='none';poll();}else $('lgm').textContent='Incorrect password.';};
