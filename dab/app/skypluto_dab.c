@@ -6,7 +6,8 @@
 // The transmission runs on the FPGA's sample clock (the AD9361), the audio on the I2S master's clock (the Pico). The two
 // drift apart, so the audio goes through a polyphase resampler whose ratio is steered by the fill of the audio buffer.
 //
-//   skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-d DLS text] [-t DLS file] [-g gain 0..3] [-L level] [-T Hz] [-v]
+//   skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-i service id] [-d DLS text] [-t DLS file] [-g gain 0..3] [-L level] [-T Hz] [-S file] [-v]
+//   -S file: a status line once a second (fifo= uf= rst= aud= ppm= sil= cpu=), read by skypluto-ctl for ?DAB
 //   -T Hz: test tone instead of the I2S input (left Hz, right 1.5 x Hz, -12 dBFS), for a first test without a DAB source
 //   skypluto-dab -f in.f32 -o phases.bin [-p ppm] [-n seconds] ...     (simulation on a PC: no hardware)
 //
@@ -56,7 +57,8 @@ static unsigned ph_fill(void){ return atomic_load(&ph_w) - atomic_load(&ph_r); }
 
 // ---- configuration and state ---------------------------------------------------------------------------------------------------
 static int   o_kbps = 96, o_gain = 1, o_level = -1, o_verbose = 0;
-static const char *o_svc = "PlutoSky", *o_ens = "PlutoSky DAB", *o_dls = NULL, *o_dlsfile = NULL;
+static const char *o_svc = "PlutoSky", *o_ens = "PlutoSky DAB", *o_dls = NULL, *o_dlsfile = NULL, *o_status = NULL;
+static unsigned o_sid = 0x8F01;
 static const char *o_simin = NULL, *o_simout = NULL;
 static double o_ppm = 0.0, o_secs = 0.0, o_tone = 0.0;
 static volatile sig_atomic_t g_stop = 0;
@@ -246,13 +248,14 @@ static void on_signal(int sig){ (void)sig; g_stop = 1; }
 
 static void usage(void){
     fprintf(stderr,
-        "skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-d DLS text] [-t DLS file] [-g gain 0..3] [-L level] [-T tone Hz] [-v]\n"
+        "skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-i service id hex] [-d DLS text] [-t DLS file] [-g gain 0..3] [-L level] [-T tone Hz]\n"
+        "             [-S status file] [-v]\n"
         "skypluto-dab -f in.f32 -o phases.bin [-p audio clock ppm] [-n seconds] ...   (simulation, no hardware)\n");
 }
 
 int main(int argc, char **argv){
     int c;
-    while ((c = getopt(argc, argv, "b:s:e:d:t:g:L:T:vf:o:p:n:h")) != -1){
+    while ((c = getopt(argc, argv, "b:s:e:i:d:t:g:L:T:S:vf:o:p:n:h")) != -1){
         switch (c){
         case 'b': o_kbps = atoi(optarg); break;
         case 's': o_svc = optarg; break;
@@ -262,6 +265,8 @@ int main(int argc, char **argv){
         case 'g': o_gain = atoi(optarg) & 3; break;
         case 'L': o_level = atoi(optarg); break;
         case 'T': o_tone = atof(optarg); break;
+        case 'i': o_sid = (unsigned)strtoul(optarg, NULL, 16) & 0xFFFF; break;
+        case 'S': o_status = optarg; break;
         case 'v': o_verbose = 1; break;
         case 'f': o_simin = optarg; break;
         case 'o': o_simout = optarg; break;
@@ -276,7 +281,7 @@ int main(int argc, char **argv){
     dab_ensemble ens; memset(&ens, 0, sizeof ens);
     ens.eid = 0x8FED; snprintf(ens.label, sizeof ens.label, "%s", o_ens);
     ens.ecc = 0xE3; ens.lto_halfhours = 2; ens.nsvc = 1;
-    ens.svc[0].sid = 0x8F01; snprintf(ens.svc[0].label, sizeof ens.svc[0].label, "%s", o_svc);
+    ens.svc[0].sid = (uint16_t)o_sid; snprintf(ens.svc[0].label, sizeof ens.svc[0].label, "%s", o_svc);
     ens.svc[0].bitrate = o_kbps; ens.svc[0].prot_level = 3;
     g_mod = dab_mod_open(&ens);
     if (!g_enc || !g_mod){ fprintf(stderr, "bad configuration\n"); return 2; }
@@ -339,6 +344,18 @@ int main(int argc, char **argv){
         usleep(3000);
         struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
         double t = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
+        static double last_st = 0;
+        if (o_status && t - last_st >= 1.0){
+            // one line for skypluto-ctl (?DAB), replaced as a whole (rename) so a reader never sees half a line
+            last_st = t;
+            char tmp[256]; snprintf(tmp, sizeof tmp, "%s.new", o_status);
+            FILE *sf = fopen(tmp, "w");
+            if (sf){
+                fprintf(sf, "fifo=%u uf=%u rst=%u aud=%u ppm=%+.0f sil=%u cpu=%.0f\n", rd(R_PHASE) & 0x3FFF, atomic_load(&st_underflow), atomic_load(&st_resets),
+                        aud_fill(), g_ppm_now, atomic_load(&st_silence), 100 * (g_t_enc + g_t_mod) / t);
+                fclose(sf); rename(tmp, o_status);
+            }
+        }
         if (o_verbose && t - last >= 5.0){
             last = t;
             fprintf(stderr, "t=%.0f s audio %u ratio %+.1f ppm phase queue %u OFDM FIFO %u silence %u resync %u underflow %u restarts %u audio-ovf %u cpu enc %.0f%% mux %.0f%%\n",

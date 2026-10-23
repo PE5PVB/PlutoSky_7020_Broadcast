@@ -1239,6 +1239,70 @@ static void set_level(double dbm){
     fprintf(stderr,"   -> niveau %.2f dBm  (atten %.2f dB)\n", want_dbm, nom_a); fflush(stderr);
 }
 
+// ---- DAB+ (bitstream B1D0001E and later): the exciter takes OFDM from skypluto-dab instead of the FM modulator ----------------------
+// M DAB starts skypluto-dab (AAC encoder + multiplex on the ARM, stereo 48 kHz from the I2S input) and keeps it running; M FM stops it
+// (the program puts the exciter back in FM when it ends). In DAB mode the TX bandwidth is at least 3 MHz (the ensemble is 1.536 MHz
+// wide), and the mask monitor and the ALC pause: both measure an FM carrier. The DAB settings are not stored: the Pico sends them.
+#define DAB_BIN     "/mnt/jffs2/skypluto-dab"
+#define DAB_DLS     "/tmp/dab_dls.txt"
+#define DAB_STATUS  "/tmp/dab_status"
+#define DAB_LOG     "/tmp/dab.log"
+#define DAB_TB_KHZ  3000
+static int    has_dab = 0, dab_mode = 0, dab_kbps = 96, dab_tb_fm = 0, dab_restarts = 0, dab_tone = 0;   // dab_tone: test tone in Hz instead of I2S (0 = I2S)
+static char   dab_svc[17] = "PlutoSky", dab_ens[17] = "PlutoSky DAB";
+static unsigned dab_sid = 0x8F01;
+static pid_t  dab_pid = -1;
+static double dab_next = 0.0, dab_t0 = 0.0;
+
+// the TX bandwidth for this session only (not stored): recalibrates like TB when the transmitter is open
+static void tb_set_now(int khz){
+    if (khz == tx_bw_khz) return;
+    tx_bw_khz = khz; txbw_apply();
+    fprintf(stderr, "   -> TX-bandbreedte %d kHz%s\n", khz, !tx_off ? ", herkalibratie" : ""); fflush(stderr);
+    if (!tx_off && last_f > 0 && !cal_pending && cal_pid <= 0){
+        if (!cal_hold) cal_hold_t = mono();
+        cal_hold = 1; cal_pending = 1; cal_due = mono(); cal_failed = 0; cal_fail = 0; cal_force = 1;
+    }
+}
+static void dab_start(void){
+    char br[8], sid[8], tone[12];
+    snprintf(br, sizeof br, "%d", dab_kbps); snprintf(sid, sizeof sid, "%04X", dab_sid); snprintf(tone, sizeof tone, "%d", dab_tone);
+    { FILE *df = fopen(DAB_DLS, "a"); if (df) fclose(df); }       // the program reads the DLS from this file (empty = none)
+    unlink(DAB_STATUS);
+    pid_t p = fork();
+    if (p == 0){
+        prctl(PR_SET_PDEATHSIG, SIGTERM);                         // the daemon ends: the program ends too and leaves the exciter in FM
+        struct sched_param sp; sp.sched_priority = 0; sched_setscheduler(0, SCHED_OTHER, &sp);   // not the daemon's real-time class
+        int lf = open(DAB_LOG, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (lf >= 0){ dup2(lf, 2); close(lf); }
+        execl(DAB_BIN, DAB_BIN, "-v", "-b", br, "-s", dab_svc, "-e", dab_ens, "-i", sid, "-t", DAB_DLS, "-S", DAB_STATUS, "-T", tone, (char *)NULL);
+        _exit(127);
+    }
+    if (p < 0){ dab_next = mono() + 2.0; return; }
+    dab_pid = p; dab_t0 = mono();
+    fprintf(stderr, "   -> DAB gestart (%d kbit/s, \"%s\" / \"%s\", SId %04X, %s)\n", dab_kbps, dab_svc, dab_ens, dab_sid, dab_tone ? "testtoon" : "I2S"); fflush(stderr);
+}
+static void dab_stop(void){
+    if (dab_pid <= 0) return;
+    int st; kill(dab_pid, SIGTERM);
+    for (int i = 0; i < 40 && waitpid(dab_pid, &st, WNOHANG) == 0; i++) usleep(50000);
+    if (waitpid(dab_pid, &st, WNOHANG) == 0){ kill(dab_pid, SIGKILL); waitpid(dab_pid, &st, 0); }
+    dab_pid = -1;
+    wr(0x64, 0x2); usleep(20); wr(0x64, 0x0);                     // the exciter in FM, also when the program was killed
+    unlink(DAB_STATUS);
+}
+// main loop: keep the program running while DAB is chosen (restart after a crash, at most every 2 s)
+static void dab_poll(double now){
+    if (dab_pid > 0){
+        int st; if (waitpid(dab_pid, &st, WNOHANG) == dab_pid){
+            dab_pid = -1; wr(0x64, 0x0);
+            if (dab_mode){ dab_restarts++; dab_next = now + 2.0; fprintf(stderr, "   !! DAB-programma gestopt (status %d): opnieuw over 2 s\n", st); fflush(stderr); }
+        }
+    } else if (dab_mode && now >= dab_next) dab_start();
+}
+// a setting that the multiplex carries changed: restart the program (receivers lose the ensemble for about 2 s)
+static void dab_restart(void){ if (dab_mode){ dab_stop(); dab_next = mono() + 0.2; } }
+static int dab_label_ok(const char *s){ size_t n = strlen(s); if (n < 1 || n > 16) return 0; for (; *s; s++) if (*s < 0x20 || *s > 0x7E) return 0; return 1; }
+
 static void handle(char *line){
     while (*line==' '||*line=='\t') line++;
     if (*line==0) return;
@@ -1254,6 +1318,16 @@ static void handle(char *line){
     if (cmd[0]=='?'){
         // ?RD = RDS of the own transmission, decoded from the RX2 measurement path (one 0.25 s window per second): rd=ok pi= pty= tp= ta= ms= gps=<groups/s>
         // ams=<age of the last group> ct=<clock time> ps="<8>" rt="<text>". The first ?RD enables the decoder (10 s; ask again within 10 s). rd=na without groups.
+        // ?DAB: m=FM, or m=DAB br= run=<program running> rs=<restarts by the daemon> + the program's status line
+        // (fifo= OFDM FIFO words, uf= underflows, rst= OFDM restarts, aud= audio buffer, ppm= clock correction, sil= silent super frames, cpu= %)
+        if (!strcmp(cmd,"?DAB")){
+            if (!dab_mode){ tx_str("m=FM\n"); return; }
+            char sl[160] = ""; FILE *sf = fopen(DAB_STATUS, "r");
+            if (sf){ if (!fgets(sl, sizeof sl, sf)) sl[0] = 0; fclose(sf); }
+            sl[strcspn(sl, "\r\n")] = 0;
+            snprintf(buf, sizeof buf, "m=DAB br=%d src=%s run=%d rs=%d%s%s\n", dab_kbps, dab_tone ? "tone" : "i2s", dab_pid > 0 && sl[0] ? 1 : 0, dab_restarts, sl[0] ? " " : "", sl);
+            tx_str(buf); return;
+        }
         if (!strcmp(cmd,"?RD")){
             { FILE *rf = fopen("/tmp/skypluto.rds", "w"); if (rf){ fputs("1\n", rf); fclose(rf); } }
             {   // collect the groups the decoder appended since the last call (renamed first, so the decoder starts a new file)
@@ -1679,6 +1753,59 @@ static void handle(char *line){
         }
         return;
     }
+    // M FM | M DAB: the mode (see DAB above). ERR nobit = bitstream without DAB, ERR nodab = the program is missing.
+    if (!strcmp(cmd,"M")){
+        if (!strcmp(arg, "FM")){
+            if (dab_mode){
+                dab_mode = 0; dab_stop();
+                if (dab_tb_fm > 0) tb_set_now(dab_tb_fm);
+                alc_reset(ALC_SETTLE); mask_next = mono() + 4.0;
+                fprintf(stderr, "   -> stand FM\n"); fflush(stderr);
+            }
+            tx_str("OK\n"); return;
+        }
+        if (!strcmp(arg, "DAB")){
+            if (!has_dab){ tx_str("ERR nobit\n"); return; }
+            if (access(DAB_BIN, X_OK) != 0){ tx_str("ERR nodab\n"); return; }
+            tx_str("OK\n");
+            if (dab_mode) return;
+            dab_mode = 1; dab_restarts = 0; dab_next = mono();
+            if (m_pid > 0) measure_finish();                       // the running mask/ALC measurement assumes FM
+            dab_tb_fm = tx_bw_khz;
+            if (tx_bw_khz < DAB_TB_KHZ) tb_set_now(DAB_TB_KHZ);
+            fprintf(stderr, "   -> stand DAB\n"); fflush(stderr);
+            return;
+        }
+        tx_str("ERR range\n"); return;
+    }
+    // DBR <kbit/s> (32..192, multiple of 8), DSV <service label>, DEN <ensemble label> (1..16 ASCII characters), DSI <service id, 4 hex
+    // digits>: restart the multiplex when changed in DAB mode. DLS <text> (up to 128 bytes, UTF-8): the dynamic label, without interruption.
+    if (!strcmp(cmd,"DBR")){
+        int v = atoi(arg); if (v < 32 || v > 192 || v % 8){ tx_str("ERR range\n"); return; }
+        tx_str("OK\n"); if (v != dab_kbps){ dab_kbps = v; dab_restart(); } return;
+    }
+    if (!strcmp(cmd,"DSV") || !strcmp(cmd,"DEN")){
+        char *d = cmd[1] == 'S' ? dab_svc : dab_ens;
+        if (!dab_label_ok(arg)){ tx_str("ERR range\n"); return; }
+        tx_str("OK\n"); if (strcmp(d, arg)){ snprintf(d, 17, "%s", arg); dab_restart(); } return;
+    }
+    if (!strcmp(cmd,"DSI")){
+        char *e; unsigned long v = strtoul(arg, &e, 16);
+        if (e == arg || *e || strlen(arg) != 4 || v == 0){ tx_str("ERR range\n"); return; }
+        tx_str("OK\n"); if (v != dab_sid){ dab_sid = (unsigned)v; dab_restart(); } return;
+    }
+    // DTN <Hz>: test tone (left Hz, right 1.5 x Hz, -12 dBFS) instead of the I2S input, 0 = I2S (default); restarts the multiplex
+    if (!strcmp(cmd,"DTN")){
+        int v = atoi(arg); if (v < 0 || v > 10000){ tx_str("ERR range\n"); return; }
+        tx_str("OK\n"); if (v != dab_tone){ dab_tone = v; dab_restart(); } return;
+    }
+    if (!strcmp(cmd,"DLS")){
+        if (strlen(arg) > 128){ tx_str("ERR range\n"); return; }
+        FILE *df = fopen(DAB_DLS ".new", "w");
+        if (!df){ tx_str("ERR io\n"); return; }
+        fprintf(df, "%s\n", arg); fclose(df); rename(DAB_DLS ".new", DAB_DLS);
+        tx_str("OK\n"); return;
+    }
     // CAL: run the TX calibration (LO leakage, image) now, with the output muted (~2 s). Needs an open transmitter (ERR off otherwise) and no J/Y/Z measurement (ERR busy).
     if (!strcmp(cmd,"CAL")){
         if (tx_off || last_f <= 0){ tx_str("ERR off\n"); return; }
@@ -1957,7 +2084,9 @@ int main(int argc, char **argv){
     // fixed modulation settings
     uint32_t off_hw = rd(R_OFFSET) & 0xFFFFFF;                         // the NCO offset a running transmitter has (the register survives a restart of the daemon)
     lim_probe();                                                        // read-only: has_dbg must be known before the build id is read
-    { uint32_t id = has_dbg ? dbg_rd(12) : 0; has_iq = (id >= 0xB1D00019u && id <= 0xB1D000FFu); has_chf = (id >= 0xB1D0001Du && id <= 0xB1D000FFu) ? 2 : (id == 0xB1D0001Cu) ? 1 : 0; }
+    { uint32_t id = has_dbg ? dbg_rd(12) : 0; has_iq = (id >= 0xB1D00019u && id <= 0xB1D000FFu); has_chf = (id >= 0xB1D0001Du && id <= 0xB1D000FFu) ? 2 : (id == 0xB1D0001Cu) ? 1 : 0;
+      has_dab = (id >= 0xB1D0001Eu && id <= 0xB1D000FFu); }
+    if (has_dab){ wr(0x64, 0x2); usleep(20); wr(0x64, 0x0); }          // start in FM (a DAB program of an earlier daemon has ended with it)
     iq_conf_read(); iq_apply(); chf_apply(); txbw_apply();       // the TX bandwidth before the first calibration
     pw_conf_read();
     lim_conf_read(); lim_probe(); lim_apply();          // kdev (from conf, without limiter never > 100) + limiter ceiling
@@ -2135,7 +2264,7 @@ int main(int argc, char **argv){
                 if (cok){ cal_fail = 0; cal_failed = 0; cal_last_end = now; cal_temp_ref = temp_mC; cal_last_lo = lo_freq(); }
                 { char lp[140] = ""; FILE *lf; if (phy_dir[0]) snprintf(lp, sizeof lp, "%s/out_altvoltage1_TX_LO_powerdown", phy_dir);
                   if (!tx_off && lp[0] && (lf = fopen(lp, "r")) != NULL){ int pdv = 0; if (fscanf(lf, "%d", &pdv) != 1) pdv = 0; fclose(lf); if (pdv) tx_lo_power(1); } }   // LO still powered down: power it up
-                if (cok && !cal_pending && !cal_restoring && null_auto && (null_rx == 2 || want_dbm <= -15.0 + 0.001) && fabs(lowif_khz) < 0.0005) null_pending = 1;
+                if (cok && !cal_pending && !cal_restoring && null_auto && !dab_mode && (null_rx == 2 || want_dbm <= -15.0 + 0.001) && fabs(lowif_khz) < 0.0005) null_pending = 1;
                 if (cok && !cal_pending && !cal_restoring && !null_pending) cs_store(lo_freq());   // no nulling follows: store the calibration as it is
                 cal_restoring = 0;
                 if (cok && !cal_pending){ cal_hold = 0; apply_current(); alc_reset(ALC_SETTLE);
@@ -2205,10 +2334,11 @@ int main(int argc, char **argv){
             snprintf(pth, sizeof pth, "%s/out_altvoltage1_TX_LO_powerdown", phy_dir);
             if ((rf = fopen(pth, "r")) != NULL){ int pd = 1; if (fscanf(rf, "%d", &pd) != 1) pd = 1; fclose(rf); if (pd == 0 && cal_pid <= 0){ phy_write("out_altvoltage1_TX_LO_powerdown", "1"); lo_pd = 1; fprintf(stderr, "   !! zender dicht maar de TX-LO stond aan: uitgezet\n"); fflush(stderr); } }
           } }
-        if (m_pid <= 0 && cal_pid <= 0 && !cal_pending && !tx_off && last_f > 0 && now >= m_next) measure_start();
+        dab_poll(now);
+        if (!dab_mode && m_pid <= 0 && cal_pid <= 0 && !cal_pending && !tx_off && last_f > 0 && now >= m_next) measure_start();
         // mask monitor: only if no ALC measurement is running and the level/frequency has been stable for ~4 s. NOT dependent on an ALC reference:
         // at low TX levels (high attenuation) the TX_MONITOR is too weak for the ALC, and the mask monitor would otherwise never start.
-        if (m_pid <= 0 && cal_pid <= 0 && !cal_pending && !tx_off && last_f > 0 && now - lvl_change_t >= 4.0 && now >= mask_next){
+        if (!dab_mode && m_pid <= 0 && cal_pid <= 0 && !cal_pending && !tx_off && last_f > 0 && now - lvl_change_t >= 4.0 && now >= mask_next){
             if (!mask_start()) mask_next = now + MASK_PERIOD;
         }
         if (!got) usleep(1000);

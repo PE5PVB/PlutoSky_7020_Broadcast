@@ -177,6 +177,31 @@ The **running max-hold over the last 300 s (about 1200 spectra, time-based)** is
 - The mask itself (0 dB up to ±74 kHz, −15 dB at ±107.5, −30 dB at ±124, −40 dB at ±152.5 and beyond) is drawn by the encoder.
 - Suggested status colour: green `w` ≥ +3, orange 0…+3, red < 0.
 
+## 4b. DAB+ (bitstream B1D0001E and later)
+
+In DAB mode the exciter transmits a DAB+ ensemble (mode I, one service) instead of FM. `skypluto-dab` on the ARM encodes the
+stereo I2S input (48 kHz, standard I2S, 32-bit slots, the top 16 bits used; no MPX, no pre-emphasis) with its own AAC-LC
+encoder and builds the multiplex; the FPGA does the OFDM. The DAB settings are not stored: the encoder sends them.
+
+| Command | Range / default | Meaning |
+|---|---|---|
+| `M FM` / `M DAB` | default `FM` | the mode. `M DAB`: TX bandwidth at least 3 MHz for the session (the FM value comes back with `M FM`), mask monitor, ALC and LO nulling pause (they measure an FM carrier), the program starts and is restarted if it stops. `ERR nobit` = bitstream without DAB, `ERR nodab` = `/mnt/jffs2/skypluto-dab` missing |
+| `DBR <kbit/s>` | 32 … 192, multiple of 8; `96` | service bitrate |
+| `DSV <text>` | 1 … 16 ASCII characters; `PlutoSky` | service label |
+| `DEN <text>` | 1 … 16 ASCII characters; `PlutoSky DAB` | ensemble label |
+| `DSI <hex>` | 4 hex digits; `8F01` | service identifier |
+| `DLS <text>` | up to 128 bytes, UTF-8 | dynamic label (the successor of RDS RadioText); changes without interruption |
+| `DTN <Hz>` | 0 … 10000; `0` | test tone (left Hz, right 1.5 × Hz, −12 dBFS) instead of the I2S input; `0` = I2S |
+| `?DAB` | | `m=FM`, or `m=DAB br=96 src=i2s run=1 rs=0 fifo=7712 uf=0 rst=0 aud=11600 ppm=+12 sil=0 cpu=31`: `run` program running, `rs` restarts by the daemon, `fifo` OFDM FIFO words (~7700 = full), `uf` underflows, `rst` OFDM restarts, `aud` audio buffer (samples), `ppm` the clock correction toward the I2S source, `sil` super frames sent silent (no audio), `cpu` % of one core |
+
+`DBR`, `DSV`, `DEN`, `DSI` and `DTN` restart the multiplex when they change in DAB mode: receivers lose the ensemble for about
+2 s, so send them only when they change. In DAB mode `K`, `H`, `B` and `CF` have no effect and `?M`/`?L`/`?W`/`?N` are
+meaningless. `F` takes the channel's centre frequency in Hz (Band III: 1 kHz resolution, e.g. 5A = `F 174928000`); `P` is the RMS
+power of the FM carrier setting, and the DAB ensemble lies about 16 dB below it (crest factor).
+
+Switching to DAB: `E 0` → `F <channel>` → the encoder's I2S to 48 kHz stereo → `M DAB` → `E 1`. Back: `E 0` → `M FM` → I2S to
+MPX 192 kHz → `F <FM frequency>` → `E 1`. After a restart of the Pluto (see `up`), send `M` and the D settings with the rest.
+
 ## 5. What is automatic and fixed (not in the protocol)
 
 | Item | Behaviour |
