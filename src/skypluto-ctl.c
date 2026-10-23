@@ -2074,7 +2074,7 @@ static void web_handle(struct wconn *c){
     int xrw = strcasestr(c->buf, "X-Requested-With: skypluto") != NULL;
     int post = !strcmp(method, "POST");
     if (mono() - wconf_t > 30.0) web_conf_read();
-    static char out[4096];
+    static char out[8192];
     if (!strcmp(method, "GET") && !strcmp(path, "/")){ web_send(c->fd, 200, "text/html; charset=utf-8", WEB_INDEX, WEB_INDEX_LEN, NULL); }
     else if (post && !strcmp(path, "/login")){
         if (!xrw){ web_send(c->fd, 403, "text/plain", "no", 2, NULL); }
@@ -2096,9 +2096,9 @@ static void web_handle(struct wconn *c){
             else { const char *r = web_cmd(body); web_send(c->fd, 200, "text/plain; charset=utf-8", r, strlen(r), NULL); }
         }
         else if (!post && !strcmp(path, "/api/state")){
-            static const char *k[] = {"S","T","P","E","V","M","D","B","J","R","O","IQ","NL","RD"}; static const char *q[] = {"?S","?T","?P","?E","?V","?M","?D","?B","?J","?R","?O","?IQ","?NL","?RD"};
+            static const char *k[] = {"S","T","P","E","V","M","D","B","J","R","O","IQ","NL","RD","DAB"}; static const char *q[] = {"?S","?T","?P","?E","?V","?M","?D","?B","?J","?R","?O","?IQ","?NL","?RD","?DAB"};
             int n = 0; out[n++] = '{';
-            for (int i = 0; i < 14; i++){ n = jadd(out, n, (int)sizeof out, k[i], web_cmd(q[i])); out[n++] = ','; }
+            for (int i = 0; i < 15; i++){ n = jadd(out, n, (int)sizeof out, k[i], web_cmd(q[i])); out[n++] = ','; }
             char idb[16] = "-"; if (has_dbg){ snprintf(idb, sizeof idb, "%08X", dbg_rd(12)); }
             n = jadd(out, n, (int)sizeof out, "id", idb); out[n++] = ',';
             n += snprintf(out + n, sizeof out - (size_t)n, "\"link\":{\"age\":%.1f,\"cmds\":%lu,\"boot\":", pico_last_rx < 0 ? -1.0 : mono() - pico_last_rx, pico_cmds);
