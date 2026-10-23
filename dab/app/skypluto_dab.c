@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
-// skypluto-dab: the DAB+ transmitter on the Pluto's ARM. Stereo audio from the I2S input (through the FPGA's audio FIFO) ->
-// sample rate adaptation to the transmitter clock -> own AAC-LC encoder -> DAB+ super frames -> DAB mode I multiplex ->
-// OFDM phase words -> the FPGA's OFDM block (IFFT, guard interval, 3/2 interpolation) -> the modulator's I/Q path.
+// skypluto-dab: the DAB+ transmitter on the Pluto's ARM. A multiplex of up to 8 services (dab/src/mux_conf.h): at most one is
+// encoded here (stereo audio from the I2S input through the FPGA's audio FIFO -> sample rate adaptation to the transmitter clock
+// -> own AAC-LC encoder -> DAB+ super frames), the others arrive already encoded from ODR-AudioEnc over ZeroMQ and are passed on
+// unchanged. Then the DAB mode I multiplex -> OFDM phase words -> the FPGA's OFDM block (IFFT, guard interval, 3/2
+// interpolation) -> the modulator's I/Q path.
 //
 // The transmission runs on the FPGA's sample clock (the AD9361), the audio on the I2S master's clock (the Pico). The two
-// drift apart, so the audio goes through a polyphase resampler whose ratio is steered by the fill of the audio buffer.
+// drift apart, so the audio goes through a polyphase resampler whose ratio is steered by the latency of the audio.
 //
-//   skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-i service id] [-d DLS text] [-t DLS file] [-g gain 0..3] [-L level] [-T Hz] [-S file] [-v]
-//   -S file: a status line once a second (fifo= uf= rst= aud= ppm= sil= cpu=), read by skypluto-ctl for ?DAB
-//   -c file: br= sid= svc= ens= lines, read every super frame: labels change at once, bitrate and service id through an
-//            announced multiplex reconfiguration (~3 s later), so receivers follow without retuning
-//   -T Hz: test tone instead of the I2S input (left Hz, right 1.5 x Hz, -12 dBFS), for a first test without a DAB source
-//   skypluto-dab -f in.f32 -o phases.bin [-p ppm] [-n seconds] ...     (simulation on a PC: no hardware)
+//   skypluto-dab -m mux.conf [-t DLS file] [-S status file] [-g gain 0..3] [-L level] [-T Hz] [-v]
+//   -m file: the multiplex layout, re-read when it changes: labels at once, everything else (services added or removed,
+//            bitrate, protection, SId, source) through an announced multiplex reconfiguration ~3 s later, so receivers follow
+//            without retuning; a service that keeps SId, bitrate and protection runs on without a gap
+//   skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-i service id] [-x outside.conf] ...   (one service, no layout file)
+//   -t file: the DLS of the service encoded here (re-read when it changes)
+//   -S file: a status line once a second (fifo= uf= rst= aud= ppm= sil= cpu= and z<i>= per outside service), read by skypluto-ctl
+//   -T Hz:   test tone for the service encoded here (left Hz, right 1.5 x Hz, -12 dBFS) instead of the I2S input
+//   skypluto-dab -f in.f32 -o phases.bin [-p ppm] [-n seconds] [-X recorded.zmq] [-R next.conf -W seconds] ...   (simulation on a
+//   PC: no hardware; -X feeds every outside service from a recording, -R moves another layout onto the -m file at that time)
 //
 // Registers (WFM block at 0x7C440000): 0x64 DAB control ([0] DAB mode, [1] reset, [3:2] gain 2^n), 0x68 write = phase word,
 // read = status ([13:0] OFDM FIFO level, [16] underflow, [17] CDC FIFO full), 0x6C read = audio sample {L16, R16} (pops),
@@ -19,6 +25,7 @@
 #include "../src/dabplus_enc.h"
 #include "../src/dab_mod.h"
 #include "../src/ext_stream.h"
+#include "../src/mux_conf.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -48,6 +55,7 @@
 #define FRAME_WORDS   DAB_PHASE_WORDS      // 7296 phase words per 96 ms transmission frame
 #define WORDS_PER_S   76000.0              // 7296 / 0.096
 #define OFDM_FIFO_MAX 8000                 // fill the FPGA's OFDM FIFO (8192 words) up to here
+#define SF_MAX        (120 * 24)           // the largest super frame (192 kbit/s)
 
 // ---- single producer / single consumer rings -------------------------------------------------------------------------------------
 #define AUD_RING      32768                // stereo samples (0.68 s)
@@ -60,7 +68,8 @@ static unsigned ph_fill(void){ return atomic_load(&ph_w) - atomic_load(&ph_r); }
 
 // ---- configuration and state ---------------------------------------------------------------------------------------------------
 static int   o_kbps = 96, o_gain = 1, o_level = -1, o_verbose = 0;
-static const char *o_svc = "PlutoSky", *o_ens = "PlutoSky DAB", *o_dls = NULL, *o_dlsfile = NULL, *o_status = NULL, *o_cfgfile = NULL, *o_extconf = NULL;
+static const char *o_svc = "PlutoSky", *o_ens = "PlutoSky DAB", *o_dls = NULL, *o_dlsfile = NULL, *o_status = NULL, *o_extconf = NULL;
+static const char *o_muxfile = NULL, *o_simstream = NULL, *o_simnext = NULL; static double o_simnext_t = 0;
 static unsigned o_sid = 0x8F01;
 static const char *o_simin = NULL, *o_simout = NULL;
 static double o_ppm = 0.0, o_secs = 0.0, o_tone = 0.0;
@@ -125,9 +134,9 @@ static void dls_poll(dabplus_enc *enc){
     if (o_verbose) fprintf(stderr, "DLS: %s\n", buf);
 }
 
-// ---- producer: audio -> super frame -> CIFs -> phase words ---------------------------------------------------------------------
+// ---- producer state ------------------------------------------------------------------------------------------------------------
 static dabplus_enc *g_enc; static dab_mod *g_mod; static dabplus_cfg g_cfg;
-static float   *g_pcm; static uint8_t *g_sf; static int g_lfb;
+static float   *g_pcm; static uint8_t g_sf[SF_MAX];
 static double   g_integ = 0.0, g_lat_target = 0.0;
 static double   g_seed_ppm = 0.0; static atomic_int g_seed_ready;   // measured input clock offset, handed to the rate control once
 static int      g_primed = 0, g_cifs = 0;
@@ -145,57 +154,130 @@ static double latency(void){
     return (double)aud_fill() + (ph_fill() + ofdm_fifo_level()) * (FS / WORDS_PER_S) + (g_cifs % 4) * (FS * 0.024);
 }
 
-// one super frame (5 CIFs = 1.25 transmission frames). Returns the transmission frames completed.
-// ---- live configuration (-c): labels at once, bitrate / service id through an announced multiplex reconfiguration ----------
-static dab_ensemble g_ens;                 // the ensemble as it is on the air (or will be after the pending change)
-static int g_chg_cif = -1, g_chg_kbps = 0; // the CIF of a pending reconfiguration and the bitrate it brings
-#define CHG_LEAD 125                       // CIFs between the announcement and the change (3 s; FIG 0/0 allows up to 6 s)
-static void cfg_poll(void){
-    if (!o_cfgfile) return;
-    FILE *f = fopen(o_cfgfile, "r"); if (!f) return;
-    char ln[96], svc[17] = "", ens[17] = ""; int br = 0; unsigned sid = 0;
-    while (fgets(ln, sizeof ln, f)){
-        ln[strcspn(ln, "\r\n")] = 0;
-        if (!strncmp(ln, "br=", 3)) br = atoi(ln + 3);
-        else if (!strncmp(ln, "sid=", 4)) sid = (unsigned)strtoul(ln + 4, NULL, 16) & 0xFFFF;
-        else if (!strncmp(ln, "svc=", 4)) snprintf(svc, sizeof svc, "%.16s", ln + 4);
-        else if (!strncmp(ln, "ens=", 4)) snprintf(ens, sizeof ens, "%.16s", ln + 4);
-    }
-    fclose(f);
-    if ((svc[0] && strcmp(svc, g_ens.svc[0].label)) || (ens[0] && strcmp(ens, g_ens.label))){
-        if (svc[0]) snprintf(g_ens.svc[0].label, sizeof g_ens.svc[0].label, "%s", svc);
-        if (ens[0]) snprintf(g_ens.label, sizeof g_ens.label, "%s", ens);
-        dab_mod_set_labels(g_mod, ens[0] ? ens : NULL, svc[0] ? svc : NULL);
-        fprintf(stderr, "labels: \"%s\" / \"%s\"\n", g_ens.svc[0].label, g_ens.label);
-    }
-    if (g_chg_cif >= 0 || dab_mod_change_pending(g_mod)) return;         // one change at a time
-    int want_br = (br >= 8 && br <= 192 && br % 8 == 0) ? br : g_ens.svc[0].bitrate;
-    unsigned want_sid = sid ? sid : g_ens.svc[0].sid;
-    if (want_br == g_ens.svc[0].bitrate && want_sid == g_ens.svc[0].sid) return;
-    dab_ensemble next = g_ens; next.svc[0].bitrate = want_br; next.svc[0].sid = (uint16_t)want_sid;
-    int at = (dab_mod_cif_count(g_mod) + CHG_LEAD + 4) / 5 * 5 % 5000;    // a super frame boundary (super frames start at counts 0 mod 5)
-    if (dab_mod_reconfigure(g_mod, &next, at) == 0){
-        g_chg_cif = at; g_chg_kbps = want_br; g_ens = next;
-        fprintf(stderr, "reconfiguration announced: %d kbit/s, SId %04X at CIF %d\n", want_br, want_sid, at);
-    }
-}
-
-static ext_stream *g_ext = NULL; static uint8_t g_ext_sf[120 * 24];   // a second service, encoded outside (-x)
-
 static double now_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 static double g_t_enc = 0.0, g_t_mod = 0.0;   // seconds spent in the AAC encoder and in the DAB multiplex/modulation (-v)
 
+// ---- the multiplex: its services and where their super frames come from -------------------------------------------------------
+typedef struct { ext_stream *x; int silent_made; uint8_t sf[SF_MAX]; } svc_rt;
+static mux_conf g_mux, g_next;            // on the air; announced (while g_chg_cif >= 0)
+static svc_rt   g_rt[MUX_MAX_SVC];
+static pthread_mutex_t g_rt_lock = PTHREAD_MUTEX_INITIALIZER;   // the I/O thread polls the streams, the producer replaces them
+static int      g_local = -1;             // the service encoded here (index in g_mux), -1 none
+static double   g_tone = 0.0;             // its test tone (Hz), 0 = the I2S input
+static int      g_chg_cif = -1;           // the CIF at which g_next takes effect
+#define CHG_LEAD 125                      // CIFs between the announcement and the change (3 s; FIG 0/0 allows up to 6 s)
+
+static void mux_to_ens(const mux_conf *c, dab_ensemble *e){
+    memset(e, 0, sizeof *e);
+    e->eid = (uint16_t)c->eid; e->ecc = (uint8_t)c->ecc; e->lto_halfhours = c->lto; snprintf(e->label, sizeof e->label, "%s", c->label);
+    e->nsvc = c->n;
+    for (int i = 0; i < c->n; i++){
+        e->svc[i].sid = (uint16_t)c->s[i].sid; snprintf(e->svc[i].label, sizeof e->svc[i].label, "%s", c->s[i].label);
+        e->svc[i].bitrate = c->s[i].kbps; e->svc[i].prot_level = c->s[i].prot; e->svc[i].sls = c->s[i].sls;
+    }
+}
+// the same services in the same sub-channels (only labels, slideshow flags or the test tone differ)
+static int same_structure(const mux_conf *a, const mux_conf *b){
+    if (a->n != b->n) return 0;
+    for (int i = 0; i < a->n; i++){
+        const mux_service *x = &a->s[i], *y = &b->s[i];
+        if (x->src != y->src || x->port != y->port || x->sid != y->sid || x->kbps != y->kbps || x->prot != y->prot) return 0;
+    }
+    return 1;
+}
+static double tone_of(const mux_conf *c, int local){ return o_tone > 0 ? o_tone : (local >= 0 && c->s[local].src == MUX_SRC_TONE ? c->s[local].tone_hz : 0.0); }
+
+static ext_stream *open_stream(const mux_service *s){
+    ext_stream *x = ext_open_params(s->port, s->kbps, s->sid, s->label, s->sls, o_simstream);
+    if (!x) fprintf(stderr, "service %04X \"%s\": port %d cannot be opened, the service stays silent\n", s->sid, s->label, s->port);
+    return x;
+}
+// a silent super frame of a bitrate (for an outside service whose port could not be opened)
+static void silent_superframe(int kbps, uint8_t *out){
+    dabplus_cfg c = { kbps, 1, 0, 0, 1 }; dabplus_enc *e = dabplus_enc_open(&c, 0);
+    float *z = calloc(6 * 960 * 2, sizeof(float));
+    if (e && z) for (int i = 0; i < 3; i++) dabplus_enc_superframe(e, z, out);
+    else memset(out, 0, (size_t)(120 * kbps / 8));
+    dabplus_enc_close(e); free(z);
+}
+// the encoder of the service encoded here, at its bitrate
+static int local_encoder(int kbps){
+    if (!g_enc){ g_cfg = (dabplus_cfg){ kbps, 1, 0, 0, 1 }; g_enc = dabplus_enc_open(&g_cfg, 0); if (o_dls && g_enc) dabplus_enc_set_dls(g_enc, o_dls, 15); return g_enc ? 0 : -1; }
+    if (g_cfg.bitrate_kbps == kbps) return 0;
+    if (dabplus_enc_set_bitrate(g_enc, kbps)) return -1;
+    g_cfg.bitrate_kbps = kbps; return 0;
+}
+
+static void log_mux(const char *what, const mux_conf *c){
+    fprintf(stderr, "%s: \"%s\" %04X, %d service(s), %d of 864 CU\n", what, c->label, c->eid, c->n, mux_cu_total(c));
+    static const char *const pr[9] = { "", "1A", "2A", "3A", "4A", "1B", "2B", "3B", "4B" };
+    for (int i = 0; i < c->n; i++){
+        const mux_service *s = &c->s[i];
+        fprintf(stderr, "    %d: %04X \"%s\" %d kbit/s %s%s, ", i + 1, s->sid, s->label, s->kbps, pr[s->prot], s->sls ? " slideshow" : "");
+        if (s->src == MUX_SRC_ZMQ) fprintf(stderr, "ZeroMQ port %d\n", s->port);
+        else if (s->src == MUX_SRC_TONE) fprintf(stderr, "test tone %d Hz\n", s->tone_hz);
+        else fprintf(stderr, "I2S input\n");
+    }
+}
+
+// the layout file changed: labels at once, the rest announced for a super frame boundary 3 s ahead (one change at a time)
+static struct timespec g_mux_mtime; static off_t g_mux_size = -1;
+static void mux_poll(void){
+    struct stat st;
+    if (!o_muxfile || g_chg_cif >= 0 || stat(o_muxfile, &st)) return;
+    if (st.st_mtim.tv_sec == g_mux_mtime.tv_sec && st.st_mtim.tv_nsec == g_mux_mtime.tv_nsec && st.st_size == g_mux_size) return;
+    g_mux_mtime = st.st_mtim; g_mux_size = st.st_size;
+    mux_conf c; char err[160];
+    if (mux_read(o_muxfile, &c, err, sizeof err)){ fprintf(stderr, "multiplex file not taken: %s\n", err); return; }
+    if (same_structure(&c, &g_mux)){
+        dab_ensemble e; mux_to_ens(&c, &e);
+        if (dab_mod_set_meta(g_mod, &e) == 0){ g_mux = c; g_tone = tone_of(&g_mux, g_local); log_mux("labels changed", &g_mux); }
+        return;
+    }
+    dab_ensemble next; mux_to_ens(&c, &next);
+    int at = (dab_mod_cif_count(g_mod) + CHG_LEAD + 4) / 5 * 5 % 5000;    // a super frame boundary (super frames start at counts 0 mod 5)
+    if (dab_mod_reconfigure(g_mod, &next, at)){ fprintf(stderr, "multiplex file not taken: the reconfiguration was refused\n"); return; }
+    g_next = c; g_chg_cif = at;
+    fprintf(stderr, "reconfiguration announced for CIF %d\n", at);
+    log_mux("next", &g_next);
+}
+
+// the announced layout takes effect with this super frame: streams kept (same port and bitrate), closed or opened; the local
+// encoder changes bitrate (or starts)
+static void apply_switch(void){
+    static svc_rt nrt[MUX_MAX_SVC]; int kept[MUX_MAX_SVC] = { 0 };
+    for (int i = 0; i < g_next.n; i++){
+        nrt[i].x = NULL;
+        if (g_next.s[i].src != MUX_SRC_ZMQ) continue;
+        for (int j = 0; j < g_mux.n; j++)
+            if (!kept[j] && g_rt[j].x && g_mux.s[j].src == MUX_SRC_ZMQ && g_mux.s[j].port == g_next.s[i].port && g_mux.s[j].kbps == g_next.s[i].kbps){
+                nrt[i].x = g_rt[j].x; kept[j] = 1; break;
+            }
+    }
+    pthread_mutex_lock(&g_rt_lock);
+    for (int j = 0; j < g_mux.n; j++) if (g_rt[j].x && !kept[j]){ ext_close(g_rt[j].x); g_rt[j].x = NULL; }
+    for (int i = 0; i < g_next.n; i++) if (g_next.s[i].src == MUX_SRC_ZMQ && !nrt[i].x) nrt[i].x = open_stream(&g_next.s[i]);
+    for (int i = 0; i < MUX_MAX_SVC; i++){ g_rt[i].x = i < g_next.n ? nrt[i].x : NULL; g_rt[i].silent_made = 0; }
+    g_mux = g_next;
+    pthread_mutex_unlock(&g_rt_lock);
+    int nl = mux_local(&g_mux);
+    if (nl >= 0 && local_encoder(g_mux.s[nl].kbps)) fprintf(stderr, "the local encoder could not change to %d kbit/s\n", g_mux.s[nl].kbps);
+    g_local = nl; g_tone = tone_of(&g_mux, g_local); g_chg_cif = -1;
+    log_mux("reconfiguration done", &g_mux);
+}
+
+// ---- one super frame (5 CIFs = 1.25 transmission frames). Returns the transmission frames completed. ---------------------------
 static int produce_superframe(void){
     double ratio = 1.0 + g_ppm_now * 1e-6;
     int was_primed = g_primed;
-    if (o_tone > 0){
+    if (g_local >= 0 && g_tone > 0){
         // test tone: generated here on the transmitter's clock, so no resampling and no rate control
         static double ph_l = 0, ph_r = 0;
         for (int i = 0; i < SF_SAMPLES; i++){
             g_pcm[2 * i] = 0.25f * (float)sin(ph_l); g_pcm[2 * i + 1] = 0.25f * (float)sin(ph_r);
-            ph_l = fmod(ph_l + 2 * M_PI * o_tone / FS, 2 * M_PI); ph_r = fmod(ph_r + 2 * M_PI * 1.5 * o_tone / FS, 2 * M_PI);
+            ph_l = fmod(ph_l + 2 * M_PI * g_tone / FS, 2 * M_PI); ph_r = fmod(ph_r + 2 * M_PI * 1.5 * g_tone / FS, 2 * M_PI);
         }
-    } else {
+    } else if (g_local >= 0){
         unsigned need = (unsigned)ceil(SF_SAMPLES * ratio + rs_pos) + RS_TAPS;
         // start (and restart after a gap) only with AUD_TARGET in the buffer
         if (!g_primed && aud_fill() >= AUD_TARGET + need) g_primed = 1;
@@ -216,20 +298,24 @@ static int produce_superframe(void){
         } else { memset(g_pcm, 0, sizeof(float) * SF_SAMPLES * 2); atomic_fetch_add(&st_silence, 1); }
     }
     double t0 = now_s();
-    cfg_poll();
-    if (g_chg_cif >= 0 && dab_mod_cif_count(g_mod) == g_chg_cif){
-        // this super frame is the first one of the new configuration: the encoder changes bitrate with it
-        if (dabplus_enc_set_bitrate(g_enc, g_chg_kbps) == 0){ g_cfg.bitrate_kbps = g_chg_kbps; g_lfb = 3 * g_chg_kbps; }
-        fprintf(stderr, "reconfiguration: now %d kbit/s\n", g_cfg.bitrate_kbps);
-        g_chg_cif = -1;
+    mux_poll();
+    if (g_chg_cif >= 0 && dab_mod_cif_count(g_mod) == g_chg_cif) apply_switch();   // this super frame is the first one of the new layout
+    if (g_local >= 0){
+        dls_poll(g_enc);
+        if (dabplus_enc_superframe(g_enc, g_pcm, g_sf)) return -1;
     }
-    dls_poll(g_enc);
-    if (dabplus_enc_superframe(g_enc, g_pcm, g_sf)) return -1;
-    if (g_ext) memcpy(g_ext_sf, ext_next(g_ext), (size_t)(120 * ext_kbps(g_ext) / 8));   // the outside service's next super frame (or silence)
+    const uint8_t *src[MUX_MAX_SVC];
+    for (int i = 0; i < g_mux.n; i++){
+        if (i == g_local){ src[i] = g_sf; continue; }
+        if (g_rt[i].x) memcpy(g_rt[i].sf, ext_next(g_rt[i].x), (size_t)(120 * g_mux.s[i].kbps / 8));   // the outside service's next super frame (or silence)
+        else if (!g_rt[i].silent_made){ silent_superframe(g_mux.s[i].kbps, g_rt[i].sf); g_rt[i].silent_made = 1; }
+        src[i] = g_rt[i].sf;
+    }
     double t1 = now_s(); g_t_enc += t1 - t0;
     int frames = 0;
     for (int k = 0; k < 5; k++){
-        const uint8_t *lf[2] = { g_sf + k * g_lfb, g_ext_sf + k * (g_ext ? 3 * ext_kbps(g_ext) : 0) };
+        const uint8_t *lf[MUX_MAX_SVC];
+        for (int i = 0; i < g_mux.n; i++) lf[i] = src[i] + k * 3 * g_mux.s[i].kbps;   // logical frame k of 5: 24 ms, 3 bytes per kbit/s
         if (dab_mod_push_cif(g_mod, lf)){
             const uint32_t *w = dab_mod_phase_words(g_mod);
             unsigned p = atomic_load(&ph_w);
@@ -240,7 +326,7 @@ static int produce_superframe(void){
         g_cifs++;
     }
     g_t_mod += now_s() - t1;
-    if (o_tone <= 0 && g_primed){
+    if (g_local >= 0 && g_tone <= 0 && g_primed){
         // rate control (PI, critically damped, time constant about a minute): hold the latency where it was at the start;
         // positive error = audio piling up = consume faster
         double L = latency();
@@ -267,6 +353,12 @@ static void *producer_thread(void *arg){
     return NULL;
 }
 
+static void poll_streams(void){
+    pthread_mutex_lock(&g_rt_lock);
+    for (int i = 0; i < MUX_MAX_SVC; i++) if (g_rt[i].x) ext_poll(g_rt[i].x);
+    pthread_mutex_unlock(&g_rt_lock);
+}
+
 // ---- hardware I/O: audio FIFO -> ring, phase ring -> OFDM FIFO -----------------------------------------------------------------
 static unsigned g_words_out = 0;           // phase words written since the last (re)start, for the frame alignment
 static void hw_restart(void){
@@ -282,8 +374,8 @@ static void hw_restart(void){
 }
 static unsigned long long g_in_total = 0; static unsigned g_in_nmax = 0;   // audio words read from the FPGA, the largest batch (-v)
 static void hw_io_step(void){
-    if (g_ext) ext_poll(g_ext);                                      // the outside service's super frames from the network
-    unsigned n = o_tone > 0 ? 0 : rd(R_AUDCNT);                       // with the test tone the I2S audio is left in the FIFO
+    poll_streams();                                                  // the outside services' super frames from the network
+    unsigned n = rd(R_AUDCNT);
     // Bitstream B1D0001E (fixed in B1D0001F) reports 1024 while the FIFO's write pointer has wrapped and its read pointer not yet (23 times per second
     // at 48 kHz, for a few ms): never read more than can have arrived since the last read (98 % of 48 kHz; the rest stays for the
     // next round). Only a stall of this thread can then still overflow the FIFO.
@@ -295,10 +387,11 @@ static void hw_io_step(void){
     }
     t_prev = t_now;
     g_in_total += n; if (n > g_in_nmax) g_in_nmax = n;
+    const int use = g_local >= 0 && g_tone <= 0;                    // the audio is read in any case (the FIFO must not fill), kept only when it is used
     unsigned w = atomic_load(&aud_w), room = AUD_RING - RS_TAPS - aud_fill(), kept = 0;
     for (unsigned i = 0; i < n; i++){
         uint32_t v = rd(R_AUDIO);                                    // every read pops; keep what fits (the rate control prevents a full ring)
-        if (kept == room) continue;
+        if (!use || kept == room) continue;
         aud_ring[(w + kept) % AUD_RING][0] = (float)(int16_t)(v >> 16) * (1.0f / 32768.0f);
         aud_ring[(w + kept) % AUD_RING][1] = (float)(int16_t)(v & 0xFFFF) * (1.0f / 32768.0f);
         kept++;
@@ -314,19 +407,33 @@ static void hw_io_step(void){
     g_words_out += space;
 }
 
+// the outside services in the status line: z<n>=<port>:<buffered>/<received>/<silent>/<dropped>/<unusable>/<sender>
+static void print_streams(FILE *f, int verbose){
+    pthread_mutex_lock(&g_rt_lock);
+    for (int i = 0; i < g_mux.n; i++){
+        if (g_mux.s[i].src != MUX_SRC_ZMQ) continue;
+        ext_stats es; memset(&es, 0, sizeof es); if (g_rt[i].x) ext_get_stats(g_rt[i].x, &es);
+        if (verbose) fprintf(f, "    service %d (%04X, port %d): %d buffered, %lu received, %lu sent, %lu silent, %lu dropped, %lu unusable, from %s\n",
+                             i + 1, g_mux.s[i].sid, g_mux.s[i].port, es.fill, es.received, es.used, es.silent, es.dropped, es.bad, es.peer ? es.peer : "-");
+        else fprintf(f, " z%d=%d:%d/%lu/%lu/%lu/%lu/%s", i + 1, g_mux.s[i].port, es.fill, es.received, es.silent, es.dropped, es.bad, es.peer ? es.peer : "-");
+    }
+    pthread_mutex_unlock(&g_rt_lock);
+}
+
 static void on_signal(int sig){ (void)sig; g_stop = 1; }
 
 static void usage(void){
     fprintf(stderr,
-        "skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-i service id hex] [-d DLS text] [-t DLS file] [-g gain 0..3] [-L level] [-T tone Hz]\n"
-        "             [-S status file] [-c config file] [-v]\n"
-        "skypluto-dab -f in.f32 -o phases.bin [-p audio clock ppm] [-n seconds] ...   (simulation, no hardware)\n");
+        "skypluto-dab -m mux.conf [-t DLS file] [-S status file] [-g gain 0..3] [-L level] [-T tone Hz] [-v]\n"
+        "skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-i service id hex] [-d DLS text] [-x outside.conf] ...   (without a layout file)\n"
+        "skypluto-dab -f in.f32 -o phases.bin [-p audio clock ppm] [-n seconds] [-X recorded.zmq] ...   (simulation, no hardware)\n");
 }
 
 int main(int argc, char **argv){
     int c;
-    while ((c = getopt(argc, argv, "b:s:e:i:d:t:c:x:g:L:T:S:vf:o:p:n:h")) != -1){
+    while ((c = getopt(argc, argv, "m:b:s:e:i:d:t:x:X:R:W:g:L:T:S:vf:o:p:n:h")) != -1){
         switch (c){
+        case 'm': o_muxfile = optarg; break;
         case 'b': o_kbps = atoi(optarg); break;
         case 's': o_svc = optarg; break;
         case 'e': o_ens = optarg; break;
@@ -337,8 +444,10 @@ int main(int argc, char **argv){
         case 'T': o_tone = atof(optarg); break;
         case 'i': o_sid = (unsigned)strtoul(optarg, NULL, 16) & 0xFFFF; break;
         case 'S': o_status = optarg; break;
-        case 'c': o_cfgfile = optarg; break;
         case 'x': o_extconf = optarg; break;
+        case 'X': o_simstream = optarg; break;
+        case 'R': o_simnext = optarg; break;
+        case 'W': o_simnext_t = atof(optarg); break;
         case 'v': o_verbose = 1; break;
         case 'f': o_simin = optarg; break;
         case 'o': o_simout = optarg; break;
@@ -347,28 +456,36 @@ int main(int argc, char **argv){
         default: usage(); return 2;
         }
     }
-    if (o_kbps < 8 || o_kbps > 192 || o_kbps % 8){ fprintf(stderr, "bitrate: 8..192 kbit/s, multiple of 8\n"); return 2; }
-    g_cfg = (dabplus_cfg){ o_kbps, 1, 0, 0, 1 };
-    g_enc = dabplus_enc_open(&g_cfg, 0);
-    dab_ensemble ens; memset(&ens, 0, sizeof ens);
-    ens.eid = 0x8FED; snprintf(ens.label, sizeof ens.label, "%s", o_ens);
-    ens.ecc = 0xE3; ens.lto_halfhours = 2; ens.nsvc = 1;
-    ens.svc[0].sid = (uint16_t)o_sid; snprintf(ens.svc[0].label, sizeof ens.svc[0].label, "%s", o_svc);
-    ens.svc[0].bitrate = o_kbps; ens.svc[0].prot_level = 3;
-    if (o_extconf){
-        g_ext = ext_open(o_extconf);
-        if (!g_ext) fprintf(stderr, "outside service: %s unusable (port in use, bad bitrate?), going on without it\n", o_extconf);
-        else {
-            ens.nsvc = 2; ens.svc[1].sid = (uint16_t)ext_sid(g_ext); snprintf(ens.svc[1].label, sizeof ens.svc[1].label, "%s", ext_label(g_ext));
-            ens.svc[1].bitrate = ext_kbps(g_ext); ens.svc[1].prot_level = 3; ens.svc[1].sls = ext_sls(g_ext);
-            fprintf(stderr, "outside service \"%s\" (SId %04X, %d kbit/s) from %s\n", ext_label(g_ext), ext_sid(g_ext), ext_kbps(g_ext), o_extconf);
+    // the layout: from the file, or one service from the options (plus an outside one from -x)
+    if (o_muxfile){
+        char err[160]; struct stat st;
+        if (mux_read(o_muxfile, &g_mux, err, sizeof err)){ fprintf(stderr, "%s: %s\n", o_muxfile, err); return 2; }
+        if (!stat(o_muxfile, &st)){ g_mux_mtime = st.st_mtim; g_mux_size = st.st_size; }
+    } else {
+        if (o_kbps < 8 || o_kbps > 192 || o_kbps % 8){ fprintf(stderr, "bitrate: 8..192 kbit/s, multiple of 8\n"); return 2; }
+        mux_default(&g_mux);
+        snprintf(g_mux.label, sizeof g_mux.label, "%.16s", o_ens);
+        g_mux.s[0].sid = o_sid; snprintf(g_mux.s[0].label, sizeof g_mux.s[0].label, "%.16s", o_svc); g_mux.s[0].kbps = o_kbps;
+        if (o_extconf){
+            ext_stream *x = ext_open(o_extconf);
+            if (!x) fprintf(stderr, "outside service: %s unusable (port in use, bad bitrate?), going on without it\n", o_extconf);
+            else {
+                mux_service *s = &g_mux.s[1]; g_mux.n = 2;
+                s->src = MUX_SRC_ZMQ; s->port = ext_port(x); s->sid = ext_sid(x); s->kbps = ext_kbps(x); s->prot = 3; s->sls = ext_sls(x);
+                snprintf(s->label, sizeof s->label, "%s", ext_label(x));
+                g_rt[1].x = x;
+            }
         }
     }
-    g_mod = dab_mod_open(&ens); g_ens = ens;
-    if (!g_enc || !g_mod){ fprintf(stderr, "bad configuration\n"); return 2; }
+    g_local = mux_local(&g_mux); g_tone = tone_of(&g_mux, g_local);
+    if (g_local >= 0 && local_encoder(g_mux.s[g_local].kbps)){ fprintf(stderr, "encoder: bad configuration\n"); return 2; }
+    for (int i = 0; i < g_mux.n; i++) if (g_mux.s[i].src == MUX_SRC_ZMQ && !g_rt[i].x) g_rt[i].x = open_stream(&g_mux.s[i]);
+    dab_ensemble ens; mux_to_ens(&g_mux, &ens);
+    g_mod = dab_mod_open(&ens);
+    if (!g_mod){ fprintf(stderr, "multiplex: bad configuration\n"); return 2; }
     dab_mod_set_phases_only(g_mod, 1);                               // the FPGA does the OFDM
-    if (o_dls) dabplus_enc_set_dls(g_enc, o_dls, 15);
-    g_pcm = calloc(SF_SAMPLES * 2, sizeof(float)); g_sf = malloc(120 * 24);   /* the largest super frame (192 kbit/s): the bitrate can change */ g_lfb = dab_mod_lf_bytes(g_mod, 0);
+    log_mux("multiplex", &g_mux);
+    g_pcm = calloc(SF_SAMPLES * 2, sizeof(float));
     rs_init();
     signal(SIGINT, on_signal); signal(SIGTERM, on_signal);
 
@@ -387,7 +504,8 @@ int main(int argc, char **argv){
                 if (aud_fill() < AUD_RING - RS_TAPS){ unsigned w = atomic_load(&aud_w); aud_ring[w % AUD_RING][0] = s[0]; aud_ring[w % AUD_RING][1] = s[1]; atomic_store(&aud_w, w + 1); }
                 else atomic_fetch_add(&st_audio_ovf, 1);
             }
-            if (g_ext) ext_poll(g_ext);
+            poll_streams();
+            if (o_simnext && o_muxfile && t >= o_simnext_t){ rename(o_simnext, o_muxfile); o_simnext = NULL; }   // -R/-W: another layout at that time
             while (producer_wants()) if (produce_superframe() < 0) return 1;
             wacc += WORDS_PER_S * 0.004; int take = (int)wacc; wacc -= take;   // the FPGA consumes
             if ((unsigned)take > fifo){ if (words > FRAME_WORDS) atomic_fetch_add(&st_underflow, 1); fifo = 0; } else fifo -= take;
@@ -418,7 +536,7 @@ int main(int argc, char **argv){
     for (int i = 0; i < 2; i++) if (produce_superframe() < 0) return 1;
     wr(R_DAB, (uint32_t)(0x1 | (o_gain << 2)));                     // DAB mode
     while (rd(R_AUDCNT)) (void)rd(R_AUDIO);                           // stale audio
-    if (o_tone > 0) fprintf(stderr, "test tone %.0f Hz left, %.0f Hz right (-12 dBFS)\n", o_tone, 1.5 * o_tone);
+    if (g_local >= 0 && g_tone > 0) fprintf(stderr, "test tone %.0f Hz left, %.0f Hz right (-12 dBFS)\n", g_tone, 1.5 * g_tone);
     pthread_t th; pthread_create(&th, NULL, producer_thread, NULL);
     struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0); double last = 0;
     while (!g_stop){
@@ -428,7 +546,7 @@ int main(int argc, char **argv){
         double t = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
         // the input clock against this CPU's clock over 10 s (from 2 s on): the start value of the rate control
         { static int seed_state = 0; static double seed_t0; static unsigned long long seed_n0;
-          if (o_tone <= 0 && seed_state == 0 && t >= 2.0){ seed_t0 = t; seed_n0 = g_in_total; seed_state = 1; }
+          if (g_local >= 0 && g_tone <= 0 && seed_state == 0 && t >= 2.0){ seed_t0 = t; seed_n0 = g_in_total; seed_state = 1; }
           else if (seed_state == 1 && t - seed_t0 >= 10.0){
               double ppm = ((double)(g_in_total - seed_n0) / (t - seed_t0) / FS - 1.0) * 1e6;
               if (fabs(ppm) < RC_MAX){ g_seed_ppm = ppm; atomic_store(&g_seed_ready, 1); }
@@ -442,12 +560,10 @@ int main(int argc, char **argv){
             char tmp[256]; snprintf(tmp, sizeof tmp, "%s.new", o_status);
             FILE *sf = fopen(tmp, "w");
             if (sf){
-                fprintf(sf, "fifo=%u uf=%u rst=%u aud=%u ppm=%+.0f sil=%u cpu=%.0f", rd(R_PHASE) & 0x3FFF, atomic_load(&st_underflow), atomic_load(&st_resets),
-                        aud_fill(), g_ppm_now, atomic_load(&st_silence), 100 * (g_t_enc + g_t_mod) / t);
-                if (g_ext){   // the outside service: buffered super frames, received / sent silent / dropped / not usable, its sender
-                    ext_stats es; ext_get_stats(g_ext, &es);
-                    fprintf(sf, " x2=%d x2rx=%lu x2sil=%lu x2drop=%lu x2bad=%lu x2from=%s", es.fill, es.received, es.silent, es.dropped, es.bad, es.peer ? es.peer : "-");
-                }
+                fprintf(sf, "fifo=%u uf=%u rst=%u aud=%u ppm=%+.0f sil=%u cpu=%.0f svc=%d cu=%d", rd(R_PHASE) & 0x3FFF, atomic_load(&st_underflow), atomic_load(&st_resets),
+                        aud_fill(), g_ppm_now, atomic_load(&st_silence), 100 * (g_t_enc + g_t_mod) / t, g_mux.n, mux_cu_total(&g_mux));
+                if (g_chg_cif >= 0) fprintf(sf, " chg=%d", g_chg_cif);
+                print_streams(sf, 0);
                 fputc('\n', sf);
                 fclose(sf); rename(tmp, o_status);
             }
@@ -455,9 +571,7 @@ int main(int argc, char **argv){
         if (o_verbose && t - last >= 5.0){
             static unsigned long long in_last = 0;
             fprintf(stderr, "    audio in %.0f samples/s, largest batch %u\n", (g_in_total - in_last) / (t - last), g_in_nmax);
-            if (g_ext){ ext_stats es; ext_get_stats(g_ext, &es);
-                fprintf(stderr, "    outside service: %d buffered, %lu received, %lu sent, %lu silent, %lu dropped, %lu unusable, from %s, level %d/%d\n",
-                        es.fill, es.received, es.used, es.silent, es.dropped, es.bad, es.peer ? es.peer : "-", es.level_l, es.level_r); }
+            print_streams(stderr, 1);
             in_last = g_in_total; g_in_nmax = 0;
             last = t;
             fprintf(stderr, "t=%.0f s audio %u ratio %+.1f ppm phase queue %u OFDM FIFO %u silence %u resync %u underflow %u restarts %u audio-ovf %u cpu enc %.0f%% mux %.0f%%\n",

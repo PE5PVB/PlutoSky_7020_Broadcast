@@ -114,7 +114,7 @@ static void figs_subch(dab_mod *m, const subch *sc, int nsvc, int cn){
         while (i < nsvc && p + 4 <= 30){
             const subch *s = &sc[i];
             f[p++] = (uint8_t)((i << 2) | (s->cu_start >> 8)); f[p++] = (uint8_t)s->cu_start;
-            f[p++] = (uint8_t)(0x80 | (0 << 4) | ((s->prot - 1) << 2) | (s->cu_size >> 8));   // long form, option 0, level
+            f[p++] = (uint8_t)(0x80 | ((s->prot > 4 ? 1 : 0) << 4) | (((s->prot - 1) & 3) << 2) | (s->cu_size >> 8));   // long form, option 0 (A) / 1 (B), level
             f[p++] = (uint8_t)s->cu_size;
             i++;
         }
@@ -216,11 +216,16 @@ static void encode_fic(dab_mod *m, uint8_t *out_bits){
 
 // ---------------------------------------------------------------------------------------------------------------------
 
+// prot 1..4 = EEP-1A..4A (any multiple of 8 kbit/s), 5..8 = EEP-1B..4B (multiples of 32 kbit/s); EN 300 401 tables 7 and 8
 static int setup_subch(subch *s, int bitrate, int prot, int cu_start){
-    if (bitrate < 8 || bitrate % 8 || prot < 1 || prot > 4) return -1;
+    if (bitrate < 8 || bitrate % 8 || prot < 1 || prot > 8 || (prot > 4 && bitrate % 32)) return -1;
     const int n = bitrate / 8;
     s->bitrate = bitrate; s->n = n; s->prot = prot; s->cu_start = cu_start; s->nrules = 2;
-    switch (prot){
+    if (prot > 4){                                                  // EEP-B: n = bitrate / 32, 24n - 3 and 3 blocks of 128 bits
+        static const int pi1[4] = { 10, 6, 4, 2 }, pi2[4] = { 9, 5, 3, 1 }, cus[4] = { 27, 21, 18, 15 };
+        const int nb = bitrate / 32, l = prot - 5;
+        s->rules[0] = (prule){ (24 * nb - 3) * 128, PI[pi1[l]] }; s->rules[1] = (prule){ 3 * 128, PI[pi2[l]] }; s->cu_size = cus[l] * nb;
+    } else switch (prot){
     case 1: s->rules[0] = (prule){ (6 * n - 3) * 128, PI[24] }; s->rules[1] = (prule){ 3 * 128, PI[23] }; s->cu_size = 12 * n; break;
     case 2: if (n == 1){ s->rules[0] = (prule){ 5 * 128, PI[13] }; s->rules[1] = (prule){ 1 * 128, PI[12] }; }
             else { s->rules[0] = (prule){ (2 * n - 3) * 128, PI[14] }; s->rules[1] = (prule){ (4 * n + 3) * 128, PI[13] }; }
@@ -231,6 +236,12 @@ static int setup_subch(subch *s, int bitrate, int prot, int cu_start){
     s->in_bits = 24 * bitrate; s->out_bits = s->cu_size * 64;
     for (int i = 0; i < 16; i++){ s->ti[i] = calloc((size_t)s->out_bits, 1); if (!s->ti[i]) return -1; }
     return 0;
+}
+
+int dab_cu_size(int bitrate, int prot){
+    if (bitrate < 8 || bitrate % 8 || prot < 1 || prot > 8 || (prot > 4 && bitrate % 32)) return -1;
+    static const int a[4] = { 12, 8, 6, 4 }, b[4] = { 27, 21, 18, 15 };
+    return prot > 4 ? b[prot - 5] * (bitrate / 32) : a[prot - 1] * (bitrate / 8);
 }
 
 dab_mod *dab_mod_open(const dab_ensemble *ens){
@@ -342,6 +353,14 @@ static void modulate_frame(dab_mod *m){
 
 // the announced configuration takes effect with this CIF
 static void apply_change(dab_mod *m){
+    // a service that keeps its bitrate and protection keeps its time interleaver history (only its address may move), so its
+    // audio runs on without a gap; only the changed services start afresh
+    for (int i = 0; i < m->next_ens.nsvc; i++) for (int j = 0; j < m->ens.nsvc; j++)
+        if (m->ens.svc[j].sid == m->next_ens.svc[i].sid && m->sc[j].bitrate == m->next_sc[i].bitrate && m->sc[j].prot == m->next_sc[i].prot && m->sc[j].ti[0]){
+            for (int k = 0; k < 16; k++){ uint8_t *t = m->next_sc[i].ti[k]; m->next_sc[i].ti[k] = m->sc[j].ti[k]; m->sc[j].ti[k] = t; }
+            m->next_sc[i].ti_pos = m->sc[j].ti_pos;
+            break;
+        }
     for (int i = 0; i < DAB_MAX_SVC; i++) for (int k = 0; k < 16; k++){ free(m->sc[i].ti[k]); m->sc[i].ti[k] = NULL; }
     memcpy(m->sc, m->next_sc, sizeof m->sc); memset(m->next_sc, 0, sizeof m->next_sc);
     m->ens = m->next_ens; m->cu_used = m->next_cu; m->change_at = -1; m->change_flags = 0;
@@ -349,12 +368,13 @@ static void apply_change(dab_mod *m){
 }
 
 int dab_mod_reconfigure(dab_mod *m, const dab_ensemble *next, int at_cif){
-    if (m->change_at >= 0 || next->nsvc < 1 || next->nsvc > DAB_MAX_SVC || next->nsvc != m->ens.nsvc) return -1;
+    if (m->change_at >= 0 || next->nsvc < 1 || next->nsvc > DAB_MAX_SVC) return -1;
     subch ns[DAB_MAX_SVC]; memset(ns, 0, sizeof ns);
-    int cu = 0, flags = 0;
+    int cu = 0, flags = next->nsvc != m->ens.nsvc ? 3 : 0;          // services added or removed: both organisations change
     for (int i = 0; i < next->nsvc; i++){
         if (setup_subch(&ns[i], next->svc[i].bitrate, next->svc[i].prot_level, cu)) goto fail;
         cu += ns[i].cu_size;
+        if (i >= m->ens.nsvc) continue;
         if (ns[i].bitrate != m->sc[i].bitrate || ns[i].prot != m->sc[i].prot || ns[i].cu_start != m->sc[i].cu_start) flags |= 1;
         if (next->svc[i].sid != m->ens.svc[i].sid) flags |= 2;
     }
@@ -369,6 +389,19 @@ fail:
 }
 int dab_mod_change_pending(const dab_mod *m){ return m->change_at >= 0; }
 int dab_mod_cif_count(const dab_mod *m){ return m->cif_count; }
+
+int dab_mod_set_meta(dab_mod *m, const dab_ensemble *e){
+    if (m->change_at >= 0 || e->nsvc != m->ens.nsvc) return -1;
+    for (int i = 0; i < e->nsvc; i++) if (e->svc[i].sid != m->ens.svc[i].sid) return -1;
+    snprintf(m->ens.label, sizeof m->ens.label, "%s", e->label);
+    m->ens.eid = e->eid; m->ens.ecc = e->ecc; m->ens.lto_halfhours = e->lto_halfhours;
+    for (int i = 0; i < e->nsvc; i++){
+        snprintf(m->ens.svc[i].label, sizeof m->ens.svc[i].label, "%s", e->svc[i].label);
+        m->ens.svc[i].sls = e->svc[i].sls; m->ens.svc[i].pty = e->svc[i].pty;
+    }
+    build_figs(m);
+    return 0;
+}
 
 void dab_mod_set_labels(dab_mod *m, const char *ensemble, const char *service){
     if (ensemble){ snprintf(m->ens.label, sizeof m->ens.label, "%s", ensemble); snprintf(m->next_ens.label, sizeof m->next_ens.label, "%s", ensemble); }

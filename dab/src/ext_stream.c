@@ -21,21 +21,7 @@ struct ext_stream {
     atomic_int lvl_l, lvl_r;
 };
 
-ext_stream *ext_open(const char *conf_file){
-    FILE *f = fopen(conf_file, "r"); if (!f) return NULL;
-    ext_stream *e = calloc(1, sizeof *e); if (!e){ fclose(f); return NULL; }
-    e->port = 2491; e->kbps = 128; e->sls = 1; e->sid = 0x8F02; snprintf(e->label, sizeof e->label, "Extern");
-    char ln[160];
-    while (fgets(ln, sizeof ln, f)){
-        ln[strcspn(ln, "\r\n")] = 0;
-        if (!strncmp(ln, "port=", 5)) e->port = atoi(ln + 5);
-        else if (!strncmp(ln, "br=", 3)) e->kbps = atoi(ln + 3);
-        else if (!strncmp(ln, "sls=", 4)) e->sls = atoi(ln + 4) ? 1 : 0;
-        else if (!strncmp(ln, "sid=", 4)) e->sid = (unsigned)strtoul(ln + 4, NULL, 16) & 0xFFFF;
-        else if (!strncmp(ln, "label=", 6)) snprintf(e->label, sizeof e->label, "%.16s", ln + 6);
-        else if (!strncmp(ln, "file=", 5)) snprintf(e->file, sizeof e->file, "%.127s", ln + 5);
-    }
-    fclose(f);
+static ext_stream *start(ext_stream *e){
     if (e->kbps < 8 || e->kbps > 192 || e->kbps % 8 || !e->sid){ free(e); return NULL; }
     e->sfbytes = 120 * e->kbps / 8;
     e->ring = malloc((size_t)RING * e->sfbytes); e->silence = malloc((size_t)e->sfbytes); e->msg = malloc((size_t)e->sfbytes + HDR + 64);
@@ -51,6 +37,34 @@ ext_stream *ext_open(const char *conf_file){
     if (!ok){ ext_close(e); return NULL; }
     return e;
 }
+
+ext_stream *ext_open_params(int port, int kbps, unsigned sid, const char *label, int sls, const char *simfile){
+    ext_stream *e = calloc(1, sizeof *e); if (!e) return NULL;
+    e->port = port; e->kbps = kbps; e->sid = sid; e->sls = sls;
+    snprintf(e->label, sizeof e->label, "%.16s", label ? label : "Extern");
+    if (simfile) snprintf(e->file, sizeof e->file, "%.127s", simfile);
+    return start(e);
+}
+
+ext_stream *ext_open(const char *conf_file){
+    FILE *f = fopen(conf_file, "r"); if (!f) return NULL;
+    ext_stream *e = calloc(1, sizeof *e); if (!e){ fclose(f); return NULL; }
+    e->port = 2491; e->kbps = 128; e->sls = 1; e->sid = 0x8F02; snprintf(e->label, sizeof e->label, "Extern");
+    char ln[160];
+    while (fgets(ln, sizeof ln, f)){
+        ln[strcspn(ln, "\r\n")] = 0;
+        if (!strncmp(ln, "port=", 5)) e->port = atoi(ln + 5);
+        else if (!strncmp(ln, "br=", 3)) e->kbps = atoi(ln + 3);
+        else if (!strncmp(ln, "sls=", 4)) e->sls = atoi(ln + 4) ? 1 : 0;
+        else if (!strncmp(ln, "sid=", 4)) e->sid = (unsigned)strtoul(ln + 4, NULL, 16) & 0xFFFF;
+        else if (!strncmp(ln, "label=", 6)) snprintf(e->label, sizeof e->label, "%.16s", ln + 6);
+        else if (!strncmp(ln, "file=", 5)) snprintf(e->file, sizeof e->file, "%.127s", ln + 5);
+    }
+    fclose(f);
+    return start(e);
+}
+
+int ext_port(const ext_stream *e){ return e->port; }
 
 void ext_close(ext_stream *e){ if (!e) return; zmtp_sub_close(e->z); if (e->sim) fclose(e->sim); free(e->ring); free(e->silence); free(e->msg); free(e); }
 int ext_kbps(const ext_stream *e){ return e->kbps; }

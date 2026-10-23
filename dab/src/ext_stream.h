@@ -20,6 +20,9 @@ typedef struct {
 
 // config file: port=<tcp port> br=<kbit/s> sid=<hex> label=<up to 16 chars> [sls=0|1, default 1] [file=<recorded messages, for the simulation>]
 ext_stream *ext_open(const char *conf_file);
+// the same without a file; simfile: recorded messages instead of the network (simulation), else NULL
+ext_stream *ext_open_params(int port, int kbps, unsigned sid, const char *label, int sls, const char *simfile);
+int         ext_port(const ext_stream *e);
 void        ext_close(ext_stream *e);
 int         ext_kbps(const ext_stream *e);
 int         ext_sls(const ext_stream *e);                // 1: its PAD carries a slideshow (signalled in FIG 0/13); sls=0 in the file turns it off
