@@ -6,7 +6,8 @@
 // The transmission runs on the FPGA's sample clock (the AD9361), the audio on the I2S master's clock (the Pico). The two
 // drift apart, so the audio goes through a polyphase resampler whose ratio is steered by the fill of the audio buffer.
 //
-//   skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-d DLS text] [-t DLS file] [-g gain 0..3] [-L level] [-v]
+//   skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-d DLS text] [-t DLS file] [-g gain 0..3] [-L level] [-T Hz] [-v]
+//   -T Hz: test tone instead of the I2S input (left Hz, right 1.5 x Hz, -12 dBFS), for a first test without a DAB source
 //   skypluto-dab -f in.f32 -o phases.bin [-p ppm] [-n seconds] ...     (simulation on a PC: no hardware)
 //
 // Registers (WFM block at 0x7C440000): 0x64 DAB control ([0] DAB mode, [1] reset, [3:2] gain 2^n), 0x68 write = phase word,
@@ -57,7 +58,7 @@ static unsigned ph_fill(void){ return atomic_load(&ph_w) - atomic_load(&ph_r); }
 static int   o_kbps = 96, o_gain = 1, o_level = -1, o_verbose = 0;
 static const char *o_svc = "PlutoSky", *o_ens = "PlutoSky DAB", *o_dls = NULL, *o_dlsfile = NULL;
 static const char *o_simin = NULL, *o_simout = NULL;
-static double o_ppm = 0.0, o_secs = 0.0;
+static double o_ppm = 0.0, o_secs = 0.0, o_tone = 0.0;
 static volatile sig_atomic_t g_stop = 0;
 static volatile uint32_t *g_reg = NULL;
 static atomic_uint st_underflow, st_silence, st_audio_ovf, st_resets, st_resync;
@@ -140,6 +141,29 @@ static double latency(void){
 
 // one super frame (5 CIFs = 1.25 transmission frames). Returns the transmission frames completed.
 static int produce_superframe(void){
+    if (o_tone > 0){
+        // test tone: generated here on the transmitter's clock, so no resampling and no rate control
+        static double ph_l = 0, ph_r = 0;
+        for (int i = 0; i < SF_SAMPLES; i++){
+            g_pcm[2 * i] = 0.25f * (float)sin(ph_l); g_pcm[2 * i + 1] = 0.25f * (float)sin(ph_r);
+            ph_l = fmod(ph_l + 2 * M_PI * o_tone / FS, 2 * M_PI); ph_r = fmod(ph_r + 2 * M_PI * 1.5 * o_tone / FS, 2 * M_PI);
+        }
+        dls_poll(g_enc);
+        if (dabplus_enc_superframe(g_enc, g_pcm, g_sf)) return -1;
+        int frames = 0;
+        for (int k = 0; k < 5; k++){
+            const uint8_t *lf[1] = { g_sf + k * g_lfb };
+            if (dab_mod_push_cif(g_mod, lf)){
+                const uint32_t *w = dab_mod_phase_words(g_mod);
+                unsigned p = atomic_load(&ph_w);
+                for (int j = 0; j < FRAME_WORDS; j++) ph_ring[(p + j) % PH_RING] = w[j];
+                atomic_store(&ph_w, p + FRAME_WORDS);
+                frames++;
+            }
+            g_cifs++;
+        }
+        return frames;
+    }
     double ratio = 1.0 + g_ppm_now * 1e-6;
     unsigned need = (unsigned)ceil(SF_SAMPLES * ratio + rs_pos) + RS_TAPS;
     int was_primed = g_primed;
@@ -205,7 +229,7 @@ static void hw_restart(void){
     atomic_fetch_add(&st_resets, 1);
 }
 static void hw_io_step(void){
-    unsigned n = rd(R_AUDCNT);
+    unsigned n = o_tone > 0 ? 0 : rd(R_AUDCNT);                       // with the test tone the I2S audio is left in the FIFO
     if (n >= 1023) atomic_fetch_add(&st_audio_ovf, 1);
     unsigned w = atomic_load(&aud_w), room = AUD_RING - RS_TAPS - aud_fill(), kept = 0;
     for (unsigned i = 0; i < n; i++){
@@ -230,13 +254,13 @@ static void on_signal(int sig){ (void)sig; g_stop = 1; }
 
 static void usage(void){
     fprintf(stderr,
-        "skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-d DLS text] [-t DLS file] [-g gain 0..3] [-L level] [-v]\n"
+        "skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-d DLS text] [-t DLS file] [-g gain 0..3] [-L level] [-T tone Hz] [-v]\n"
         "skypluto-dab -f in.f32 -o phases.bin [-p audio clock ppm] [-n seconds] ...   (simulation, no hardware)\n");
 }
 
 int main(int argc, char **argv){
     int c;
-    while ((c = getopt(argc, argv, "b:s:e:d:t:g:L:vf:o:p:n:h")) != -1){
+    while ((c = getopt(argc, argv, "b:s:e:d:t:g:L:T:vf:o:p:n:h")) != -1){
         switch (c){
         case 'b': o_kbps = atoi(optarg); break;
         case 's': o_svc = optarg; break;
@@ -245,6 +269,7 @@ int main(int argc, char **argv){
         case 't': o_dlsfile = optarg; break;
         case 'g': o_gain = atoi(optarg) & 3; break;
         case 'L': o_level = atoi(optarg); break;
+        case 'T': o_tone = atof(optarg); break;
         case 'v': o_verbose = 1; break;
         case 'f': o_simin = optarg; break;
         case 'o': o_simout = optarg; break;
@@ -312,6 +337,7 @@ int main(int argc, char **argv){
     for (int i = 0; i < 2; i++) if (produce_superframe() < 0) return 1;
     wr(R_DAB, (uint32_t)(0x1 | (o_gain << 2)));                     // DAB mode
     while (rd(R_AUDCNT)) (void)rd(R_AUDIO);                           // stale audio
+    if (o_tone > 0) fprintf(stderr, "test tone %.0f Hz left, %.0f Hz right (-12 dBFS)\n", o_tone, 1.5 * o_tone);
     pthread_t th; pthread_create(&th, NULL, producer_thread, NULL);
     struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0); double last = 0;
     while (!g_stop){

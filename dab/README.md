@@ -105,6 +105,20 @@ python tests/check_aac.py build    # coderen + decoderen met FFmpeg (PyAV), S/N 
 
 Testafhankelijkheden (alleen op de pc): Python met numpy, `reedsolo` en `av` (PyAV). Voor de ketentest: welle-cli (welle.io), hier
 zelf gebouwd met faad2, mpg123 en LAME onder `~/dablocal` (geen root nodig).
+`TONE=1000 tests/check_app.sh 0 20` toetst de ingebouwde testtoon (`-T`).
+
+### Eerste test op de Pluto
+
+```
+dab/tools/install_dab_test.sh <ip> out/dab/BOOT.bin   # zet alles klaar, verandert niets aan wat er opstart
+ssh root@<ip> /mnt/jffs2/dab-boot.sh dab              # BOOT.bin.dab opstarten (FM blijft werken, + DAB)
+ssh root@<ip> /mnt/jffs2/dab-test.sh 174928000        # kanaal 5A, testtoon 1 kHz links / 1,5 kHz rechts; Ctrl-C = terug naar FM
+ssh root@<ip> /mnt/jffs2/dab-boot.sh fm               # terug naar de FM-release (BOOT.bin.fm)
+```
+
+`dab-test.sh` zet via de daemon de TX-bandbreedte op 3 MHz en stemt af (met kalibratie); na afloop gaat de bandbreedte terug.
+Het DAB-signaal ligt ~16 dB onder de FM-draaggolf bij dezelfde P-instelling; de maskerbewaking (FM-masker) zegt tijdens de
+test niets. `dab-test.sh <f> i2s` gebruikt de I2S-ingang (stereo 48 kHz) in plaats van de toon.
 
 ## 7. Bestanden
 
@@ -123,6 +137,7 @@ zelf gebouwd met faad2, mpg123 en LAME onder `~/dablocal` (geen root nodig).
 | `tests/check_app.sh` | skypluto-dab in simulatie → FPGA-model → welle-cli |
 | `hdl/` | `skypluto_dab_ofdm.v` (kopie in `hdl/library/skypluto_wfm`), model, generatoren, testbanken, OOC-synthese |
 | `tools/build_arm.sh` | cross-build voor de ARM van de Pluto (alleen bouwen) |
+| `tools/install_dab_test.sh`, `tools/dab-boot.sh`, `tools/dab-test.sh` | DAB-test op de Pluto: klaarzetten, opstartkeuze FM/DAB, test met toon of I2S |
 | `tools/gen_aac_huff.py` | genereert en controleert de codeboeken |
 | `tests/` | `test_sf`, `check_sf.py`, `test_mdct`, `enc_file`, `check_aac.py` |
 
