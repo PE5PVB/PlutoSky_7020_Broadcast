@@ -222,9 +222,20 @@ static void hw_restart(void){
     wr(R_DAB, (uint32_t)(0x1 | (o_gain << 2)));
     atomic_fetch_add(&st_resets, 1);
 }
+static unsigned long long g_in_total = 0; static unsigned g_in_nmax = 0;   // audio words read from the FPGA, the largest batch (-v)
 static void hw_io_step(void){
     unsigned n = o_tone > 0 ? 0 : rd(R_AUDCNT);                       // with the test tone the I2S audio is left in the FIFO
-    if (n >= 1023) atomic_fetch_add(&st_audio_ovf, 1);
+    // Bitstream B1D0001E (fixed in B1D0001F) reports 1024 while the FIFO's write pointer has wrapped and its read pointer not yet (23 times per second
+    // at 48 kHz, for a few ms): never read more than can have arrived since the last read (98 % of 48 kHz; the rest stays for the
+    // next round). Only a stall of this thread can then still overflow the FIFO.
+    static double t_prev = 0.0;
+    double t_now = now_s();
+    if (n >= 1023 && t_prev > 0){
+        unsigned est = (unsigned)((t_now - t_prev) * FS * 0.98);
+        if (est < n) n = est; else atomic_fetch_add(&st_audio_ovf, 1);
+    }
+    t_prev = t_now;
+    g_in_total += n; if (n > g_in_nmax) g_in_nmax = n;
     unsigned w = atomic_load(&aud_w), room = AUD_RING - RS_TAPS - aud_fill(), kept = 0;
     for (unsigned i = 0; i < n; i++){
         uint32_t v = rd(R_AUDIO);                                    // every read pops; keep what fits (the rate control prevents a full ring)
@@ -357,6 +368,9 @@ int main(int argc, char **argv){
             }
         }
         if (o_verbose && t - last >= 5.0){
+            static unsigned long long in_last = 0;
+            fprintf(stderr, "    audio in %.0f samples/s, largest batch %u\n", (g_in_total - in_last) / (t - last), g_in_nmax);
+            in_last = g_in_total; g_in_nmax = 0;
             last = t;
             fprintf(stderr, "t=%.0f s audio %u ratio %+.1f ppm phase queue %u OFDM FIFO %u silence %u resync %u underflow %u restarts %u audio-ovf %u cpu enc %.0f%% mux %.0f%%\n",
                     t, aud_fill(), g_ppm_now, ph_fill(), rd(R_PHASE) & 0x3FFF, atomic_load(&st_silence), atomic_load(&st_resync), atomic_load(&st_underflow),

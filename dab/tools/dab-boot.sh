@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
 # dab-boot.sh - choose the bitstream the Pluto boots (runs on the board, from /mnt/jffs2), then reboot.
-#   dab-boot.sh dab     BOOT.bin.dab (FM + DAB, build id B1D0001E)
+#   dab-boot.sh dab     BOOT.bin.dab (FM + DAB, build id B1D0001F)
 #   dab-boot.sh fm      BOOT.bin.fm  (the FM release the board ran before, kept by install_dab_test.sh)
 # Kernel, device tree and ramdisk stay the same for both.
 SD=/mnt/sd

@@ -66,6 +66,9 @@ module skypluto_async_fifo_bram #(
     // ---- read side: RAM -> output register ------------------------------------
     wire [AW:0] wr_bin_rd = gray2bin(wr_gray_rd1);
     wire        ram_empty = (wr_gray_rd1 == rd_gray);
+    // words in RAM, modulo the pointer width: the difference must be taken in AW+1 bits (in the 32-bit context of a comparison it
+    // goes negative, i.e. huge, each time the write pointer has wrapped and the read pointer not yet)
+    wire [AW:0] ram_fill  = wr_bin_rd - rd_bin;
     reg         out_valid = 1'b0;
     reg [DW-1:0] out_q;
     wire        fetch = ~ram_empty & (~out_valid | rd_en);
@@ -82,7 +85,7 @@ module skypluto_async_fifo_bram #(
             wr_gray_rd0 <= wr_gray; wr_gray_rd1 <= wr_gray_rd0;
             if (fetch) begin rd_bin <= rd_bin + 1'b1; rd_gray <= bin2gray(rd_bin + 1'b1); end
             if (fetch) out_valid <= 1'b1; else if (rd_en) out_valid <= 1'b0;
-            rd_count <= ((wr_bin_rd - rd_bin) + out_valid > (1 << AW)) ? (1 << AW) : (wr_bin_rd - rd_bin) + out_valid;
+            rd_count <= (ram_fill + out_valid > (1 << AW)) ? (1 << AW) : ram_fill + out_valid;
             wr_pos <= wr_bin_rd;
         end
     end

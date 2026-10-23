@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# dab-test.sh - first DAB+ test on the Pluto (runs on the board, from /mnt/jffs2). Needs the DAB bitstream (build id B1D0001E).
+# dab-test.sh - first DAB+ test on the Pluto (runs on the board, from /mnt/jffs2). Needs the DAB bitstream (build id B1D0001E or later).
 #
 #   dab-test.sh <frequency Hz> [tone Hz]    e.g. dab-test.sh 174928000         (channel 5A, test tone 1 kHz / 1.5 kHz)
 #   dab-test.sh <frequency Hz> i2s          the stereo I2S input instead of the tone (needs a source at 48 kHz)
@@ -17,7 +17,7 @@ F=${1:?usage: dab-test.sh <frequency Hz> [tone Hz | i2s]}
 T=${2:-1000}
 
 [ -x $D ] || { echo "$D is missing"; exit 1; }
-$C -c "?V" | grep -q "bit=B1D0001E" || { echo "the DAB bitstream (B1D0001E) is not loaded: $($C -c '?V')"; exit 1; }
+$C -c "?V" | grep -qE "bit=B1D0001[E-F]" || { echo "the DAB bitstream (B1D0001E or later) is not loaded: $($C -c '?V')"; exit 1; }
 
 tb_old=$($C -c "?TB" | sed -n 's/^tb=\([0-9]*\).*/\1/p'); tb_old=${tb_old:-1600}
 # a TB change and a tune both close the transmitter, calibrate and open it again; a tune sent while the TB calibration
