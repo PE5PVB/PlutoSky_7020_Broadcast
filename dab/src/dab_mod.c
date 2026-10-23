@@ -5,6 +5,7 @@
 #include "dab_crc.h"
 #include "aac_mdct.h"
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -63,6 +64,8 @@ struct dab_mod {
     dab_cf *iq;
     // FIG carousel
     uint8_t figs[64][32]; int figlen[64], nfigs, fig_next;
+    // a multiplex reconfiguration announced in FIG 0/0 (change flags, occurrence change) and taking effect at CIF count change_at
+    dab_ensemble next_ens; subch next_sc[DAB_MAX_SVC]; int next_cu, change_at, change_flags;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -103,14 +106,13 @@ static void label16(uint8_t *dst, const char *s){ int i = 0; for (; i < 16 && s[
 
 static void fig_add(dab_mod *m, const uint8_t *data, int len){ memcpy(m->figs[m->nfigs], data, (size_t)len); m->figlen[m->nfigs++] = len; }
 
-static void build_figs(dab_mod *m){
-    const dab_ensemble *e = &m->ens;
+// FIG 0/1 sub-channel organisation (long form, EEP-A), several sub-channels per FIG when they fit; cn = 1: the next configuration
+static void figs_subch(dab_mod *m, const subch *sc, int nsvc, int cn){
     uint8_t f[32]; int p;
-    // FIG 0/1 sub-channel organisation (long form, EEP-A), several sub-channels per FIG when they fit
-    for (int i = 0; i < e->nsvc; ){
-        p = 0; f[p++] = 0; f[p++] = 0x01;                      // header filled below; C/N=0 OE=0 P/D=0 ext=1
-        while (i < e->nsvc && p + 4 <= 30){
-            const subch *s = &m->sc[i];
+    for (int i = 0; i < nsvc; ){
+        p = 0; f[p++] = 0; f[p++] = (uint8_t)((cn << 7) | 0x01);       // header filled below; C/N, OE=0, P/D=0, ext=1
+        while (i < nsvc && p + 4 <= 30){
+            const subch *s = &sc[i];
             f[p++] = (uint8_t)((i << 2) | (s->cu_start >> 8)); f[p++] = (uint8_t)s->cu_start;
             f[p++] = (uint8_t)(0x80 | (0 << 4) | ((s->prot - 1) << 2) | (s->cu_size >> 8));   // long form, option 0, level
             f[p++] = (uint8_t)s->cu_size;
@@ -118,9 +120,12 @@ static void build_figs(dab_mod *m){
         }
         f[0] = (uint8_t)((0 << 5) | (p - 1)); fig_add(m, f, p);
     }
-    // FIG 0/2 service organisation: one DAB+ audio component per service
+}
+// FIG 0/2 service organisation: one DAB+ audio component per service
+static void figs_service(dab_mod *m, const dab_ensemble *e, int cn){
+    uint8_t f[32]; int p;
     for (int i = 0; i < e->nsvc; ){
-        p = 0; f[p++] = 0; f[p++] = 0x02;
+        p = 0; f[p++] = 0; f[p++] = (uint8_t)((cn << 7) | 0x02);
         while (i < e->nsvc && p + 5 <= 30){
             f[p++] = (uint8_t)(e->svc[i].sid >> 8); f[p++] = (uint8_t)e->svc[i].sid;
             f[p++] = 0x01;                                      // local 0, CAId 0, 1 component
@@ -130,6 +135,26 @@ static void build_figs(dab_mod *m){
         }
         f[0] = (uint8_t)((0 << 5) | (p - 1)); fig_add(m, f, p);
     }
+}
+static void figs_service_labels(dab_mod *m, const dab_ensemble *e){
+    uint8_t f[32];
+    for (int i = 0; i < e->nsvc; i++){
+        int p = 0; f[p++] = 0; f[p++] = 0x01; f[p++] = (uint8_t)(e->svc[i].sid >> 8); f[p++] = (uint8_t)e->svc[i].sid;
+        label16(f + p, e->svc[i].label); p += 16; f[p++] = 0xFF; f[p++] = 0x00;
+        f[0] = (uint8_t)((1 << 5) | (p - 1)); fig_add(m, f, p);
+    }
+}
+
+static void build_figs(dab_mod *m){
+    const dab_ensemble *e = &m->ens;
+    uint8_t f[32]; int p;
+    m->nfigs = 0; m->fig_next = 0;
+    figs_subch(m, m->sc, e->nsvc, 0);
+    figs_service(m, e, 0);
+    if (m->change_at >= 0){                                     // announced reconfiguration: the next organisation as well
+        if (m->change_flags & 1) figs_subch(m, m->next_sc, m->next_ens.nsvc, 1);
+        if (m->change_flags & 2){ figs_service(m, &m->next_ens, 1); figs_service_labels(m, &m->next_ens); }
+    }
     // FIG 0/9 country, LTO, international table
     { int lto = e->lto_halfhours; p = 0; f[p++] = 0; f[p++] = 0x09;
       f[p++] = (uint8_t)(0x40 | (lto < 0 ? 0x20 : 0) | (abs(lto) & 0x1F));   // ext flag 0, LTO unique, sign, value
@@ -138,11 +163,7 @@ static void build_figs(dab_mod *m){
     // FIG 1/0 ensemble label, FIG 1/1 programme service labels (EBU Latin, short label = first 8 characters)
     p = 0; f[p++] = 0; f[p++] = 0x00; f[p++] = (uint8_t)(e->eid >> 8); f[p++] = (uint8_t)e->eid; label16(f + p, e->label); p += 16; f[p++] = 0xFF; f[p++] = 0x00;
     f[0] = (uint8_t)((1 << 5) | (p - 1)); fig_add(m, f, p);
-    for (int i = 0; i < e->nsvc; i++){
-        p = 0; f[p++] = 0; f[p++] = 0x01; f[p++] = (uint8_t)(e->svc[i].sid >> 8); f[p++] = (uint8_t)e->svc[i].sid;
-        label16(f + p, e->svc[i].label); p += 16; f[p++] = 0xFF; f[p++] = 0x00;
-        f[0] = (uint8_t)((1 << 5) | (p - 1)); fig_add(m, f, p);
-    }
+    figs_service_labels(m, e);
 }
 
 // the 3 FIBs of one CIF: FIG 0/0 first, then FIGs from the carousel while they fit
@@ -153,9 +174,11 @@ static void build_fibs(dab_mod *m, uint8_t fib[3][FIB_BYTES]){
         int p = 0;
         if (b == 0){                                             // FIG 0/0 ensemble information with the CIF count
             uint8_t *f = fib[b];
-            f[p++] = 0x05; f[p++] = 0x00; f[p++] = (uint8_t)(m->ens.eid >> 8); f[p++] = (uint8_t)m->ens.eid;
-            f[p++] = (uint8_t)(((m->cif_count / 250) % 20) & 0x1F);   // change flags 0, AL 0, CIF count high
+            const int chg = m->change_at >= 0 ? m->change_flags : 0;
+            f[p++] = chg ? 0x06 : 0x05; f[p++] = 0x00; f[p++] = (uint8_t)(m->ens.eid >> 8); f[p++] = (uint8_t)m->ens.eid;
+            f[p++] = (uint8_t)((chg << 6) | (((m->cif_count / 250) % 20) & 0x1F));   // change flags, AL 0, CIF count high
             f[p++] = (uint8_t)(m->cif_count % 250);
+            if (chg) f[p++] = (uint8_t)(m->change_at % 250);     // occurrence change: the CIF count (low part) of the new configuration
         }
         while (guard < 2 * m->nfigs){
             int l = m->figlen[m->fig_next];
@@ -225,13 +248,14 @@ dab_mod *dab_mod_open(const dab_ensemble *ens){
         static const float re[4] = { 1, 0, -1, 0 }, im[4] = { 0, 1, 0, -1 };
         m->prs[a].re = re[ph]; m->prs[a].im = im[ph]; m->prs_ph[a] = (uint8_t)ph;
     }
+    m->change_at = -1;
     build_figs(m);
     return m;
 }
 
 void dab_mod_close(dab_mod *m){
     if (!m) return;
-    for (int i = 0; i < DAB_MAX_SVC; i++) for (int k = 0; k < 16; k++) free(m->sc[i].ti[k]);
+    for (int i = 0; i < DAB_MAX_SVC; i++) for (int k = 0; k < 16; k++){ free(m->sc[i].ti[k]); free(m->next_sc[i].ti[k]); }
     free(m->frame_bits); free(m->iq); fft_free(&m->fft); free(m);
 }
 
@@ -305,7 +329,44 @@ static void modulate_frame(dab_mod *m){
     }
 }
 
+// the announced configuration takes effect with this CIF
+static void apply_change(dab_mod *m){
+    for (int i = 0; i < DAB_MAX_SVC; i++) for (int k = 0; k < 16; k++){ free(m->sc[i].ti[k]); m->sc[i].ti[k] = NULL; }
+    memcpy(m->sc, m->next_sc, sizeof m->sc); memset(m->next_sc, 0, sizeof m->next_sc);
+    m->ens = m->next_ens; m->cu_used = m->next_cu; m->change_at = -1; m->change_flags = 0;
+    build_figs(m);
+}
+
+int dab_mod_reconfigure(dab_mod *m, const dab_ensemble *next, int at_cif){
+    if (m->change_at >= 0 || next->nsvc < 1 || next->nsvc > DAB_MAX_SVC || next->nsvc != m->ens.nsvc) return -1;
+    subch ns[DAB_MAX_SVC]; memset(ns, 0, sizeof ns);
+    int cu = 0, flags = 0;
+    for (int i = 0; i < next->nsvc; i++){
+        if (setup_subch(&ns[i], next->svc[i].bitrate, next->svc[i].prot_level, cu)) goto fail;
+        cu += ns[i].cu_size;
+        if (ns[i].bitrate != m->sc[i].bitrate || ns[i].prot != m->sc[i].prot || ns[i].cu_start != m->sc[i].cu_start) flags |= 1;
+        if (next->svc[i].sid != m->ens.svc[i].sid) flags |= 2;
+    }
+    if (cu > 864 || !flags) goto fail;
+    memcpy(m->next_sc, ns, sizeof ns); m->next_ens = *next; m->next_cu = cu;
+    m->change_flags = flags; m->change_at = ((at_cif % 5000) + 5000) % 5000;
+    build_figs(m);
+    return 0;
+fail:
+    for (int i = 0; i < DAB_MAX_SVC; i++) for (int k = 0; k < 16; k++) free(ns[i].ti[k]);
+    return -1;
+}
+int dab_mod_change_pending(const dab_mod *m){ return m->change_at >= 0; }
+int dab_mod_cif_count(const dab_mod *m){ return m->cif_count; }
+
+void dab_mod_set_labels(dab_mod *m, const char *ensemble, const char *service){
+    if (ensemble){ snprintf(m->ens.label, sizeof m->ens.label, "%s", ensemble); snprintf(m->next_ens.label, sizeof m->next_ens.label, "%s", ensemble); }
+    if (service){ snprintf(m->ens.svc[0].label, sizeof m->ens.svc[0].label, "%s", service); snprintf(m->next_ens.svc[0].label, sizeof m->next_ens.svc[0].label, "%s", service); }
+    build_figs(m);
+}
+
 int dab_mod_push_cif(dab_mod *m, const uint8_t *const lf[]){
+    if (m->change_at >= 0 && m->cif_count == m->change_at) apply_change(m);
     const int c = m->cif_in_frame;
     encode_fic(m, m->frame_bits + c * FIC_BITS);
     uint8_t *cif = m->frame_bits + 4 * FIC_BITS + (size_t)c * CIF_BITS;

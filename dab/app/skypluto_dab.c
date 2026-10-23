@@ -8,6 +8,8 @@
 //
 //   skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-i service id] [-d DLS text] [-t DLS file] [-g gain 0..3] [-L level] [-T Hz] [-S file] [-v]
 //   -S file: a status line once a second (fifo= uf= rst= aud= ppm= sil= cpu=), read by skypluto-ctl for ?DAB
+//   -c file: br= sid= svc= ens= lines, read every super frame: labels change at once, bitrate and service id through an
+//            announced multiplex reconfiguration (~3 s later), so receivers follow without retuning
 //   -T Hz: test tone instead of the I2S input (left Hz, right 1.5 x Hz, -12 dBFS), for a first test without a DAB source
 //   skypluto-dab -f in.f32 -o phases.bin [-p ppm] [-n seconds] ...     (simulation on a PC: no hardware)
 //
@@ -57,7 +59,7 @@ static unsigned ph_fill(void){ return atomic_load(&ph_w) - atomic_load(&ph_r); }
 
 // ---- configuration and state ---------------------------------------------------------------------------------------------------
 static int   o_kbps = 96, o_gain = 1, o_level = -1, o_verbose = 0;
-static const char *o_svc = "PlutoSky", *o_ens = "PlutoSky DAB", *o_dls = NULL, *o_dlsfile = NULL, *o_status = NULL;
+static const char *o_svc = "PlutoSky", *o_ens = "PlutoSky DAB", *o_dls = NULL, *o_dlsfile = NULL, *o_status = NULL, *o_cfgfile = NULL;
 static unsigned o_sid = 0x8F01;
 static const char *o_simin = NULL, *o_simout = NULL;
 static double o_ppm = 0.0, o_secs = 0.0, o_tone = 0.0;
@@ -143,6 +145,40 @@ static double latency(void){
 }
 
 // one super frame (5 CIFs = 1.25 transmission frames). Returns the transmission frames completed.
+// ---- live configuration (-c): labels at once, bitrate / service id through an announced multiplex reconfiguration ----------
+static dab_ensemble g_ens;                 // the ensemble as it is on the air (or will be after the pending change)
+static int g_chg_cif = -1, g_chg_kbps = 0; // the CIF of a pending reconfiguration and the bitrate it brings
+#define CHG_LEAD 125                       // CIFs between the announcement and the change (3 s; FIG 0/0 allows up to 6 s)
+static void cfg_poll(void){
+    if (!o_cfgfile) return;
+    FILE *f = fopen(o_cfgfile, "r"); if (!f) return;
+    char ln[96], svc[17] = "", ens[17] = ""; int br = 0; unsigned sid = 0;
+    while (fgets(ln, sizeof ln, f)){
+        ln[strcspn(ln, "\r\n")] = 0;
+        if (!strncmp(ln, "br=", 3)) br = atoi(ln + 3);
+        else if (!strncmp(ln, "sid=", 4)) sid = (unsigned)strtoul(ln + 4, NULL, 16) & 0xFFFF;
+        else if (!strncmp(ln, "svc=", 4)) snprintf(svc, sizeof svc, "%.16s", ln + 4);
+        else if (!strncmp(ln, "ens=", 4)) snprintf(ens, sizeof ens, "%.16s", ln + 4);
+    }
+    fclose(f);
+    if ((svc[0] && strcmp(svc, g_ens.svc[0].label)) || (ens[0] && strcmp(ens, g_ens.label))){
+        if (svc[0]) snprintf(g_ens.svc[0].label, sizeof g_ens.svc[0].label, "%s", svc);
+        if (ens[0]) snprintf(g_ens.label, sizeof g_ens.label, "%s", ens);
+        dab_mod_set_labels(g_mod, ens[0] ? ens : NULL, svc[0] ? svc : NULL);
+        fprintf(stderr, "labels: \"%s\" / \"%s\"\n", g_ens.svc[0].label, g_ens.label);
+    }
+    if (g_chg_cif >= 0 || dab_mod_change_pending(g_mod)) return;         // one change at a time
+    int want_br = (br >= 8 && br <= 192 && br % 8 == 0) ? br : g_ens.svc[0].bitrate;
+    unsigned want_sid = sid ? sid : g_ens.svc[0].sid;
+    if (want_br == g_ens.svc[0].bitrate && want_sid == g_ens.svc[0].sid) return;
+    dab_ensemble next = g_ens; next.svc[0].bitrate = want_br; next.svc[0].sid = (uint16_t)want_sid;
+    int at = (dab_mod_cif_count(g_mod) + CHG_LEAD + 4) / 5 * 5 % 5000;    // a super frame boundary (super frames start at counts 0 mod 5)
+    if (dab_mod_reconfigure(g_mod, &next, at) == 0){
+        g_chg_cif = at; g_chg_kbps = want_br; g_ens = next;
+        fprintf(stderr, "reconfiguration announced: %d kbit/s, SId %04X at CIF %d\n", want_br, want_sid, at);
+    }
+}
+
 static double now_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 static double g_t_enc = 0.0, g_t_mod = 0.0;   // seconds spent in the AAC encoder and in the DAB multiplex/modulation (-v)
 
@@ -177,6 +213,13 @@ static int produce_superframe(void){
         } else { memset(g_pcm, 0, sizeof(float) * SF_SAMPLES * 2); atomic_fetch_add(&st_silence, 1); }
     }
     double t0 = now_s();
+    cfg_poll();
+    if (g_chg_cif >= 0 && dab_mod_cif_count(g_mod) == g_chg_cif){
+        // this super frame is the first one of the new configuration: the encoder changes bitrate with it
+        if (dabplus_enc_set_bitrate(g_enc, g_chg_kbps) == 0){ g_cfg.bitrate_kbps = g_chg_kbps; g_lfb = 3 * g_chg_kbps; }
+        fprintf(stderr, "reconfiguration: now %d kbit/s\n", g_cfg.bitrate_kbps);
+        g_chg_cif = -1;
+    }
     dls_poll(g_enc);
     if (dabplus_enc_superframe(g_enc, g_pcm, g_sf)) return -1;
     double t1 = now_s(); g_t_enc += t1 - t0;
@@ -271,13 +314,13 @@ static void on_signal(int sig){ (void)sig; g_stop = 1; }
 static void usage(void){
     fprintf(stderr,
         "skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-i service id hex] [-d DLS text] [-t DLS file] [-g gain 0..3] [-L level] [-T tone Hz]\n"
-        "             [-S status file] [-v]\n"
+        "             [-S status file] [-c config file] [-v]\n"
         "skypluto-dab -f in.f32 -o phases.bin [-p audio clock ppm] [-n seconds] ...   (simulation, no hardware)\n");
 }
 
 int main(int argc, char **argv){
     int c;
-    while ((c = getopt(argc, argv, "b:s:e:i:d:t:g:L:T:S:vf:o:p:n:h")) != -1){
+    while ((c = getopt(argc, argv, "b:s:e:i:d:t:c:g:L:T:S:vf:o:p:n:h")) != -1){
         switch (c){
         case 'b': o_kbps = atoi(optarg); break;
         case 's': o_svc = optarg; break;
@@ -289,6 +332,7 @@ int main(int argc, char **argv){
         case 'T': o_tone = atof(optarg); break;
         case 'i': o_sid = (unsigned)strtoul(optarg, NULL, 16) & 0xFFFF; break;
         case 'S': o_status = optarg; break;
+        case 'c': o_cfgfile = optarg; break;
         case 'v': o_verbose = 1; break;
         case 'f': o_simin = optarg; break;
         case 'o': o_simout = optarg; break;
@@ -305,11 +349,11 @@ int main(int argc, char **argv){
     ens.ecc = 0xE3; ens.lto_halfhours = 2; ens.nsvc = 1;
     ens.svc[0].sid = (uint16_t)o_sid; snprintf(ens.svc[0].label, sizeof ens.svc[0].label, "%s", o_svc);
     ens.svc[0].bitrate = o_kbps; ens.svc[0].prot_level = 3;
-    g_mod = dab_mod_open(&ens);
+    g_mod = dab_mod_open(&ens); g_ens = ens;
     if (!g_enc || !g_mod){ fprintf(stderr, "bad configuration\n"); return 2; }
     dab_mod_set_phases_only(g_mod, 1);                               // the FPGA does the OFDM
     if (o_dls) dabplus_enc_set_dls(g_enc, o_dls, 15);
-    g_pcm = calloc(SF_SAMPLES * 2, sizeof(float)); g_sf = malloc((size_t)dabplus_total_bytes(&g_cfg)); g_lfb = dab_mod_lf_bytes(g_mod, 0);
+    g_pcm = calloc(SF_SAMPLES * 2, sizeof(float)); g_sf = malloc(120 * 24);   /* the largest super frame (192 kbit/s): the bitrate can change */ g_lfb = dab_mod_lf_bytes(g_mod, 0);
     rs_init();
     signal(SIGINT, on_signal); signal(SIGTERM, on_signal);
 

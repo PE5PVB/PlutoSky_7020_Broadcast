@@ -44,6 +44,15 @@ const uint32_t *dab_mod_phase_words(const dab_mod *m);
 #define DAB_PHASE_WORDS (76 * 96)
 // 1: build only the phase words (dab_mod_frame() is then not filled); saves the IFFTs when the FPGA does the OFDM
 void     dab_mod_set_phases_only(dab_mod *m, int on);
+// Multiplex reconfiguration (EN 300 401, 6.5): the next ensemble (same number of services; other bitrates, protection or
+// service identifiers) is announced in FIG 0/0 (change flags, occurrence change) and FIG 0/1 / 0/2 with C/N = next, and
+// takes effect with the CIF whose count is at_cif (0..4999; at most 6 s = 250 CIFs ahead). From then on dab_mod_lf_bytes()
+// gives the new sizes. -1: a change is still pending, or nothing changes, or it does not fit.
+int      dab_mod_reconfigure(dab_mod *m, const dab_ensemble *next, int at_cif);
+int      dab_mod_change_pending(const dab_mod *m);
+int      dab_mod_cif_count(const dab_mod *m);                 // the count of the next CIF pushed (0..4999)
+// labels: take effect at once (FIG 1/0, 1/1), no reconfiguration; NULL leaves one unchanged
+void     dab_mod_set_labels(dab_mod *m, const char *ensemble, const char *service);
 // capacity units used by the sub-channels (of 864)
 int      dab_mod_cu_used(const dab_mod *m);
 

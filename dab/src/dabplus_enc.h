@@ -11,6 +11,8 @@ typedef struct dabplus_enc dabplus_enc;
 // cfg->sbr and cfg->ps must be 0 (AAC-LC); bandwidth_hz <= 0 picks a default for the bitrate
 dabplus_enc *dabplus_enc_open(const dabplus_cfg *cfg, int bandwidth_hz);
 void         dabplus_enc_close(dabplus_enc *e);
+// another bitrate from the next super frame on (a fresh AAC encoder: the first frame after it starts from silence). 0 = ok.
+int          dabplus_enc_set_bitrate(dabplus_enc *e, int kbps);
 int          dabplus_enc_frames(const dabplus_enc *e);           // PCM frames of 960 samples per super frame (4 or 6)
 // pcm: dabplus_enc_frames() * 960 samples per channel, interleaved, +-1.0. out: dabplus_total_bytes() bytes. 0 = ok.
 int          dabplus_enc_superframe(dabplus_enc *e, const float *pcm, uint8_t *out);

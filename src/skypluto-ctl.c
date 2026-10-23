@@ -1248,6 +1248,7 @@ static void set_level(double dbm){
 #define DAB_DLS     "/tmp/dab_dls.txt"
 #define DAB_STATUS  "/tmp/dab_status"
 #define DAB_LOG     "/tmp/dab.log"
+#define DAB_CFG     "/tmp/dab_cfg"     // read by the running program every super frame: labels at once, bitrate/SId announced
 #define DAB_TB_KHZ  3000
 static int    has_dab = 0, dab_kbps = 96, dab_restarts = 0, dab_tone = 0;   // dab_tone: test tone in Hz instead of I2S (0 = I2S)
 static char   dab_svc[17] = "PlutoSky", dab_ens[17] = "PlutoSky DAB";
@@ -1265,17 +1266,24 @@ static void tb_set_now(int khz){
         cal_hold = 1; cal_pending = 1; cal_due = mono(); cal_failed = 0; cal_fail = 0; cal_force = 1;
     }
 }
+// the settings for the running program (written whole and renamed: it never reads half a file)
+static void dab_cfg_write(void){
+    FILE *f = fopen(DAB_CFG ".new", "w"); if (!f) return;
+    fprintf(f, "br=%d\nsid=%04X\nsvc=%s\nens=%s\n", dab_kbps, dab_sid, dab_svc, dab_ens);
+    fclose(f); rename(DAB_CFG ".new", DAB_CFG);
+}
 static void dab_start(void){
     char br[8], sid[8], tone[12];
     snprintf(br, sizeof br, "%d", dab_kbps); snprintf(sid, sizeof sid, "%04X", dab_sid); snprintf(tone, sizeof tone, "%d", dab_tone);
     { FILE *df = fopen(DAB_DLS, "a"); if (df) fclose(df); }       // the program reads the DLS from this file (empty = none)
+    dab_cfg_write();
     unlink(DAB_STATUS);
     pid_t p = fork();
     if (p == 0){
         prctl(PR_SET_PDEATHSIG, SIGTERM);                         // the daemon ends: the program ends too and leaves the exciter in FM
         struct sched_param sp; sp.sched_priority = 0; sched_setscheduler(0, SCHED_OTHER, &sp);   // not the daemon's real-time class
         int lf = open(DAB_LOG, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (lf >= 0){ dup2(lf, 2); close(lf); }
-        execl(DAB_BIN, DAB_BIN, "-v", "-b", br, "-s", dab_svc, "-e", dab_ens, "-i", sid, "-t", DAB_DLS, "-S", DAB_STATUS, "-T", tone, (char *)NULL);
+        execl(DAB_BIN, DAB_BIN, "-v", "-b", br, "-s", dab_svc, "-e", dab_ens, "-i", sid, "-t", DAB_DLS, "-S", DAB_STATUS, "-c", DAB_CFG, "-T", tone, (char *)NULL);
         _exit(127);
     }
     if (p < 0){ dab_next = mono() + 2.0; return; }
@@ -1304,6 +1312,12 @@ static void dab_poll(double now){
 }
 // a setting that the multiplex carries changed: restart the program (receivers lose the ensemble for about 2 s)
 static void dab_restart(void){ if (dab_mode){ dab_stop(); dab_next = mono() + 0.2; } }
+// bitrate, labels, service id: handed to the running program, which changes the labels at once and announces a multiplex
+// reconfiguration for the rest (receivers follow it without retuning); no restart
+static void dab_update(void){
+    dab_cfg_write();
+    if (dab_mode){ fprintf(stderr, "   -> DAB-instelling naar het programma (%d kbit/s, \"%s\" / \"%s\", SId %04X)\n", dab_kbps, dab_svc, dab_ens, dab_sid); fflush(stderr); }
+}
 static int dab_label_ok(const char *s){ size_t n = strlen(s); if (n < 1 || n > 16) return 0; for (; *s; s++) if (*s < 0x20 || *s > 0x7E) return 0; return 1; }
 
 static void handle(char *line){
@@ -1804,17 +1818,17 @@ static void handle(char *line){
     // digits>: restart the multiplex when changed in DAB mode. DLS <text> (up to 128 bytes, UTF-8): the dynamic label, without interruption.
     if (!strcmp(cmd,"DBR")){
         int v = atoi(arg); if (v < 32 || v > 192 || v % 8){ tx_str("ERR range\n"); return; }
-        tx_str("OK\n"); if (v != dab_kbps){ dab_kbps = v; dab_restart(); } return;
+        tx_str("OK\n"); if (v != dab_kbps){ dab_kbps = v; dab_update(); } return;
     }
     if (!strcmp(cmd,"DSV") || !strcmp(cmd,"DEN")){
         char *d = cmd[1] == 'S' ? dab_svc : dab_ens;
         if (!dab_label_ok(arg)){ tx_str("ERR range\n"); return; }
-        tx_str("OK\n"); if (strcmp(d, arg)){ snprintf(d, 17, "%s", arg); dab_restart(); } return;
+        tx_str("OK\n"); if (strcmp(d, arg)){ snprintf(d, 17, "%s", arg); dab_update(); } return;
     }
     if (!strcmp(cmd,"DSI")){
         char *e; unsigned long v = strtoul(arg, &e, 16);
         if (e == arg || *e || strlen(arg) != 4 || v == 0){ tx_str("ERR range\n"); return; }
-        tx_str("OK\n"); if (v != dab_sid){ dab_sid = (unsigned)v; dab_restart(); } return;
+        tx_str("OK\n"); if (v != dab_sid){ dab_sid = (unsigned)v; dab_update(); } return;
     }
     // DTN <Hz>: test tone (left Hz, right 1.5 x Hz, -12 dBFS) instead of the I2S input, 0 = I2S (default); restarts the multiplex
     if (!strcmp(cmd,"DTN")){

@@ -16,21 +16,34 @@ struct dabplus_enc {
     dab_dls dls;
 };
 
-dabplus_enc *dabplus_enc_open(const dabplus_cfg *cfg, int bandwidth_hz){
-    if (cfg->sbr || cfg->ps || cfg->bitrate_kbps < 8 || cfg->bitrate_kbps > 192 || (cfg->bitrate_kbps % 8)) return NULL;
-    dabplus_enc *e = calloc(1, sizeof *e);
-    if (!e) return NULL;
-    e->cfg = *cfg;
-    e->n = dabplus_num_aus(cfg);
+static aacenc *open_aac(const dabplus_cfg *cfg, int bandwidth_hz){
     const int sr = cfg->dac_rate ? 48000 : 32000, ch = cfg->stereo ? 2 : 1;
     if (bandwidth_hz <= 0){                        // rough default: audio bandwidth grows with the bitrate per channel
         int per = cfg->bitrate_kbps / ch;
         bandwidth_hz = per >= 64 ? 16000 : per >= 48 ? 15000 : per >= 40 ? 13000 : per >= 32 ? 11000 : 8000;
     }
     if (bandwidth_hz > sr / 2 - 1000) bandwidth_hz = sr / 2 - 1000;
-    e->aac = aacenc_open(sr, ch, bandwidth_hz);
+    return aacenc_open(sr, ch, bandwidth_hz);
+}
+
+dabplus_enc *dabplus_enc_open(const dabplus_cfg *cfg, int bandwidth_hz){
+    if (cfg->sbr || cfg->ps || cfg->bitrate_kbps < 8 || cfg->bitrate_kbps > 192 || (cfg->bitrate_kbps % 8)) return NULL;
+    dabplus_enc *e = calloc(1, sizeof *e);
+    if (!e) return NULL;
+    e->cfg = *cfg;
+    e->n = dabplus_num_aus(cfg);
+    e->aac = open_aac(cfg, bandwidth_hz);
     if (!e->aac){ free(e); return NULL; }
     return e;
+}
+
+int dabplus_enc_set_bitrate(dabplus_enc *e, int kbps){
+    if (kbps < 8 || kbps > 192 || kbps % 8) return -1;
+    dabplus_cfg c = e->cfg; c.bitrate_kbps = kbps;
+    aacenc *a = open_aac(&c, 0);                   // the audio bandwidth follows the bitrate; the DLS state stays
+    if (!a) return -1;
+    aacenc_close(e->aac); e->aac = a; e->cfg = c; e->n = dabplus_num_aus(&c);
+    return 0;
 }
 
 void dabplus_enc_close(dabplus_enc *e){ if (!e) return; aacenc_close(e->aac); free(e); }

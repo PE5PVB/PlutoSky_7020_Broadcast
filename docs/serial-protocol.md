@@ -194,8 +194,11 @@ encoder and builds the multiplex; the FPGA does the OFDM. The DAB settings are n
 | `DTN <Hz>` | 0 … 10000; `0` | test tone (left Hz, right 1.5 × Hz, −12 dBFS) instead of the I2S input; `0` = I2S |
 | `?DAB` | | `m=FM`, or `m=DAB br=96 src=i2s run=1 rs=0 fifo=7712 uf=0 rst=0 aud=11600 ppm=+12 sil=0 cpu=31`: `run` program running, `rs` restarts by the daemon, `fifo` OFDM FIFO words (~7700 = full), `uf` underflows, `rst` OFDM restarts, `aud` audio buffer (samples), `ppm` the clock correction toward the I2S source, `sil` super frames sent silent (no audio), `cpu` % of one core |
 
-`DBR`, `DSV`, `DEN`, `DSI` and `DTN` restart the multiplex when they change in DAB mode: receivers lose the ensemble for about
-2 s, so send them only when they change. In DAB mode `K`, `H`, `B` and `CF` have no effect and `?M`/`?L`/`?W`/`?N` are
+In DAB mode `DSV` and `DEN` change the labels at once. `DBR` and `DSI` go through a multiplex reconfiguration as receivers
+expect it (EN 300 401 6.5): it is announced in the FIC (FIG 0/0 change flags and occurrence, the next sub-channel/service
+organisation with C/N = next) and takes effect 3 s later at a super frame boundary; receivers follow without retuning, with
+a short gap in the audio at the switch. One change at a time: a value sent while one is pending is taken up after it (only
+the last one counts). `DTN` restarts the multiplex (receivers lose the ensemble for about 2 s). In DAB mode `K`, `H`, `B` and `CF` have no effect and `?M`/`?L`/`?W`/`?N` are
 meaningless. `F` takes the channel's centre frequency in Hz (Band III: 1 kHz resolution, e.g. 5A = `F 174928000`); `P` is the RMS
 power of the FM carrier setting, and the DAB ensemble lies about 16 dB below it (crest factor).
 
