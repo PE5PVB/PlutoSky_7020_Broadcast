@@ -126,6 +126,7 @@ static void dls_poll(dabplus_enc *enc){
 static dabplus_enc *g_enc; static dab_mod *g_mod; static dabplus_cfg g_cfg;
 static float   *g_pcm; static uint8_t *g_sf; static int g_lfb;
 static double   g_integ = 0.0, g_lat_target = 0.0;
+static double   g_seed_ppm = 0.0; static atomic_int g_seed_ready;   // measured input clock offset, handed to the rate control once
 static int      g_primed = 0, g_cifs = 0;
 static unsigned g_sim_fifo = 0;            // simulation: the OFDM FIFO level
 #define RC_KP   0.35                       // ppm per sample of latency error
@@ -161,9 +162,16 @@ static int produce_superframe(void){
         if (!g_primed && aud_fill() >= AUD_TARGET + need) g_primed = 1;
         if (g_primed && aud_fill() < need){ g_primed = 0; g_integ = 0; g_ppm_now = 0; }
         if (g_primed){
-            // far too much audio (the start, or a stall of this program): skip the excess instead of slewing it away at the rate limit
-            if (aud_fill() > AUD_TARGET + need + RESYNC){
-                atomic_fetch_add(&aud_r, aud_fill() - (AUD_TARGET + need)); atomic_fetch_add(&st_resync, 1); g_integ = 0; was_primed = 0;
+            // far too much audio (the start, or a stall of this program): skip the excess instead of slewing it away at the rate limit.
+            // Once running this is judged on the latency: the audio buffer alone swings by thousands of samples with the 120/96 ms
+            // beat and would trigger it without reason. The rate control keeps its frequency estimate (g_integ).
+            double excess = was_primed ? latency() - g_lat_target : (double)aud_fill() - (double)(AUD_TARGET + need);
+            int nearly_full = aud_fill() > AUD_RING - RS_TAPS - 2 * SF_SAMPLES;
+            if (excess > RESYNC || nearly_full){
+                unsigned room = aud_fill() - need, skip = excess > 0 ? (unsigned)excess : 0;
+                if (nearly_full && skip < aud_fill() - (AUD_TARGET + need)) skip = aud_fill() - (AUD_TARGET + need);
+                if (skip > room) skip = room;
+                atomic_fetch_add(&aud_r, skip); atomic_fetch_add(&st_resync, 1); was_primed = 0;
             }
             rs_run(g_pcm, SF_SAMPLES, ratio);
         } else { memset(g_pcm, 0, sizeof(float) * SF_SAMPLES * 2); atomic_fetch_add(&st_silence, 1); }
@@ -189,9 +197,12 @@ static int produce_superframe(void){
         // rate control (PI, critically damped, time constant about a minute): hold the latency where it was at the start;
         // positive error = audio piling up = consume faster
         double L = latency();
-        if (!was_primed){ g_lat_target = L; g_integ = 0; }
+        if (!was_primed) g_lat_target = L;
         double e = L - g_lat_target;
-        g_integ += e;
+        // the I2S source's clock offset, measured by the I/O loop over the first seconds: start the integrator there instead
+        // of letting it climb for minutes (+1000 ppm takes ~2 min from zero)
+        if (atomic_exchange(&g_seed_ready, 0)) g_integ = (g_seed_ppm - RC_KP * e) / RC_KI;
+        else g_integ += e;
         g_ppm_now = RC_KP * e + RC_KI * g_integ;
         if (g_ppm_now >  RC_MAX){ g_ppm_now =  RC_MAX; g_integ -= e; }
         if (g_ppm_now < -RC_MAX){ g_ppm_now = -RC_MAX; g_integ -= e; }
@@ -355,6 +366,15 @@ int main(int argc, char **argv){
         usleep(3000);
         struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
         double t = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
+        // the input clock against this CPU's clock over 10 s (from 2 s on): the start value of the rate control
+        { static int seed_state = 0; static double seed_t0; static unsigned long long seed_n0;
+          if (o_tone <= 0 && seed_state == 0 && t >= 2.0){ seed_t0 = t; seed_n0 = g_in_total; seed_state = 1; }
+          else if (seed_state == 1 && t - seed_t0 >= 10.0){
+              double ppm = ((double)(g_in_total - seed_n0) / (t - seed_t0) / FS - 1.0) * 1e6;
+              if (fabs(ppm) < RC_MAX){ g_seed_ppm = ppm; atomic_store(&g_seed_ready, 1); }
+              fprintf(stderr, "    input clock %+.0f ppm (measured over 10 s)\n", ppm);
+              seed_state = 2;
+          } }
         static double last_st = 0;
         if (o_status && t - last_st >= 1.0){
             // one line for skypluto-ctl (?DAB), replaced as a whole (rename) so a reader never sees half a line

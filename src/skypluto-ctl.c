@@ -1317,6 +1317,18 @@ static void handle(char *line){
     if (*arg){ *arg=0; arg++; while (*arg==' '||*arg=='\t') arg++; }
     char buf[320];
 
+    // A line damaged on the serial link must not act: "E 1" that arrives as "E" would read as E 0 (transmitter off), "P -15" as
+    // "P" as P 0 (+15 dB). The commands the encoder sends all the time take only a well-formed value; anything else is refused
+    // (ERR range, nothing changes) and the encoder sends it again.
+    { static const char *const onoff[] = { "E", "B", "G", "CT", "NULLAUTO", NULL };
+      static const char *const number[] = { "F", "P", "A", "K", "H", "CF", "TB", "LVL", "OFS", "NULLRX", "DBR", "DTN", NULL };
+      int bad = 0;
+      for (int i = 0; onoff[i]; i++) if (!strcmp(cmd, onoff[i])) bad = strcmp(arg, "0") && strcmp(arg, "1");
+      for (int i = 0; number[i]; i++) if (!strcmp(cmd, number[i])){
+          bad = !*arg; for (const char *c = arg; *c; c++) if (!strchr("0123456789+-.,", *c)){ bad = 1; break; }
+      }
+      if (bad){ tx_str("ERR range\n"); fprintf(stderr, "   !! regel '%s %s' onvolledig of verminkt: genegeerd\n", cmd, arg); fflush(stderr); return; } }
+
     // ---------- queries ----------
     if (cmd[0]=='?'){
         // ?RD = RDS of the own transmission, decoded from the RX2 measurement path (one 0.25 s window per second): rd=ok pi= pty= tp= ta= ms= gps=<groups/s>
