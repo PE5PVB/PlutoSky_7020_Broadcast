@@ -1327,7 +1327,7 @@ static void handle(char *line){
     // optional check sum as in NMEA: "<command>*hh", hh = XOR of all characters before the '*' in hex. A line that carries one
     // and does not match is refused (ERR crc): a bit error in a text (a label, DLS) or a digit cannot be seen otherwise.
     // Once the encoder has sent one line with a valid sum on the UART, its lines without one are refused as well: those are
-    // pieces of damaged lines (a lone "E" or "D"). The TCP console never needs a sum.
+    // pieces of damaged lines (a lone "E" or "D"). The TCP console (out_fd >= 0) and the web interface (-2) never need a sum.
     static int uart_sums = 0; int summed = 0;
     { char *star = strrchr(line, '*'); size_t n = strlen(line);
       if (star && line + n - star == 3 && isxdigit((unsigned char)star[1]) && isxdigit((unsigned char)star[2])){
@@ -1335,8 +1335,8 @@ static void handle(char *line){
           for (const char *c = line; c < star; c++) x ^= (unsigned char)*c;
           if (x != want){ fprintf(stderr, "   !! regel '%s': controlesom klopt niet, genegeerd\n", line); fflush(stderr); tx_str("ERR crc\n"); return; }
           *star = 0; while (star > line && (star[-1] == ' ' || star[-1] == '\t')) *--star = 0;
-          summed = 1; if (out_fd < 0 && !uart_sums){ uart_sums = 1; fprintf(stderr, "   -> de encoder stuurt controlesommen: regels zonder som worden voortaan geweigerd\n"); fflush(stderr); }
-      } else if (out_fd < 0 && uart_sums){ fprintf(stderr, "   !! regel '%s' zonder controlesom: genegeerd\n", line); fflush(stderr); tx_str("ERR crc\n"); return; } }
+          summed = 1; if (out_fd == -1 && !uart_sums){ uart_sums = 1; fprintf(stderr, "   -> de encoder stuurt controlesommen: regels zonder som worden voortaan geweigerd\n"); fflush(stderr); }
+      } else if (out_fd == -1 && uart_sums){ fprintf(stderr, "   !! regel '%s' zonder controlesom: genegeerd\n", line); fflush(stderr); tx_str("ERR crc\n"); return; } }
     // queries and F repeat every poll cycle: do not log (ramdisk log)
     if (line[0] != '?' && line[0] != 'F'){ fprintf(stderr, "rx: %s%s\n", line, summed ? " [*]" : ""); fflush(stderr); }
 
