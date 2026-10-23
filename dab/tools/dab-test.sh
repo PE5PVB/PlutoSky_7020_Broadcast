@@ -20,11 +20,17 @@ T=${2:-1000}
 $C -c "?V" | grep -q "bit=B1D0001E" || { echo "the DAB bitstream (B1D0001E) is not loaded: $($C -c '?V')"; exit 1; }
 
 tb_old=$($C -c "?TB" | sed -n 's/^tb=\([0-9]*\).*/\1/p'); tb_old=${tb_old:-1600}
-echo "TX bandwidth 3000 kHz (was $tb_old), tune to $F Hz"
-$C -c "TB 3000"; $C -c "F $F"
-# the tune closes the transmitter, calibrates and opens it again
-sleep 2; i=0
-while [ $i -lt 30 ]; do $C -c "?E" | grep -q "cal=ok" && $C -c "?S" | grep -q "tx=on" && break; sleep 1; i=$((i + 1)); done
+# a TB change and a tune both close the transmitter, calibrate and open it again; a tune sent while the TB calibration
+# still runs is overtaken by it (the daemon then re-applies the old frequency), so one after the other
+settle() {
+    sleep 2; i=0
+    while [ $i -lt 30 ]; do $C -c "?E" | grep -q "cal=ok" && $C -c "?S" | grep -q "tx=on" && break; sleep 1; i=$((i + 1)); done
+}
+echo "TX bandwidth 3000 kHz (was $tb_old)"
+$C -c "TB 3000"; settle
+echo "tune to $F Hz"
+$C -c "F $F"; settle
+$C -c "?S" | grep -q "f=$F " || { echo "the tune did not take: $($C -c '?S')"; $C -c "TB $tb_old"; exit 1; }
 $C -c "?S"
 
 restore() {

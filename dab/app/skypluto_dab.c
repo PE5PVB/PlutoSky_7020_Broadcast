@@ -140,7 +140,12 @@ static double latency(void){
 }
 
 // one super frame (5 CIFs = 1.25 transmission frames). Returns the transmission frames completed.
+static double now_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+static double g_t_enc = 0.0, g_t_mod = 0.0;   // seconds spent in the AAC encoder and in the DAB multiplex/modulation (-v)
+
 static int produce_superframe(void){
+    double ratio = 1.0 + g_ppm_now * 1e-6;
+    int was_primed = g_primed;
     if (o_tone > 0){
         // test tone: generated here on the transmitter's clock, so no resampling and no rate control
         static double ph_l = 0, ph_r = 0;
@@ -148,37 +153,23 @@ static int produce_superframe(void){
             g_pcm[2 * i] = 0.25f * (float)sin(ph_l); g_pcm[2 * i + 1] = 0.25f * (float)sin(ph_r);
             ph_l = fmod(ph_l + 2 * M_PI * o_tone / FS, 2 * M_PI); ph_r = fmod(ph_r + 2 * M_PI * 1.5 * o_tone / FS, 2 * M_PI);
         }
-        dls_poll(g_enc);
-        if (dabplus_enc_superframe(g_enc, g_pcm, g_sf)) return -1;
-        int frames = 0;
-        for (int k = 0; k < 5; k++){
-            const uint8_t *lf[1] = { g_sf + k * g_lfb };
-            if (dab_mod_push_cif(g_mod, lf)){
-                const uint32_t *w = dab_mod_phase_words(g_mod);
-                unsigned p = atomic_load(&ph_w);
-                for (int j = 0; j < FRAME_WORDS; j++) ph_ring[(p + j) % PH_RING] = w[j];
-                atomic_store(&ph_w, p + FRAME_WORDS);
-                frames++;
+    } else {
+        unsigned need = (unsigned)ceil(SF_SAMPLES * ratio + rs_pos) + RS_TAPS;
+        // start (and restart after a gap) only with AUD_TARGET in the buffer
+        if (!g_primed && aud_fill() >= AUD_TARGET + need) g_primed = 1;
+        if (g_primed && aud_fill() < need){ g_primed = 0; g_integ = 0; g_ppm_now = 0; }
+        if (g_primed){
+            // far too much audio (the start, or a stall of this program): skip the excess instead of slewing it away at the rate limit
+            if (aud_fill() > AUD_TARGET + need + RESYNC){
+                atomic_fetch_add(&aud_r, aud_fill() - (AUD_TARGET + need)); atomic_fetch_add(&st_resync, 1); g_integ = 0; was_primed = 0;
             }
-            g_cifs++;
-        }
-        return frames;
+            rs_run(g_pcm, SF_SAMPLES, ratio);
+        } else { memset(g_pcm, 0, sizeof(float) * SF_SAMPLES * 2); atomic_fetch_add(&st_silence, 1); }
     }
-    double ratio = 1.0 + g_ppm_now * 1e-6;
-    unsigned need = (unsigned)ceil(SF_SAMPLES * ratio + rs_pos) + RS_TAPS;
-    int was_primed = g_primed;
-    // start (and restart after a gap) only with AUD_TARGET in the buffer
-    if (!g_primed && aud_fill() >= AUD_TARGET + need) g_primed = 1;
-    if (g_primed && aud_fill() < need){ g_primed = 0; g_integ = 0; g_ppm_now = 0; }
-    if (g_primed){
-        // far too much audio (the start, or a stall of this program): skip the excess instead of slewing it away at the rate limit
-        if (aud_fill() > AUD_TARGET + need + RESYNC){
-            atomic_fetch_add(&aud_r, aud_fill() - (AUD_TARGET + need)); atomic_fetch_add(&st_resync, 1); g_integ = 0; was_primed = 0;
-        }
-        rs_run(g_pcm, SF_SAMPLES, ratio);
-    } else { memset(g_pcm, 0, sizeof(float) * SF_SAMPLES * 2); atomic_fetch_add(&st_silence, 1); }
+    double t0 = now_s();
     dls_poll(g_enc);
     if (dabplus_enc_superframe(g_enc, g_pcm, g_sf)) return -1;
+    double t1 = now_s(); g_t_enc += t1 - t0;
     int frames = 0;
     for (int k = 0; k < 5; k++){
         const uint8_t *lf[1] = { g_sf + k * g_lfb };
@@ -191,7 +182,8 @@ static int produce_superframe(void){
         }
         g_cifs++;
     }
-    if (g_primed){
+    g_t_mod += now_s() - t1;
+    if (o_tone <= 0 && g_primed){
         // rate control (PI, critically damped, time constant about a minute): hold the latency where it was at the start;
         // positive error = audio piling up = consume faster
         double L = latency();
@@ -288,6 +280,7 @@ int main(int argc, char **argv){
     ens.svc[0].bitrate = o_kbps; ens.svc[0].prot_level = 3;
     g_mod = dab_mod_open(&ens);
     if (!g_enc || !g_mod){ fprintf(stderr, "bad configuration\n"); return 2; }
+    dab_mod_set_phases_only(g_mod, 1);                               // the FPGA does the OFDM
     if (o_dls) dabplus_enc_set_dls(g_enc, o_dls, 15);
     g_pcm = calloc(SF_SAMPLES * 2, sizeof(float)); g_sf = malloc((size_t)dabplus_total_bytes(&g_cfg)); g_lfb = dab_mod_lf_bytes(g_mod, 0);
     rs_init();
@@ -323,6 +316,7 @@ int main(int argc, char **argv){
         fclose(fi); fclose(fo);
         printf("simulation: %.1f s, %ld phase words (%ld frames), final ratio %+.1f ppm, silent super frames %u, underflows %u, audio overflows %u\n",
                t, words, words / FRAME_WORDS, g_ppm_now, atomic_load(&st_silence), atomic_load(&st_underflow), atomic_load(&st_audio_ovf));
+        printf("time per second of audio: AAC encoder %.0f ms, DAB multiplex %.0f ms\n", 1000 * g_t_enc / t, 1000 * g_t_mod / t);
         return 0;
     }
 
@@ -347,9 +341,9 @@ int main(int argc, char **argv){
         double t = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
         if (o_verbose && t - last >= 5.0){
             last = t;
-            fprintf(stderr, "t=%.0f s audio %u ratio %+.1f ppm phase queue %u OFDM FIFO %u silence %u resync %u underflow %u restarts %u audio-ovf %u\n",
+            fprintf(stderr, "t=%.0f s audio %u ratio %+.1f ppm phase queue %u OFDM FIFO %u silence %u resync %u underflow %u restarts %u audio-ovf %u cpu enc %.0f%% mux %.0f%%\n",
                     t, aud_fill(), g_ppm_now, ph_fill(), rd(R_PHASE) & 0x3FFF, atomic_load(&st_silence), atomic_load(&st_resync), atomic_load(&st_underflow),
-                    atomic_load(&st_resets), atomic_load(&st_audio_ovf));
+                    atomic_load(&st_resets), atomic_load(&st_audio_ovf), 100 * g_t_enc / t, 100 * g_t_mod / t);
         }
     }
     pthread_join(th, NULL);

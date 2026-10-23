@@ -42,6 +42,8 @@ const dab_cf *dab_mod_frame(const dab_mod *m);
 // (carrier a: phase 45 degrees x (l + 2p) in symbol l; carrier order +1..+768, -768..-1); the null symbol is not included
 const uint32_t *dab_mod_phase_words(const dab_mod *m);
 #define DAB_PHASE_WORDS (76 * 96)
+// 1: build only the phase words (dab_mod_frame() is then not filled); saves the IFFTs when the FPGA does the OFDM
+void     dab_mod_set_phases_only(dab_mod *m, int on);
 // capacity units used by the sub-channels (of 864)
 int      dab_mod_cu_used(const dab_mod *m);
 

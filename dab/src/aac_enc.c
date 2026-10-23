@@ -72,8 +72,10 @@ struct aacenc {
     double last_off;                           // rate control offset of the last frame
     int   ms[MAXBANDS];
     float ath_l[NSFB_L], ath_s[NSFB_S], bark_l[NSFB_L], bark_s[NSFB_S];
+    double spw_l[NSFB_L * NSFB_L], spw_s[NSFB_S * NSFB_S];   // spreading weight of band m on band b ([b * nsfb + m]), 0 beyond 60 dB
     float in_gain;
     chdata cd[2];
+    int   sf_guess[2][MAXBANDS];               // last scale factor found per band: the start of the next search
     uint8_t dse[512]; int dse_len;             // data stream element for the next frame (DAB+ PAD)
     aacenc_stats st;
 };
@@ -124,6 +126,40 @@ static int code_band(const int *q, int n, int cb, bitwriter *w){
     return bits;
 }
 
+// bits of one band in every spectral book at once (books whose lav is below maxabs get 'inf'): the books come in pairs that
+// share the index, the sign bits are the same for all unsigned books, so one pass over the band is enough. Equals code_band().
+static void band_costs(const int *q, int n, int maxabs, int inf, int *cost){
+    for (int cb = 1; cb <= ESC_HCB; cb++) cost[cb] = maxabs > hcb[cb].lav && cb != ESC_HCB ? inf : 0;
+    int nz = 0, esc = 0;
+    for (int i = 0; i < n; i++){ int a = abs(q[i]); nz += a != 0; esc += esc_bits(a); }
+    if (maxabs <= 2){                                                   // books 1..4 (dim 4)
+        const uint8_t *l1 = aac_hcb_len[1], *l2 = aac_hcb_len[2], *l3 = aac_hcb_len[3], *l4 = aac_hcb_len[4];
+        int c1 = 0, c2 = 0, c3 = 0, c4 = 0;
+        for (int i = 0; i < n; i += 4){
+            const int *v = q + i;
+            int iu = 27 * abs(v[0]) + 9 * abs(v[1]) + 3 * abs(v[2]) + abs(v[3]);
+            c3 += l3[iu]; c4 += l4[iu];
+            if (maxabs <= 1){ int is = 27 * (v[0] + 1) + 9 * (v[1] + 1) + 3 * (v[2] + 1) + (v[3] + 1); c1 += l1[is]; c2 += l2[is]; }
+        }
+        if (maxabs <= 1){ cost[1] = c1; cost[2] = c2; }
+        cost[3] = c3 + nz; cost[4] = c4 + nz;
+    }
+    int c5 = 0, c6 = 0, c7 = 0, c8 = 0, c9 = 0, c10 = 0, c11 = 0;      // books 5..11 (dim 2)
+    const uint8_t *l5 = aac_hcb_len[5], *l6 = aac_hcb_len[6], *l7 = aac_hcb_len[7], *l8 = aac_hcb_len[8];
+    const uint8_t *l9 = aac_hcb_len[9], *l10 = aac_hcb_len[10], *l11 = aac_hcb_len[11];
+    for (int i = 0; i < n; i += 2){
+        int a0 = abs(q[i]), a1 = abs(q[i + 1]);
+        if (maxabs <= 4){ int is = 9 * (q[i] + 4) + (q[i + 1] + 4); c5 += l5[is]; c6 += l6[is]; }
+        if (maxabs <= 7){ int iu = 8 * a0 + a1; c7 += l7[iu]; c8 += l8[iu]; }
+        if (maxabs <= 12){ int iu = 13 * a0 + a1; c9 += l9[iu]; c10 += l10[iu]; }
+        c11 += l11[17 * (a0 > 15 ? 16 : a0) + (a1 > 15 ? 16 : a1)];
+    }
+    if (maxabs <= 4){ cost[5] = c5; cost[6] = c6; }
+    if (maxabs <= 7){ cost[7] = c7 + nz; cost[8] = c8 + nz; }
+    if (maxabs <= 12){ cost[9] = c9 + nz; cost[10] = c10 + nz; }
+    cost[11] = c11 + nz + esc;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // sectioning, scale factors, bit count and writing of one channel
 
@@ -141,24 +177,24 @@ static int section_and_count(const layout *L, chdata *c){
     for (int b = 0; b < L->nbands; b++){
         const int a = L->start[b], n = L->start[b + 1] - a;
         int maxabs = 0; for (int i = 0; i < n; i++){ int v = abs(c->q[a + i]); if (v > maxabs) maxabs = v; }
-        for (int cb = 0; cb < NBOOK; cb++){
-            if (c->pns[b]) cost[b][cb] = cb == NOISE_HCB ? 0 : INF;           // noise bands: book 13 only, no spectral bits
-            else if (cb == ZERO_HCB) cost[b][cb] = maxabs ? INF : 0;
-            else if (cb > ESC_HCB) cost[b][cb] = INF;
-            else cost[b][cb] = (cb != ESC_HCB && maxabs > hcb[cb].lav) ? INF : code_band(c->q + a, n, cb, NULL);
-        }
+        for (int cb = 0; cb < NBOOK; cb++) cost[b][cb] = INF;
+        if (c->pns[b]) cost[b][NOISE_HCB] = 0;                             // noise bands: book 13 only, no spectral bits
+        else { if (!maxabs) cost[b][ZERO_HCB] = 0; band_costs(c->q + a, n, maxabs, INF, cost[b]); }
     }
     for (int g = 0; g < L->ngroups; g++){
         const int b0 = g * L->max_sfb;
-        for (int s = 0; s < L->max_sfb; s++)
+        for (int s = 0; s < L->max_sfb; s++){
+            int pmin = 0;                                                   // cheapest book of the previous band (the first of equals)
+            if (s > 0) for (int p = 1; p < NBOOK; p++) if (best[s - 1][p] < best[s - 1][pmin]) pmin = p;
             for (int cb = 0; cb < NBOOK; cb++){
                 const int cc = cost[b0 + s][cb];
                 if (cc >= INF){ best[s][cb] = INF; continue; }
                 if (s == 0){ best[s][cb] = cc + hdr; from[s][cb] = -1; continue; }
-                int m = best[s - 1][cb], arg = cb;
-                for (int p = 0; p < NBOOK; p++) if (best[s - 1][p] < INF && best[s - 1][p] + hdr < m){ m = best[s - 1][p] + hdr; arg = p; }
+                int m = best[s - 1][cb], arg = cb;                         // continue the section, or start a new one after pmin
+                if (best[s - 1][pmin] < INF && best[s - 1][pmin] + hdr < m){ m = best[s - 1][pmin] + hdr; arg = pmin; }
                 best[s][cb] = m >= INF ? INF : m + cc; from[s][cb] = arg;
             }
+        }
         if (L->max_sfb > 0){
             int cb = 0; for (int k = 1; k < NBOOK; k++) if (best[L->max_sfb - 1][k] < best[L->max_sfb - 1][cb]) cb = k;
             for (int s = L->max_sfb - 1; s >= 0; s--){ c->cb[b0 + s] = cb; cb = from[s][cb]; }
@@ -193,7 +229,7 @@ static int section_and_count(const layout *L, chdata *c){
         else { int d = c->nrg[b] - nl; if (d < -60) d = -60; if (d > 60) d = 60; c->nrg[b] = nl + d; bits += aac_scf_len[d + 60]; }
         nl = c->nrg[b];
     }
-    for (int b = 0; b < L->nbands; b++) if (c->cb[b] != ZERO_HCB && c->cb[b] != NOISE_HCB) bits += code_band(c->q + L->start[b], L->start[b + 1] - L->start[b], c->cb[b], NULL);
+    for (int b = 0; b < L->nbands; b++) if (c->cb[b] != ZERO_HCB && c->cb[b] != NOISE_HCB) bits += cost[b][c->cb[b]];
     return bits;
 }
 
@@ -257,16 +293,29 @@ static float band_noise(const float *x, const int *q, int n, int sf){
     return e;
 }
 
-static int choose_sf(const float *x, const float *xa34, int n, float en, float allowed, int *q){
+// the coarsest scale factor whose quantisation noise stays within 'allowed' (the noise grows with sf). The search starts at
+// *guess (the band's result of the last search: the rate control calls this about ten times per frame with small changes),
+// steps outwards with doubling steps and then halves the bracket; usually 3-4 trial quantisations instead of 9.
+static int choose_sf(const float *x, const float *xa34, int n, float en, float allowed, int *q, int *guess){
     if (en <= allowed) return -1;
     float mx = 0; for (int i = 0; i < n; i++) if (xa34[i] > mx) mx = xa34[i];
     int lo = (int)ceil(100.0 + log2f(mx / MAXQ) / 0.1875f); if (lo < 0) lo = 0; if (lo > 255) lo = 255;
-    int hi = 255, bestsf = lo;
-    while (lo <= hi){
-        int mid = (lo + hi) / 2;
-        quant_band(xa34, x, n, mid, q);
-        if (band_noise(x, q, n, mid) <= allowed){ bestsf = mid; lo = mid + 1; } else hi = mid - 1;
+    int g = *guess < lo ? lo : *guess > 255 ? 255 : *guess;
+    int good = -1, bad = -1;                                            // good: noise ok; bad: too much noise (good < bad)
+    #define SF_OK(sf) (quant_band(xa34, x, n, (sf), q), band_noise(x, q, n, (sf)) <= allowed)
+    if (SF_OK(g)){
+        good = g;
+        for (int step = 1; good < 255; step *= 2){ int t = good + step > 255 ? 255 : good + step; if (SF_OK(t)) good = t; else { bad = t; break; } }
+        if (bad < 0) bad = 256;
+    } else {
+        bad = g;
+        for (int step = 1; bad > lo; step *= 2){ int t = bad - step < lo ? lo : bad - step; if (SF_OK(t)){ good = t; break; } bad = t; }
+        if (good < 0) good = lo - 1;                                    // nothing fits: the finest allowed (lo), as before
     }
+    while (bad - good > 1){ int mid = (good + bad) / 2; if (SF_OK(mid)) good = mid; else bad = mid; }
+    #undef SF_OK
+    int bestsf = good < lo ? lo : good;
+    *guess = bestsf;
     quant_band(xa34, x, n, bestsf, q);
     return band_nonzero(q, 0, n) ? bestsf : -1;
 }
@@ -288,7 +337,7 @@ static int quantise_all(aacenc *e, double off_db){
         memset(d->q, 0, sizeof d->q);
         for (int b = 0; b < L->nbands; b++){
             const int a = L->start[b], n = L->start[b + 1] - a;
-            int sf = choose_sf(e->X[c] + a, e->Xa34[c] + a, n, e->en[c][b], e->thr[c][b] * f, d->q + a);
+            int sf = choose_sf(e->X[c] + a, e->Xa34[c] + a, n, e->en[c][b], e->thr[c][b] * f, d->q + a, &e->sf_guess[c][b]);
             d->pns[b] = 0;
             // noise substitution: a noise-like band above 4 kHz (long windows, not M/S) that would be emptied or coded with
             // a noise of more than half its energy is sent as "noise with this energy" instead
@@ -325,24 +374,36 @@ static int quantise_all(aacenc *e, double off_db){
 // ---------------------------------------------------------------------------------------------------------------------
 // psychoacoustics on one transform: band energy, spreading over Bark, tonality (spectral flatness), absolute threshold
 
-static void psy_bands(const float *X, const int *swb, int nsfb, const float *ath, const float *bark, float *en, float *thr, float *tonal){
+static void psy_bands(const float *X, const int *swb, int nsfb, const float *ath, const float *bark, const double *spw, float *en, float *thr, float *tonal){
     for (int b = 0; b < nsfb; b++){
         const int a = swb[b], n = swb[b + 1] - a;
-        double s = 0, sl = 0;
-        for (int i = 0; i < n; i++){ double p = (double)X[a + i] * X[a + i]; s += p; sl += log10(p + 1e-9); }
+        // geometric mean through a running product kept in range with frexp: one logarithm per band instead of one per line
+        double s = 0, prod = 1.0; int ex = 0;
+        for (int i = 0; i < n; i++){
+            double p = (double)X[a + i] * X[a + i]; s += p;
+            prod *= p + 1e-9;
+            if ((i & 7) == 7){ int k; prod = frexp(prod, &k); ex += k; }
+        }
+        double sl = (log2(prod) + ex) * 0.30102999566398120;               // sum of log10(p + 1e-9)
         en[b] = (float)s;
         double sfm_db = 10.0 * sl / n - 10.0 * log10(s / n + 1e-9);
         double t = sfm_db / -40.0; tonal[b] = (float)(t < 0 ? 0 : t > 1 ? 1 : t);
     }
     for (int b = 0; b < nsfb; b++){
         double spread = 0;
-        for (int m = 0; m < nsfb; m++){
-            double dz = bark[b] - bark[m], att = dz >= 0 ? 12.0 * dz : 27.0 * -dz;
-            if (att < 60.0) spread += en[m] * pow(10.0, -att / 10.0);
-        }
+        const double *w = spw + b * nsfb;
+        for (int m = 0; m < nsfb; m++) if (w[m] > 0) spread += en[m] * w[m];
         double off = tonal[b] * (14.5 + bark[b]) + (1.0 - tonal[b]) * 5.5;   // SMR offset (Johnston)
         double t = spread * pow(10.0, -off / 10.0);
         thr[b] = (float)(t < ath[b] ? ath[b] : t);
+    }
+}
+
+// the spreading function of psy_bands: 12 dB per Bark downwards, 27 dB per Bark upwards, cut at 60 dB
+static void spread_weights(int nsfb, const float *bark, double *spw){
+    for (int b = 0; b < nsfb; b++) for (int m = 0; m < nsfb; m++){
+        double dz = bark[b] - bark[m], att = dz >= 0 ? 12.0 * dz : 27.0 * -dz;
+        spw[b * nsfb + m] = att < 60.0 ? pow(10.0, -att / 10.0) : 0.0;
     }
 }
 
@@ -395,6 +456,7 @@ aacenc *aacenc_open(int sample_rate, int channels, int bandwidth_hz){
     // absolute threshold: a full-scale sine is 96 dB SPL; its line energy is about (gain * M/2)^2
     ath_bark(NSFB_L, swb_l, NL, bin_l, pow(e->in_gain * NL / 2.0, 2), e->ath_l, e->bark_l);
     ath_bark(NSFB_S, swb_s, NS, bin_s, pow(e->in_gain * NS / 2.0, 2), e->ath_s, e->bark_s);
+    spread_weights(NSFB_L, e->bark_l, e->spw_l); spread_weights(NSFB_S, e->bark_s, e->spw_s);
     e->prev_seq = ONLY_LONG;
     return e;
 }
@@ -501,7 +563,7 @@ int aacenc_frame(aacenc *e, const float *pcm, int target_bytes, int max_bytes, i
             mdct_run(&e->mdct_l, wb, e->X[c]);
             for (int k = swb_l[L->max_sfb]; k < NL; k++) e->X[c][k] = 0;
             float en[NSFB_L], thr[NSFB_L], ton[NSFB_L];
-            psy_bands(e->X[c], swb_l, NSFB_L, e->ath_l, e->bark_l, en, thr, ton);
+            psy_bands(e->X[c], swb_l, NSFB_L, e->ath_l, e->bark_l, e->spw_l, en, thr, ton);
             for (int b = 0; b < L->nbands; b++){
                 float t = thr[b], lim = 2.0f * e->thr_prev_l[c][b];       // pre-echo: at most 3 dB above the last long frame
                 if (seq == ONLY_LONG && e->thr_prev_l[c][b] > 0 && t > lim && lim > e->ath_l[b]) t = lim;
@@ -515,7 +577,7 @@ int aacenc_frame(aacenc *e, const float *pcm, int target_bytes, int max_bytes, i
                 for (int n = 0; n < 2 * NS; n++) wb[n] = blk[off + j * NS + n] * e->win_s[n];
                 mdct_run(&e->mdct_s, wb, Xs[j]);
                 for (int k = swb_s[L->max_sfb]; k < NS; k++) Xs[j][k] = 0;
-                psy_bands(Xs[j], swb_s, NSFB_S, e->ath_s, e->bark_s, en_w[j], thr_w[j], ton_w[j]);
+                psy_bands(Xs[j], swb_s, NSFB_S, e->ath_s, e->bark_s, e->spw_s, en_w[j], thr_w[j], ton_w[j]);
             }
             // interleave (group, band, window, line) and combine the per-window thresholds per group band
             int win = 0, b = 0;
@@ -561,13 +623,13 @@ int aacenc_frame(aacenc *e, const float *pcm, int target_bytes, int max_bytes, i
 
     // 4. rate control: the lowest threshold offset (best quality) whose bits fit the target
     const int target_bits = target_bytes * 8 - 7, max_bits = max_bytes * 8 - 7;
-    // search around the last frame's offset first (8 steps), the full range only when that bracket does not hold it
+    // search around the last frame's offset first (6 halvings: 24 dB down to 0.4 dB), the full range only when that bracket does not hold it
     double lo = e->last_off - 12.0, hi = e->last_off + 12.0, best = 60.0;
     if (lo < -20.0) lo = -20.0;
     if (hi > 60.0) hi = 60.0;
     if (quantise_all(e, hi) > target_bits){ lo = hi; hi = 60.0; }
     else { best = hi; if (quantise_all(e, lo) <= target_bits){ hi = lo; lo = -20.0; } }
-    for (int it = 0; it < 8; it++){
+    for (int it = 0; it < 6; it++){
         double m = 0.5 * (lo + hi);
         if (quantise_all(e, m) <= target_bits){ best = m; hi = m; } else lo = m;
     }

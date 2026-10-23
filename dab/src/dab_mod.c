@@ -53,7 +53,8 @@ struct dab_mod {
     subch sc[DAB_MAX_SVC];
     int cu_used;
     int cif_count, cif_in_frame;
-    uint8_t *frame_bits;                   // FIC (4 x 2304) + MSC (4 x 55296) bits of the frame being built
+    int phases_only;                       // 1: only the phase words (the FPGA does the OFDM), no IQ frame
+    uint8_t *frame_bits;                  // FIC (4 x 2304) + MSC (4 x 55296) bits of the frame being built
     int fidx[K];                           // frequency interleaver: QPSK symbol n -> carrier index
     dab_cf prs[K];
     uint8_t prs_ph[K];                     // phase reference in units of 90 degrees
@@ -238,6 +239,7 @@ int dab_mod_lf_bytes(const dab_mod *m, int i){ return 3 * m->sc[i].bitrate; }
 int dab_mod_cu_used(const dab_mod *m){ return m->cu_used; }
 const dab_cf *dab_mod_frame(const dab_mod *m){ return m->iq; }
 const uint32_t *dab_mod_phase_words(const dab_mod *m){ return m->phw; }
+void dab_mod_set_phases_only(dab_mod *m, int on){ m->phases_only = on ? 1 : 0; }
 
 static void ofdm_symbol(dab_mod *m, const dab_cf *z, dab_cf *out){
     static cpx in[NFFT], X[NFFT];
@@ -264,6 +266,19 @@ static void pack_phases(dab_mod *m, int l, const uint8_t *zp){
 }
 
 static void modulate_frame(dab_mod *m){
+    if (m->phases_only){
+        static uint8_t zp[K], yc[K];
+        for (int a = 0; a < K; a++) zp[a] = (uint8_t)(2 * m->prs_ph[a]);
+        pack_phases(m, 0, zp);
+        for (int l = 0; l < NSYM - 1; l++){
+            const uint8_t *b = m->frame_bits + (size_t)l * 2 * K;
+            static const uint8_t code[4] = { 1, 7, 3, 5 };
+            for (int n = 0; n < K; n++) yc[m->fidx[n]] = code[2 * b[n] + b[n + K]];
+            for (int a = 0; a < K; a++) zp[a] = (uint8_t)((zp[a] + yc[a]) & 7);
+            pack_phases(m, l + 1, zp);
+        }
+        return;
+    }
     dab_cf *o = m->iq;
     memset(o, 0, sizeof(dab_cf) * TNULL); o += TNULL;               // null symbol
     static dab_cf z[K], y[K];
