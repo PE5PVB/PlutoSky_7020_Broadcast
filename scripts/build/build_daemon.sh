@@ -13,7 +13,8 @@ GCC="$DK/firmware/src/buildroot/output/host/bin/arm-linux-gnueabihf-gcc"
 mkdir -p "$OUT"
 # stage the sources with Unix line endings (a Windows checkout may have CRLF)
 for f in skypluto-ctl.c skypluto-mask.c web_index.h; do tr -d '\r' < "$HERE/src/$f" > "$OUT/$f"; done
-$GCC -O2 -Wall -Wno-unused-variable -o "$OUT/skypluto-ctl" "$OUT/skypluto-ctl.c" -lm
+for f in mux_conf.c mux_conf.h; do tr -d '\r' < "$HERE/dab/src/$f" > "$OUT/$f"; done   # the DAB multiplex layout, shared with skypluto-dab
+$GCC -O2 -Wall -Wno-unused-variable -o "$OUT/skypluto-ctl" "$OUT/skypluto-ctl.c" "$OUT/mux_conf.c" -lm
 $GCC -O3 -mcpu=cortex-a9 -mfpu=neon -ffast-math -Wall -Wno-unused-variable -o "$OUT/skypluto-mask" "$OUT/skypluto-mask.c" -lm -lpthread
 ls -l "$OUT/skypluto-ctl" "$OUT/skypluto-mask"
 md5sum "$OUT/skypluto-ctl" "$OUT/skypluto-mask"

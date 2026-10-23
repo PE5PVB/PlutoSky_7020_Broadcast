@@ -193,15 +193,15 @@ encoder and builds the multiplex; the FPGA does the OFDM. The DAB settings are n
 | Command | Range / default | Meaning |
 |---|---|---|
 | `M FM` / `M DAB` | default `FM` | the mode. `M DAB`: TX bandwidth at least 3 MHz for the session (the FM value comes back with `M FM`), mask monitor, ALC and LO nulling pause (they measure an FM carrier), the program starts and is restarted if it stops. `ERR nobit` = bitstream without DAB, `ERR nodab` = `/mnt/jffs2/skypluto-dab` missing, `ERR band` = the frequency is not in Band III (174–240 MHz; send `F <channel>` first). An `F` outside Band III while in DAB mode switches to FM by itself (an encoder that does not know `M`) |
-| `DBR <kbit/s>` | 32 … 192, multiple of 8; `96` | service bitrate |
-| `DSV <text>` | 1 … 16 ASCII characters; `PlutoSky` | service label |
-| `DEN <text>` | 1 … 16 ASCII characters; `PlutoSky DAB` | ensemble label |
-| `DSI <hex>` | 4 hex digits; `8F01` | service identifier |
+| `DBR <kbit/s>` | 32 … 192, multiple of 8 | bitrate of the service encoded on the Pluto (stored in the layout) |
+| `DSV <text>` | 1 … 16 ASCII characters, no `;` | its service label |
+| `DEN <text>` | 1 … 16 ASCII characters, no `;` | the ensemble label |
+| `DSI <hex>` | 4 hex digits, not used by another service | its service identifier |
 | `DLS <text>` | up to 128 bytes, UTF-8 | dynamic label (the successor of RDS RadioText); changes without interruption |
 | `DTN <Hz>` | 0 … 10000; `0` | test tone (left Hz, right 1.5 × Hz, −12 dBFS) instead of the I2S input; `0` = I2S |
 | `?DAB` | | `m=FM`, or `m=DAB br=96 src=i2s run=1 rs=0 fifo=7712 uf=0 rst=0 aud=11600 ppm=+12 sil=0 cpu=31`: `run` program running, `rs` restarts by the daemon, `fifo` OFDM FIFO words (~7700 = full), `uf` underflows, `rst` OFDM restarts, `aud` audio buffer (samples), `ppm` the clock correction toward the I2S source, `sil` super frames sent silent (no audio), `cpu` % of one core |
 
-In DAB mode `DSV` and `DEN` change the labels at once. `DBR` and `DSI` go through a multiplex reconfiguration as receivers
+In DAB mode label changes (`DSV`, `DEN`, the web interface) take effect at once. Everything else (`DBR`, `DSI`, services added or removed, protection) goes through a multiplex reconfiguration as receivers
 expect it (EN 300 401 6.5): it is announced in the FIC (FIG 0/0 change flags and occurrence, the next sub-channel/service
 organisation with C/N = next) and takes effect 3 s later at a super frame boundary; receivers follow without retuning, with
 a short gap in the audio at the switch. One change at a time: a value sent while one is pending is taken up after it (only
@@ -209,17 +209,21 @@ the last one counts). `DTN` restarts the multiplex (receivers lose the ensemble 
 meaningless. `F` takes the channel's centre frequency in Hz (Band III: 1 kHz resolution, e.g. 5A = `F 174928000`); `P` is the RMS
 power of the FM carrier setting, and the DAB ensemble lies about 16 dB below it (crest factor).
 
-**A second service from outside.** When `/mnt/jffs2/dab-ext.conf` exists (lines `port=2491`, `br=128`, `sid=8F02`,
-`label=…`), the ensemble carries a second service: complete DAB+ super frames (with their PAD) as ODR-AudioEnc sends them
-over ZeroMQ (`odr-audioenc … -o tcp://<pluto>:2491`; ZMTP 3, NULL security, no CURVE). They are buffered for ~0.6 s;
-when none arrive a silent super frame of the same bitrate goes out, and the clock difference with the remote encoder is
-taken up by dropping a super frame now and then. `br` must match the encoder's bitrate (super frames of another size are
-counted as `x2bad` and not used). The file is read when the program starts (at `M DAB`). `?DAB` then also shows
-`x2=` buffered super frames, `x2rx` received, `x2sil` sent silent, `x2drop` dropped, `x2bad` unusable and `x2from` the sender.
-Anyone who can reach the port can feed this service: open it to the internet only towards the encoder's address.
+**The multiplex layout.** What goes on the air is one layout, stored in `/mnt/jffs2/dab-mux.conf` and edited in the web
+interface (tab DAB, `GET`/`POST /api/mux`): the ensemble (label, EId) and up to 8 services, each with a source, SId, label,
+bitrate, protection (EEP-1A..4A, or 1B..4B for multiples of 32 kbit/s) and a slideshow flag (FIG 0/13). Sources: `i2s` (the
+encoder's stereo I2S, encoded on the Pluto), `tone:<Hz>`, or `zmq:<port>`: complete DAB+ super frames (with their PAD) as
+ODR-AudioEnc sends them over ZeroMQ (`odr-audioenc … -o tcp://<pluto>:<port>`; ZMTP 3, NULL security, no CURVE), passed on
+unchanged. At most one service is encoded on the Pluto; the sum must fit in 864 CU. `DBR`, `DSV` and `DSI` change the service
+encoded on the Pluto (`ERR nolocal` when the layout has none, `ERR range` when it would no longer fit), `DEN` the ensemble label;
+they are stored in the same file. Outside streams are buffered ~0.6 s; when none arrive a silent super frame of the same
+bitrate goes out, and a super frame is dropped now and then when the remote clock runs ahead. Their bitrate must match the
+layout (super frames of another size are counted as unusable). `?DAB` then shows `svc=` services, `cu=` capacity in use, `chg=`
+an announced reconfiguration, and per outside service `z<n>=<port>:<buffered>/<received>/<silent>/<dropped>/<unusable>/<sender>`.
+Anyone who can reach a ZeroMQ port can feed that service: open it to the internet only towards the encoder's address.
 
 Switching to DAB: `E 0` → `F <channel>` → the encoder's I2S to 48 kHz stereo → `M DAB` → `E 1`. Back: `E 0` → `M FM` → I2S to
-MPX 192 kHz → `F <FM frequency>` → `E 1`. After a restart of the Pluto (see `up`), send `M` and the D settings with the rest.
+MPX 192 kHz → `F <FM frequency>` → `E 1`. After a restart of the Pluto (see `up`), send `M` with the rest. The D settings are stored on the Pluto (the layout): send them only when they are changed in the encoder's menu, not at a resync, or they undo what was set in the web interface.
 
 ## 5. What is automatic and fixed (not in the protocol)
 

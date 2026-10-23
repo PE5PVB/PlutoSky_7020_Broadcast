@@ -26,6 +26,7 @@
 //   arm-linux-gnueabihf-gcc -O2 -Wall -o skypluto-ctl skypluto-ctl.c -lm
 // =============================================================================
 #include <ctype.h>
+#include "mux_conf.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1242,21 +1243,54 @@ static void set_level(double dbm){
 }
 
 // ---- DAB+ (bitstream B1D0001E and later): the exciter takes OFDM from skypluto-dab instead of the FM modulator ----------------------
-// M DAB starts skypluto-dab (AAC encoder + multiplex on the ARM, stereo 48 kHz from the I2S input) and keeps it running; M FM stops it
-// (the program puts the exciter back in FM when it ends). In DAB mode the TX bandwidth is at least 3 MHz (the ensemble is 1.536 MHz
-// wide), and the mask monitor and the ALC pause: both measure an FM carrier. The DAB settings are not stored: the Pico sends them.
+// M DAB starts skypluto-dab and keeps it running; M FM stops it (the program puts the exciter back in FM when it ends). In DAB mode
+// the TX bandwidth is at least 3 MHz (the ensemble is 1.536 MHz wide), and the mask monitor and the ALC pause: both measure an FM carrier.
+// What goes on the air is one multiplex layout, kept here (DAB_MUX, dab/src/mux_conf.h): up to 8 services, at most one encoded on
+// the Pluto from the I2S input (or a test tone), the others DAB+ streams from ODR-AudioEnc over ZeroMQ. The web interface edits the
+// whole layout; the encoder's commands (DBR, DSV, DSI) change the service encoded here, DEN the ensemble label. The running program
+// re-reads the file: labels at once, everything else through an announced multiplex reconfiguration.
 #define DAB_BIN     "/mnt/jffs2/skypluto-dab"
+#define DAB_MUX     "/mnt/jffs2/dab-mux.conf"
+#define DAB_EXT     "/mnt/jffs2/dab-ext.conf"   // older form of one outside service: taken into the layout once, then renamed
 #define DAB_DLS     "/tmp/dab_dls.txt"
 #define DAB_STATUS  "/tmp/dab_status"
 #define DAB_LOG     "/tmp/dab.log"
-#define DAB_EXT     "/mnt/jffs2/dab-ext.conf"   // present: a second service from outside (port= br= sid= label=), see dab/src/ext_stream.h
-#define DAB_CFG     "/tmp/dab_cfg"     // read by the running program every super frame: labels at once, bitrate/SId announced
 #define DAB_TB_KHZ  3000
-static int    has_dab = 0, dab_kbps = 96, dab_restarts = 0, dab_tone = 0;   // dab_tone: test tone in Hz instead of I2S (0 = I2S)
-static char   dab_svc[17] = "PlutoSky", dab_ens[17] = "PlutoSky DAB";
-static unsigned dab_sid = 0x8F01;
+static int    has_dab = 0, dab_restarts = 0, dab_tone = 0;   // dab_tone: test tone in Hz for the service encoded here (0 = its own source)
+static mux_conf dmux;                                         // the layout (as in DAB_MUX)
 static pid_t  dab_pid = -1;
 static double dab_next = 0.0, dab_t0 = 0.0;
+
+// the layout at start: the file, or a default (one I2S service) plus an outside service from the older dab-ext.conf
+static void dab_mux_load(void){
+    char err[160];
+    if (mux_read(DAB_MUX, &dmux, err, sizeof err) == 0) return;
+    if (access(DAB_MUX, F_OK) == 0){ fprintf(stderr, "   !! %s: %s - standaardindeling\n", DAB_MUX, err); fflush(stderr); }
+    mux_default(&dmux);
+    FILE *f = fopen(DAB_EXT, "r");
+    if (f){
+        mux_service *s = &dmux.s[1]; char ln[160];
+        s->src = MUX_SRC_ZMQ; s->port = 2491; s->kbps = 128; s->prot = 3; s->sls = 1; s->sid = 0x8F02; snprintf(s->label, sizeof s->label, "Extern");
+        while (fgets(ln, sizeof ln, f)){
+            ln[strcspn(ln, "\r\n")] = 0;
+            if (!strncmp(ln, "port=", 5)) s->port = atoi(ln + 5);
+            else if (!strncmp(ln, "br=", 3)) s->kbps = atoi(ln + 3);
+            else if (!strncmp(ln, "sid=", 4)) s->sid = (unsigned)strtoul(ln + 4, NULL, 16) & 0xFFFF;
+            else if (!strncmp(ln, "sls=", 4)) s->sls = atoi(ln + 4) ? 1 : 0;
+            else if (!strncmp(ln, "label=", 6)) snprintf(s->label, sizeof s->label, "%.16s", ln + 6);
+        }
+        fclose(f); dmux.n = 2;
+        rename(DAB_EXT, DAB_EXT ".taken");
+    }
+    if (mux_write(DAB_MUX, &dmux) == 0){ fprintf(stderr, "   -> multiplexindeling aangemaakt: %s\n", DAB_MUX); fflush(stderr); }
+}
+// the layout changed (encoder command or web interface): written whole; the program takes it up within a super frame
+static int dab_mux_store(const mux_conf *c){
+    if (mux_write(DAB_MUX, c)) return -1;
+    dmux = *c;
+    if (dab_mode){ fprintf(stderr, "   -> multiplexindeling naar het programma (%d diensten, %d CU)\n", dmux.n, mux_cu_total(&dmux)); fflush(stderr); }
+    return 0;
+}
 
 // the TX bandwidth for this session only (not stored): recalibrates like TB when the transmitter is open
 static void tb_set_now(int khz){
@@ -1268,31 +1302,22 @@ static void tb_set_now(int khz){
         cal_hold = 1; cal_pending = 1; cal_due = mono(); cal_failed = 0; cal_fail = 0; cal_force = 1;
     }
 }
-// the settings for the running program (written whole and renamed: it never reads half a file)
-static void dab_cfg_write(void){
-    FILE *f = fopen(DAB_CFG ".new", "w"); if (!f) return;
-    fprintf(f, "br=%d\nsid=%04X\nsvc=%s\nens=%s\n", dab_kbps, dab_sid, dab_svc, dab_ens);
-    fclose(f); rename(DAB_CFG ".new", DAB_CFG);
-}
 static void dab_start(void){
-    char br[8], sid[8], tone[12];
-    snprintf(br, sizeof br, "%d", dab_kbps); snprintf(sid, sizeof sid, "%04X", dab_sid); snprintf(tone, sizeof tone, "%d", dab_tone);
+    char tone[12]; snprintf(tone, sizeof tone, "%d", dab_tone);
     { FILE *df = fopen(DAB_DLS, "a"); if (df) fclose(df); }       // the program reads the DLS from this file (empty = none)
-    dab_cfg_write();
+    if (access(DAB_MUX, R_OK) != 0) mux_write(DAB_MUX, &dmux);
     unlink(DAB_STATUS);
     pid_t p = fork();
     if (p == 0){
         prctl(PR_SET_PDEATHSIG, SIGTERM);                         // the daemon ends: the program ends too and leaves the exciter in FM
         struct sched_param sp; sp.sched_priority = 0; sched_setscheduler(0, SCHED_OTHER, &sp);   // not the daemon's real-time class
         int lf = open(DAB_LOG, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (lf >= 0){ dup2(lf, 2); close(lf); }
-        if (access(DAB_EXT, R_OK) == 0)                           // a second service, encoded outside and sent over ZeroMQ (see skypluto-dab -x)
-            execl(DAB_BIN, DAB_BIN, "-v", "-b", br, "-s", dab_svc, "-e", dab_ens, "-i", sid, "-t", DAB_DLS, "-S", DAB_STATUS, "-c", DAB_CFG, "-T", tone, "-x", DAB_EXT, (char *)NULL);
-        execl(DAB_BIN, DAB_BIN, "-v", "-b", br, "-s", dab_svc, "-e", dab_ens, "-i", sid, "-t", DAB_DLS, "-S", DAB_STATUS, "-c", DAB_CFG, "-T", tone, (char *)NULL);
+        execl(DAB_BIN, DAB_BIN, "-v", "-m", DAB_MUX, "-t", DAB_DLS, "-S", DAB_STATUS, "-T", tone, (char *)NULL);
         _exit(127);
     }
     if (p < 0){ dab_next = mono() + 2.0; return; }
     dab_pid = p; dab_t0 = mono();
-    fprintf(stderr, "   -> DAB gestart (%d kbit/s, \"%s\" / \"%s\", SId %04X, %s)\n", dab_kbps, dab_svc, dab_ens, dab_sid, dab_tone ? "testtoon" : "I2S"); fflush(stderr);
+    fprintf(stderr, "   -> DAB gestart (%d diensten, %d CU, \"%s\"%s)\n", dmux.n, mux_cu_total(&dmux), dmux.label, dab_tone ? ", testtoon" : ""); fflush(stderr);
 }
 static void dab_stop(void){
     if (dab_pid <= 0) return;
@@ -1314,15 +1339,9 @@ static void dab_poll(double now){
         }
     } else if (dab_mode && now >= dab_next) dab_start();
 }
-// a setting that the multiplex carries changed: restart the program (receivers lose the ensemble for about 2 s)
+// the test tone changed: restart the program (receivers lose the ensemble for about 2 s)
 static void dab_restart(void){ if (dab_mode){ dab_stop(); dab_next = mono() + 0.2; } }
-// bitrate, labels, service id: handed to the running program, which changes the labels at once and announces a multiplex
-// reconfiguration for the rest (receivers follow it without retuning); no restart
-static void dab_update(void){
-    dab_cfg_write();
-    if (dab_mode){ fprintf(stderr, "   -> DAB-instelling naar het programma (%d kbit/s, \"%s\" / \"%s\", SId %04X)\n", dab_kbps, dab_svc, dab_ens, dab_sid); fflush(stderr); }
-}
-static int dab_label_ok(const char *s){ size_t n = strlen(s); if (n < 1 || n > 16) return 0; for (; *s; s++) if (*s < 0x20 || *s > 0x7E) return 0; return 1; }
+static int dab_label_ok(const char *s){ size_t n = strlen(s); if (n < 1 || n > 16) return 0; for (; *s; s++) if (*s < 0x20 || *s > 0x7E || *s == ';') return 0; return 1; }
 
 static void handle(char *line){
     while (*line==' '||*line=='\t') line++;
@@ -1365,14 +1384,18 @@ static void handle(char *line){
         // ?RD = RDS of the own transmission, decoded from the RX2 measurement path (one 0.25 s window per second): rd=ok pi= pty= tp= ta= ms= gps=<groups/s>
         // ams=<age of the last group> ct=<clock time> ps="<8>" rt="<text>". The first ?RD enables the decoder (10 s; ask again within 10 s). rd=na without groups.
         // ?DAB: m=FM, or m=DAB br= run=<program running> rs=<restarts by the daemon> + the program's status line
-        // (fifo= OFDM FIFO words, uf= underflows, rst= OFDM restarts, aud= audio buffer, ppm= clock correction, sil= silent super frames, cpu= %)
+        // (fifo= OFDM FIFO words, uf= underflows, rst= OFDM restarts, aud= audio buffer, ppm= clock correction, sil= silent super frames, cpu= %,
+        // svc= services, cu= capacity units in use, chg= CIF of an announced reconfiguration, z<n>=<port>:<buffered>/<received>/<silent>/<dropped>/<unusable>/<sender>
+        // per outside service)
         if (!strcmp(cmd,"?DAB")){
             if (!dab_mode){ tx_str("m=FM\n"); return; }
-            char sl[160] = ""; FILE *sf = fopen(DAB_STATUS, "r");
+            char sl[700] = ""; FILE *sf = fopen(DAB_STATUS, "r");
             if (sf){ if (!fgets(sl, sizeof sl, sf)) sl[0] = 0; fclose(sf); }
             sl[strcspn(sl, "\r\n")] = 0;
-            snprintf(buf, sizeof buf, "m=DAB br=%d src=%s run=%d rs=%d%s%s\n", dab_kbps, dab_tone ? "tone" : "i2s", dab_pid > 0 && sl[0] ? 1 : 0, dab_restarts, sl[0] ? " " : "", sl);
-            tx_str(buf); return;
+            int li = mux_local(&dmux); static char rb[800];
+            snprintf(rb, sizeof rb, "m=DAB br=%d src=%s run=%d rs=%d%s%s\n", li >= 0 ? dmux.s[li].kbps : 0, li < 0 ? "none" : (dab_tone || dmux.s[li].src == MUX_SRC_TONE) ? "tone" : "i2s",
+                     dab_pid > 0 && sl[0] ? 1 : 0, dab_restarts, sl[0] ? " " : "", sl);
+            tx_str(rb); return;
         }
         if (!strcmp(cmd,"?RD")){
             { FILE *rf = fopen("/tmp/skypluto.rds", "w"); if (rf){ fputs("1\n", rf); fclose(rf); } }
@@ -1831,21 +1854,23 @@ static void handle(char *line){
         }
         tx_str("ERR range\n"); return;
     }
-    // DBR <kbit/s> (32..192, multiple of 8), DSV <service label>, DEN <ensemble label> (1..16 ASCII characters), DSI <service id, 4 hex
-    // digits>: restart the multiplex when changed in DAB mode. DLS <text> (up to 128 bytes, UTF-8): the dynamic label, without interruption.
-    if (!strcmp(cmd,"DBR")){
-        int v = atoi(arg); if (v < 32 || v > 192 || v % 8){ tx_str("ERR range\n"); return; }
-        tx_str("OK\n"); if (v != dab_kbps){ dab_kbps = v; dab_update(); } return;
-    }
-    if (!strcmp(cmd,"DSV") || !strcmp(cmd,"DEN")){
-        char *d = cmd[1] == 'S' ? dab_svc : dab_ens;
-        if (!dab_label_ok(arg)){ tx_str("ERR range\n"); return; }
-        tx_str("OK\n"); if (strcmp(d, arg)){ snprintf(d, 17, "%s", arg); dab_update(); } return;
-    }
-    if (!strcmp(cmd,"DSI")){
-        char *e; unsigned long v = strtoul(arg, &e, 16);
-        if (e == arg || *e || strlen(arg) != 4 || v == 0){ tx_str("ERR range\n"); return; }
-        tx_str("OK\n"); if (v != dab_sid){ dab_sid = (unsigned)v; dab_update(); } return;
+    // DBR <kbit/s> (32..192, multiple of 8, a multiple of 32 with EEP-B), DSV <service label>, DSI <service id, 4 hex digits>: the
+    // service encoded here (ERR nolocal when the layout has none); DEN <ensemble label> (1..16 ASCII characters). They change the layout
+    // (stored): labels at once, bitrate and SId through an announced reconfiguration. DLS <text> (up to 128 bytes, UTF-8): its dynamic label.
+    if (!strcmp(cmd,"DBR") || !strcmp(cmd,"DSV") || !strcmp(cmd,"DSI") || !strcmp(cmd,"DEN")){
+        mux_conf c = dmux; int li = mux_local(&c); char err[160];
+        if (!strcmp(cmd,"DEN")){
+            if (!dab_label_ok(arg)){ tx_str("ERR range\n"); return; }
+            snprintf(c.label, sizeof c.label, "%s", arg);
+        } else {
+            if (li < 0){ tx_str("ERR nolocal\n"); return; }
+            if (!strcmp(cmd,"DBR")){ int v = atoi(arg); if (v < 32 || v > 192 || v % 8){ tx_str("ERR range\n"); return; } c.s[li].kbps = v; }
+            else if (!strcmp(cmd,"DSV")){ if (!dab_label_ok(arg)){ tx_str("ERR range\n"); return; } snprintf(c.s[li].label, sizeof c.s[li].label, "%s", arg); }
+            else { char *e; unsigned long v = strtoul(arg, &e, 16); if (e == arg || *e || strlen(arg) != 4 || v == 0){ tx_str("ERR range\n"); return; } c.s[li].sid = (unsigned)v; }
+        }
+        char txt[4096]; if (mux_format(&c, txt, sizeof txt) < 0 || mux_parse(txt, &c, err, sizeof err)){ tx_str("ERR range\n"); return; }   // e.g. the bitrate no longer fits (CU) or the SId is taken
+        if (!memcmp(&c, &dmux, sizeof c)){ tx_str("OK\n"); return; }
+        tx_str(dab_mux_store(&c) ? "ERR io\n" : "OK\n"); return;
     }
     // DTN <Hz>: test tone (left Hz, right 1.5 x Hz, -12 dBFS) instead of the I2S input, 0 = I2S (default); restarts the multiplex
     if (!strcmp(cmd,"DTN")){
@@ -2010,7 +2035,7 @@ static void web_handle(struct wconn *c){
     if (clen < 0){ web_send(c->fd, 400, "text/plain", "bad request", 11, NULL); close(c->fd); c->fd = -1; return; }
     char *body = hend + 4; int have = c->len - (int)(body - c->buf);
     if (clen > have) return;                                            // body not complete yet
-    if (clen > 400) clen = 400;
+    if (clen > 1500) clen = 1500;                                       // a multiplex layout (/api/mux) is the largest body
     body[clen] = 0;
     char cookie[512] = ""; { const char *p = strcasestr(c->buf, "Cookie:"); if (p){ p += 7; while (*p == ' ') p++; size_t i = 0; while (*p && *p != '\r' && i < sizeof cookie - 1) cookie[i++] = *p++; cookie[i] = 0; } }
     int xrw = strcasestr(c->buf, "X-Requested-With: skypluto") != NULL;
@@ -2055,6 +2080,26 @@ static void web_handle(struct wconn *c){
         }
         else if (!post && !strcmp(path, "/api/g")){ int n = 0; out[n++] = '{'; n = jadd(out, n, (int)sizeof out, "G", web_cmd("?G")); out[n++] = '}'; web_send(c->fd, 200, "application/json", out, (size_t)n, NULL); }
         else if (!post && !strcmp(path, "/api/tone")){ int n = 0; out[n++] = '{'; n = jadd(out, n, (int)sizeof out, "A", web_cmd("?A")); out[n++] = '}'; web_send(c->fd, 200, "application/json", out, (size_t)n, NULL); }
+        // the DAB multiplex: GET -> {"mux":"<layout file text>","dab":"<?DAB reply>","has":<0|1>}; POST <layout text> -> "OK" or "ERR <reason>"
+        else if (!post && !strcmp(path, "/api/mux")){
+            char txt[4096]; if (mux_format(&dmux, txt, sizeof txt) < 0) txt[0] = 0;
+            int n = 0; n += snprintf(out + n, sizeof out - (size_t)n, "{\"mux\":\"");
+            for (const char *p = txt; *p && n < (int)sizeof out - 600; p++){ if (*p == '\n'){ out[n++] = '\\'; out[n++] = 'n'; } else { if (*p == '"' || *p == '\\') out[n++] = '\\'; out[n++] = *p; } }
+            n += snprintf(out + n, sizeof out - (size_t)n, "\","); n = jadd(out, n, (int)sizeof out, "dab", web_cmd("?DAB"));
+            n += snprintf(out + n, sizeof out - (size_t)n, ",\"has\":%d}", has_dab);
+            web_send(c->fd, 200, "application/json", out, (size_t)n, NULL);
+        }
+        else if (post && !strcmp(path, "/api/mux")){
+            if (!xrw){ web_send(c->fd, 403, "text/plain", "no", 2, NULL); }
+            else {
+                mux_conf nc; char err[160], r[200];
+                if (!has_dab) snprintf(r, sizeof r, "ERR this bitstream has no DAB");
+                else if (mux_parse(body, &nc, err, sizeof err)) snprintf(r, sizeof r, "ERR %s", err);
+                else if (dab_mux_store(&nc)) snprintf(r, sizeof r, "ERR the layout could not be written");
+                else snprintf(r, sizeof r, "OK %d services, %d of 864 CU%s", nc.n, mux_cu_total(&nc), dab_mode ? "" : " (DAB is off: takes effect with M DAB)");
+                web_send(c->fd, 200, "text/plain; charset=utf-8", r, strlen(r), NULL);
+            }
+        }
         else if (!post && !strcmp(path, "/api/ir.csv")){
             FILE *fi = fopen("/tmp/pluto_ir.csv", "r");
             if (!fi) web_send(c->fd, 404, "text/plain", "no result", 9, NULL);
@@ -2139,6 +2184,7 @@ int main(int argc, char **argv){
     lim_probe();                                                        // read-only: has_dbg must be known before the build id is read
     { uint32_t id = has_dbg ? dbg_rd(12) : 0; has_iq = (id >= 0xB1D00019u && id <= 0xB1D000FFu); has_chf = (id >= 0xB1D0001Du && id <= 0xB1D000FFu) ? 2 : (id == 0xB1D0001Cu) ? 1 : 0;
       has_dab = (id >= 0xB1D0001Eu && id <= 0xB1D000FFu); }
+    if (has_dab) dab_mux_load();
     if (has_dab){ wr(0x64, 0x2); usleep(20); wr(0x64, 0x0); }          // start in FM (a DAB program of an earlier daemon has ended with it)
     iq_conf_read(); iq_apply(); chf_apply(); txbw_apply();       // the TX bandwidth before the first calibration
     pw_conf_read();
