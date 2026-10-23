@@ -185,7 +185,7 @@ encoder and builds the multiplex; the FPGA does the OFDM. The DAB settings are n
 
 | Command | Range / default | Meaning |
 |---|---|---|
-| `M FM` / `M DAB` | default `FM` | the mode. `M DAB`: TX bandwidth at least 3 MHz for the session (the FM value comes back with `M FM`), mask monitor, ALC and LO nulling pause (they measure an FM carrier), the program starts and is restarted if it stops. `ERR nobit` = bitstream without DAB, `ERR nodab` = `/mnt/jffs2/skypluto-dab` missing |
+| `M FM` / `M DAB` | default `FM` | the mode. `M DAB`: TX bandwidth at least 3 MHz for the session (the FM value comes back with `M FM`), mask monitor, ALC and LO nulling pause (they measure an FM carrier), the program starts and is restarted if it stops. `ERR nobit` = bitstream without DAB, `ERR nodab` = `/mnt/jffs2/skypluto-dab` missing, `ERR band` = the frequency is not in Band III (174–240 MHz; send `F <channel>` first). An `F` outside Band III while in DAB mode switches to FM by itself (an encoder that does not know `M`) |
 | `DBR <kbit/s>` | 32 … 192, multiple of 8; `96` | service bitrate |
 | `DSV <text>` | 1 … 16 ASCII characters; `PlutoSky` | service label |
 | `DEN <text>` | 1 … 16 ASCII characters; `PlutoSky DAB` | ensemble label |

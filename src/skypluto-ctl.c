@@ -121,7 +121,8 @@ static long long last_f   = -1;        // the carrier frequency of the last tune
 #define IQ_CONF "/mnt/jffs2/skypluto-iq.conf"
 static double lowif_khz = 0.0;
 static int    iq_dc_i = 0, iq_dc_q = 0, iq_gain_ppm = 0, iq_skew_ppm = 0, has_iq = 0;
-static int    chf_khz = 0, has_chf = 0;                     // CF: channel filter after the modulator (0 = off, or the -6 dB width in kHz); has_chf: 0 none, 1 = 3 widths, 2 = 7
+static int    dab_mode = 0, dab_tb_fm = 0;                  // DAB+ mode (see M); the FM TX bandwidth while DAB runs with its own (that one is never stored)
+static int    chf_khz = 0, has_chf = 0;                  // CF: channel filter after the modulator (0 = off, or the -6 dB width in kHz); has_chf: 0 none, 1 = 3 widths, 2 = 7
 static const int chf_tab[8] = { 0, 130, 125, 120, 135, 140, 150, 160 };     // register value -> width
 // TB: analog TX baseband bandwidth of the AD9361 (out_voltage_rf_bandwidth, kHz). The driver's default is 18 MHz, which lets the DAC's quantisation
 // noise and images through up to many MHz from the carrier; 1.6 MHz (filter corner ~0.8 MHz) passes the FM signal flat and cuts that noise by
@@ -583,7 +584,7 @@ static void iq_apply(void){
 static void iq_conf_write(void){
     FILE *f = fopen(IQ_CONF ".new", "w"); if (!f) return;
     fprintf(f, "# digital I/Q corrections and low-IF offset (written by the DC / IQ / OFS commands)\n");
-    fprintf(f, "dc_i=%d\ndc_q=%d\nqgain_ppm=%d\nqskew_ppm=%d\nlowif_khz=%.3f\nlevel_db=%.1f\nnull_auto=%d\nnull_rx=%d\ncal_temp=%d\nchf_khz=%d\ntx_bw_khz=%d\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, dig_db, null_auto, null_rx, cal_temp_auto, chf_khz, tx_bw_khz);
+    fprintf(f, "dc_i=%d\ndc_q=%d\nqgain_ppm=%d\nqskew_ppm=%d\nlowif_khz=%.3f\nlevel_db=%.1f\nnull_auto=%d\nnull_rx=%d\ncal_temp=%d\nchf_khz=%d\ntx_bw_khz=%d\n", iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, dig_db, null_auto, null_rx, cal_temp_auto, chf_khz, (dab_mode && dab_tb_fm > 0) ? dab_tb_fm : tx_bw_khz);
     fclose(f); rename(IQ_CONF ".new", IQ_CONF);
 }
 static void iq_conf_read(void){
@@ -1248,7 +1249,7 @@ static void set_level(double dbm){
 #define DAB_STATUS  "/tmp/dab_status"
 #define DAB_LOG     "/tmp/dab.log"
 #define DAB_TB_KHZ  3000
-static int    has_dab = 0, dab_mode = 0, dab_kbps = 96, dab_tb_fm = 0, dab_restarts = 0, dab_tone = 0;   // dab_tone: test tone in Hz instead of I2S (0 = I2S)
+static int    has_dab = 0, dab_kbps = 96, dab_restarts = 0, dab_tone = 0;   // dab_tone: test tone in Hz instead of I2S (0 = I2S)
 static char   dab_svc[17] = "PlutoSky", dab_ens[17] = "PlutoSky DAB";
 static unsigned dab_sid = 0x8F01;
 static pid_t  dab_pid = -1;
@@ -1544,6 +1545,12 @@ static void handle(char *line){
     if (!strcmp(cmd,"F")){
         long long hz = atoll(arg);
         if (hz < 70000000LL || hz > 6000000000LL){ tx_str("ERR range\n"); return; }
+        if (dab_mode && (hz < 174000000LL || hz > 240000000LL)){       // DAB only in Band III: an encoder that knows no M (or forgot it) gets FM
+            dab_mode = 0; dab_stop();
+            if (dab_tb_fm > 0) tb_set_now(dab_tb_fm);
+            alc_reset(ALC_SETTLE); mask_next = mono() + 4.0;
+            fprintf(stderr, "   -> F %lld buiten Band III: stand FM\n", hz); fflush(stderr);
+        }
         long long d = hz - last_f; if (d < 0) d = -d;
         if (tuned && last_f > 0 && d <= 10){ tx_str("OK\n"); return; }   // unchanged (PLL rounds to ~2 Hz)
         char c[160];
@@ -1767,6 +1774,7 @@ static void handle(char *line){
         if (!strcmp(arg, "DAB")){
             if (!has_dab){ tx_str("ERR nobit\n"); return; }
             if (access(DAB_BIN, X_OK) != 0){ tx_str("ERR nodab\n"); return; }
+            if (!dab_mode && (last_f < 174000000LL || last_f > 240000000LL)){ tx_str("ERR band\n"); return; }   // DAB only in Band III: F <channel> first
             tx_str("OK\n");
             if (dab_mode) return;
             dab_mode = 1; dab_restarts = 0; dab_next = mono();

@@ -86,7 +86,7 @@ gelijk aan FM).
    `hdl/tb_dab_top.v` stuurt de hele exciter via AXI zoals de ARM: het modulatorpad is bit-exact (0 fouten over 1,16 miljoen
    samples), de audio komt foutloos via de FIFO bij de ARM. *(Flashen: vereist toestemming.)*
 7. **skypluto-dab** (ARM-programma) ✔ *eerste versie*: audio uit de FIFO, resampler met snelheidsregeling op de totale
-   vertraging (PI, tijdconstante ~1 minuut, ±500 ppm), encoder + multiplex in een eigen thread, fasewoorden met
+   vertraging (PI, tijdconstante ~1 minuut, ±2000 ppm), encoder + multiplex in een eigen thread, fasewoorden met
    stroomregeling, herstart na onderloop. Simulatiestand zonder hardware (`-f`): +80 ppm klokverschil, 60 s, geen onderloop,
    welle-cli decodeert (tonen S/N ~38 dB). Nog: daemon/webinterface, DAB-masker en MER via RX2, Pico in stereo-I2S-modus.
 

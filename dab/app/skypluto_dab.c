@@ -130,7 +130,7 @@ static int      g_primed = 0, g_cifs = 0;
 static unsigned g_sim_fifo = 0;            // simulation: the OFDM FIFO level
 #define RC_KP   0.35                       // ppm per sample of latency error
 #define RC_KI   1.8e-4                     // ppm per sample per super frame
-#define RC_MAX  500.0                      // ppm
+#define RC_MAX  2000.0                     // ppm (the PicoAudio clocks its 48 kHz from the MPX clock: +977 ppm)
 #define RESYNC  4800                       // samples (100 ms) of excess audio that are skipped at once
 
 static unsigned ofdm_fifo_level(void){ return g_reg ? (rd(R_PHASE) & 0x3FFF) : g_sim_fifo; }
