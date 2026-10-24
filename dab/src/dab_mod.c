@@ -14,6 +14,9 @@
 #define TGUARD    504
 #define TNULL     2656
 #define NSYM      76    // OFDM symbols per frame (phase reference + 3 FIC + 72 MSC)
+#ifndef DAB_TIME_PERIOD_MS
+#define DAB_TIME_PERIOD_MS 1000 // FIG 0/10 once a second (EN 300 401 8.1.3.1); a test build may send it more often
+#endif
 #define CIF_BITS  55296 // 864 CU of 64 bits
 #define FIC_BITS  2304  // per CIF after coding (mode I)
 #define FIB_BYTES 32
@@ -76,6 +79,8 @@ struct dab_mod {
     dab_ensemble next_ens;
     subch next_sc[DAB_MAX_SVC];
     int next_cu, change_at, change_flags;
+    // FIG 0/10: the time of the next frame and when it was last sent
+    long long utc_ms, utc_sent;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -293,6 +298,24 @@ static void build_fibs(dab_mod *m, uint8_t fib[3][FIB_BYTES]){
             f[p++] = (uint8_t)(m->cif_count % 250);
             // occurrence change: the CIF count (low part) of the new configuration
             if (chg) f[p++] = (uint8_t)(m->change_at % 250);
+            // FIG 0/10 date and time (EN 300 401 8.1.3.1), long form, once a second, in the first CIF of a frame: its time is
+            // that of this frame's null symbol. Rfu 0, MJD (17), LSI 0, Rfa 0, UTC flag 1, hours, minutes, seconds, milliseconds
+            if (m->cif_in_frame == 0 && m->utc_ms > 0 && m->utc_ms - m->utc_sent >= DAB_TIME_PERIOD_MS){
+                const long long t = m->utc_ms / 1000;
+                const unsigned ms = (unsigned)(m->utc_ms % 1000), sod = (unsigned)(t % 86400);
+                const unsigned mjd = (unsigned)(t / 86400 + 40587), h = sod / 3600, mi = sod / 60 % 60, s = sod % 60;
+                uint8_t *g = f + p;
+                g[0] = (uint8_t)((0 << 5) | 7);           // type 0, length 7
+                g[1] = 0x0A;                              // C/N OE P/D 0, extension 10
+                g[2] = (uint8_t)((mjd >> 10) & 0x7F);      // Rfu, MJD 16..10
+                g[3] = (uint8_t)(mjd >> 2);                // MJD 9..2
+                g[4] = (uint8_t)(((mjd & 3) << 6) | (0 << 5) | (0 << 4) | (1 << 3) | (h >> 2)); // MJD 1..0, LSI, Rfa, UTC, hours 4..2
+                g[5] = (uint8_t)(((h & 3) << 6) | mi);     // hours 1..0, minutes
+                g[6] = (uint8_t)((s << 2) | (ms >> 8));    // seconds, milliseconds 9..8
+                g[7] = (uint8_t)ms;                        // milliseconds 7..0
+                p += 8;
+                m->utc_sent = m->utc_ms;
+            }
         }
         while (guard < 2 * m->nfigs){
             int l = m->figlen[m->fig_next];
@@ -568,6 +591,10 @@ fail:
     return -1;
 }
 int dab_mod_cif_count(const dab_mod *m) { return m->cif_count; }
+void dab_mod_set_time(dab_mod *m, long long utc_ms){
+    m->utc_ms = utc_ms;
+    if (utc_ms <= 0 || utc_ms < m->utc_sent) m->utc_sent = 0; // clock set back: send at once
+}
 
 int dab_mod_set_meta(dab_mod *m, const dab_ensemble *e){
     if (m->change_at >= 0 || e->nsvc != m->ens.nsvc) return -1;

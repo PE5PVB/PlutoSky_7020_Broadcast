@@ -499,7 +499,7 @@ static int encode_one(mp2enc *e, const float *pcm, const uint8_t *pad, int padle
             for (int c = 0; c < NCH; c++){
                 if (!al[c][b]) continue;
                 const int *f = scf[c][b];
-                int v[3], nv = 0;
+                int v[3] = { 0, 0, 0 }, nv = 0;
                 switch (scfsi[c][b]){
                 case 0: v[nv++] = f[0]; v[nv++] = f[1]; v[nv++] = f[2]; break;
                 case 2: v[nv++] = f[0]; break;

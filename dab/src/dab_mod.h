@@ -58,6 +58,10 @@ int      dab_mod_reconfigure(dab_mod *m, const dab_ensemble *next, int at_cif);
 int      dab_mod_cif_count(const dab_mod *m);                 // the count of the next CIF pushed (0..4999)
 // labels, slideshow flags and programme types of the same services (same order and SIds): at once, no reconfiguration
 int      dab_mod_set_meta(dab_mod *m, const dab_ensemble *e);
+// Date and time (FIG 0/10, long form, UTC, once a second): utc_ms = the UTC time in milliseconds since 1970 at which the next
+// transmission frame begins on the air (the start of its null symbol, EN 300 401 14.3.3). Call before every dab_mod_push_cif();
+// 0 = no valid time (nothing is sent: a receiver would otherwise set its clock to 1970).
+void     dab_mod_set_time(dab_mod *m, long long utc_ms);
 // capacity units used by the sub-channels (of 864)
 int      dab_mod_cu_used(const dab_mod *m);
 

@@ -195,6 +195,15 @@ static double now_s(void){
     return t.tv_sec + t.tv_nsec * 1e-9;
 }
 static double g_t_enc = 0.0, g_t_mod = 0.0; // seconds spent in the AAC encoder and in the DAB multiplex/modulation (-v)
+// UTC (ms since 1970) at which the next transmission frame starts on the air: now + the phase words queued before it (ring and
+// FPGA FIFO). 0 while the system clock is not set (before 2025: no RTC, the encoder sets it with TM): no FIG 0/10 then.
+static long long frame_utc_ms(void){
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    if (t.tv_sec < 1735689600) return 0;
+    const double ahead = (ph_fill() + ofdm_fifo_level()) / WORDS_PER_S;
+    return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000 + (long long)(ahead * 1000.0);
+}
 
 // ---- the multiplex: its services and where their super frames come from -----------------------------------------------------
 typedef struct {
@@ -538,6 +547,7 @@ static int produce_superframe(void){
         const uint8_t *lf[MUX_MAX_SVC];
         // logical frame k of 5: 24 ms, 3 bytes per kbit/s
         for (int i = 0; i < g_mux.n; i++) lf[i] = src[i] + k * 3 * g_mux.s[i].kbps;
+        dab_mod_set_time(g_mod, frame_utc_ms());
         if (dab_mod_push_cif(g_mod, lf)){
             const uint32_t *w = dab_mod_phase_words(g_mod);
             unsigned p = atomic_load(&ph_w);

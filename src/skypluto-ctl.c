@@ -45,6 +45,7 @@
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/statvfs.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -94,7 +95,8 @@
 // channel filter on the FM signal: 0 off, 1..7 = -6 dB at +-130/125/120/135/140/150/160 kHz - 1..3 from bitstream
 // B1D0001C, 4..7 from B1D0001D
 #define R_CHF   0x60
-// mask control (bitstream B1D00023 and later): 0x74 [0] on [1] clear statistics, 0x78 write = threshold [27:0] of skirt bin
+// mask control (bitstream B1D00026 and later; B1D00023..25 lost the block numbering on the hardware): 0x74 [0] on [1] clear statistics (read:
+// diagnostics), 0x78 write = threshold [27:0] of skirt bin
 // [31:28] / read = blocks limited, 0x7C status {misses[31:24], overruns[23:16], largest step[9:5], last step[4:0]}
 #define R_MCTL  0x74
 #define R_MTHR  0x78
@@ -2924,8 +2926,18 @@ static void handle(char *line){
         //        db=<largest reduction, dB> ov=<blocks the FPGA could not evaluate in time> miss=<blocks without a result>
         if (!strcmp(cmd, "?MG")){
             uint32_t st = has_mask ? rd(R_MSTAT) : 0, nl = has_mask ? rd(R_MTHR) : 0;
-            snprintf(buf, sizeof buf, "mg=%.1f hw=%d lim=%u q=%u qmax=%u db=%.1f ov=%u miss=%u\n", mg_db, has_mask, nl, st & 31u,
-                     (st >> 5) & 31u, 0.375 * ((st >> 5) & 31u), (st >> 16) & 255u, st >> 24);
+            // B1D00025 and later: 0x78 reads {block under evaluation, newest block, limited[15:0]}, 0x7C [15:10] = resyncs
+            snprintf(buf, sizeof buf, "mg=%.1f hw=%d lim=%u q=%u qmax=%u db=%.1f ov=%u miss=%u rs=%u\n", mg_db, has_mask,
+                     nl & 0xFFFFu, st & 31u, (st >> 5) & 31u, 0.375 * ((st >> 5) & 31u), (st >> 16) & 255u, st >> 24,
+                     (st >> 10) & 63u);
+            tx_str(buf);
+            return;
+        }
+        // ?TM -> tm=<UTC, seconds since 1970> set=<1 when the clock has been set (TM), else 0> lto=<local time offset in the
+        //        layout, minutes>
+        if (!strcmp(cmd, "?TM")){
+            time_t now = time(NULL);
+            snprintf(buf, sizeof buf, "tm=%lld set=%d lto=%d\n", (long long)now, now >= 1735689600 ? 1 : 0, dmux.lto * 30);
             tx_str(buf);
             return;
         }
@@ -3598,6 +3610,53 @@ static void handle(char *line){
         else
             fprintf(stderr, "   -> mask control off\n");
         fflush(stderr);
+        return;
+    }
+    // TM <UTC seconds since 1970>[ <local time offset, minutes>]: the date and time. The Pluto has no clock of its own; with a
+    // valid time (2025..2099) the DAB transmitter sends it to the radios (FIG 0/10, once a second), without one nothing. The
+    // offset (-720..840, a multiple of 30) goes into the DAB layout (FIG 0/9; the radios show UTC + offset): send it with
+    // every TM, it changes at the summer/winter time switch. Answers OK or ERR range. Send it after a start and then e.g.
+    // once an hour (the Pluto's clock drifts a few seconds a day).
+    if (!strcmp(cmd, "TM")){
+        char *e;
+        long long s = strtoll(arg, &e, 10);
+        if (e == arg || s < 1735689600LL || s > 4102444800LL){
+            tx_str("ERR range\n");
+            return;
+        }
+        int has_lto = 0;
+        long lto = 0;
+        if (*e == ' '){
+            char *e2;
+            lto = strtol(e + 1, &e2, 10);
+            if (e2 == e + 1 || *e2 || lto < -720 || lto > 840 || lto % 30){
+                tx_str("ERR range\n");
+                return;
+            }
+            has_lto = 1;
+        } else if (*e){
+            tx_str("ERR range\n");
+            return;
+        }
+        struct timeval tv = { .tv_sec = (time_t)s, .tv_usec = 0 };
+        time_t before = time(NULL);
+        if (settimeofday(&tv, NULL) != 0){
+            tx_str("ERR io\n");
+            return;
+        }
+        if (llabs((long long)before - s) > 2){
+            fprintf(stderr, "   -> clock set to %lld (was %lld)\n", s, (long long)before);
+            fflush(stderr);
+        }
+        if (has_lto && lto / 30 != dmux.lto){
+            mux_conf c = dmux;
+            c.lto = (int)(lto / 30);
+            if (dab_mux_store(&c)){
+                tx_str("ERR io\n");
+                return;
+            }
+        }
+        tx_str("OK\n");
         return;
     }
     // CT <0|1>: recalibrate (and null) automatically when the die temperature has drifted by 8 degC since the last
@@ -4904,7 +4963,7 @@ int main(int argc, char **argv){
         has_iq = (id >= 0xB1D00019u && id <= 0xB1D000FFu);
         has_chf = (id >= 0xB1D0001Du && id <= 0xB1D000FFu) ? 2 : (id == 0xB1D0001Cu) ? 1 : 0;
         has_dab = (id >= 0xB1D0001Eu && id <= 0xB1D000FFu);
-        has_mask = (id >= 0xB1D00023u && id <= 0xB1D000FFu);
+        has_mask = (id >= 0xB1D00026u && id <= 0xB1D000FFu);
     }
     if (has_dab)
         dab_mux_load();
