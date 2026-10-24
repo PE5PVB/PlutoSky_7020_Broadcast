@@ -25,6 +25,12 @@
 //   Guarantee: for m in block B, W[j] <= bm[B] <= g_req[m] for all j in [B, B+15], hence g_s <= g_req[m] and |y| <= CEIL.
 //   Below the ceiling g_s is exactly 1.0 and (at fade = 1) the output is bit-exact the delayed input.
 //   Note: changing ceil/lim_en while the 256-sample delay line is filled gives no guarantee for up to 512 samples for the samples already in the line.
+// MASK CONTROL (skypluto_maskctl, on the AXI clock)
+//   Every sample after the fade goes to the mask controller with its number {block[7:0], position[5:0]} (blocks of 64). The limiter
+//   path is delayed by 256 more samples (xpre), so that the controller's step for a block has arrived when the block reaches the
+//   limiter. g_req is then also at most the gain of that step; in the first 24 samples of a block at most the previous block's (the
+//   previous block's frames covered them). A missing result (late or lost) counts in mask_miss and takes the safe step 31 (-11.6 dB).
+//   Total delay: 256 + 256 + 2 samples (2.7 ms).
 // =============================================================================
 `timescale 1ns/1ps
 
@@ -64,8 +70,25 @@ module skypluto_sigcond #(
     output wire [31:0]           dbg_gain,  // instantaneous gain gs (Q16) and
     output wire [31:0]           dbg_sum,   // the running sum (diagnostics of the gain computation)
     output reg  [31:0]           uf_events, // number of RUN -> HOLD transitions
-    output wire [16:0]           fade_o
+    output wire [16:0]           fade_o,
+    // mask controller (via CDC FIFOs): every sample out, one gain step per block back
+    input  wire                  mask_en,
+    output reg  [37:0]           ms_data,   // {block, position, x} of the sample after the fade
+    output reg                   ms_wr,
+    input  wire [12:0]           mr_data,   // {block, step}, first-word-fall-through
+    input  wire                  mr_empty,
+    output reg                   mr_rd,
+    output reg  [7:0]            mask_miss  // blocks without a result in time (the safe step was used)
 );
+    `include "skypluto_maskctl_tabs.vh"
+    localparam integer MC_OVL = 24;          // samples of the next block that a block's mask frames cover
+    (* ram_style = "distributed" *) reg signed [DW-1:0] xpre [0:255];   // pre-delay: the mask controller's look-ahead
+    reg signed [DW-1:0] xfd;                 // xf delayed by 256 samples: the input of the limiter path
+    reg [13:0] fidx;                         // number of the sample xf (mod 16384): its tag for the mask controller
+    reg [13:0] cidx;                         // number of the sample c = xh2 at the limiter (fidx - 258)
+    reg        cstarted;                     // c has reached the first sample sent to the mask controller
+    reg [4:0]  q_cur, q_prev;                // mask steps of c's block and of the block before
+    reg [16:0] gmsk;                         // the mask gain for c (Q16)
     // ---- memories -------------------------------------------------------------
     // GAIN COMPUTATION WITHOUT RUNNING SUM AND WITHOUT RAM HISTORY (an incremental sum drifts permanently out of
     // balance on the hardware -> gain 1.9 or 0.1). Blocks of 16 samples:
@@ -78,7 +101,7 @@ module skypluto_sigcond #(
     (* ram_style = "distributed" *) reg signed [DW-1:0] xd  [0:255];        // only the delay line (256 samples)
     integer ii;
     initial begin
-        for (ii = 0; ii < 256; ii = ii + 1) xd[ii] = 0;
+        for (ii = 0; ii < 256; ii = ii + 1) begin xd[ii] = 0; xpre[ii] = 0; end
     end
     reg [7:0] p;                             // ring pointer of the delay line
     reg signed [DW-1:0] x_old;
@@ -123,7 +146,7 @@ module skypluto_sigcond #(
     localparam [6:0] TGT7 = TGT;
     localparam [4:0] S_IDLE = 0, S_FETCH = 1, S_FM0 = 2, S_FM1 = 3, S_FM2 = 4, S_ABS = 5, S_CMP = 6, S_DIV = 7, S_GREQ = 8,
                      S_BLK = 9, S_MA = 10, S_MB = 11, S_MC = 12, S_AVG0 = 13,
-                     S_MUL0 = 15, S_MUL1 = 16, S_MUL2 = 17, S_OUT = 18;
+                     S_MUL0 = 15, S_MUL1 = 16, S_MUL2 = 17, S_OUT = 18, S_PD = 19, S_MQ = 20, S_MQW = 21, S_MQS = 22;
     reg [4:0]  st;
 
     // ---- watchdog + diagnostics ------------------------------------------------------------------------------------
@@ -161,18 +184,21 @@ module skypluto_sigcond #(
             rem <= 0; quo <= 0; it <= 0; st <= S_IDLE;
             wdc <= 0; idc <= 0; idc_flag <= 1'b0; wd_fsm <= 0; wd_idle <= 0;
             init_busy <= 1'b1; ic <= 9'd0;
+            ms_data <= 0; ms_wr <= 1'b0; mr_rd <= 1'b0; mask_miss <= 0; xfd <= 0;
+            fidx <= 14'd0; cidx <= -14'sd258; cstarted <= 1'b0; q_cur <= 0; q_prev <= 0; gmsk <= 17'd65536;
         end else if (init_busy) begin
             // RAM clearing pass: delay line to 0.
             // Same address line p as in normal operation (a RAM with ONE address for read and write: this is reliably synthesized
             // as RAM; a second write address (such as 'ic') gave a gain of ~0.1 on the hardware). p runs 256 steps and is back at 0 afterwards.
             xd[p]  <= {DW{1'b0}};
+            xpre[p] <= {DW{1'b0}};
             p  <= p + 1'b1;
             ic <= ic + 1'b1;
             if (ic == 9'd255) init_busy <= 1'b0;
         end else begin
-            up_rd <= 1'b0;
+            up_rd <= 1'b0; ms_wr <= 1'b0; mr_rd <= 1'b0;
             if (up_rd) dbg_pops <= dbg_pops + 1'b1;                        // every FIFO pop (up_rd is high for 1 clock)
-            if (clr) begin gmin <= 17'd65536; inpeak <= 0; end
+            if (clr) begin gmin <= 17'd65536; inpeak <= 0; mask_miss <= 0; end
 
             case (st)
             S_IDLE: begin
@@ -210,10 +236,35 @@ module skypluto_sigcond #(
             end
             S_FM0: begin xfp <= x_new * $signed({1'b0, fade}); st <= S_FM1; if (x_new != 0) dbg_nz <= dbg_nz + 1'b1; end     // x_new and fade are valid here
             S_FM1: st <= S_FM2;
-            S_FM2: begin xf <= xfp[DW+15:16]; st <= S_ABS; end
+            S_FM2: begin xf <= xfp[DW+15:16]; st <= S_PD; end
+            // --- mask controller: send xf, take the pre-delayed sample, at a block start of c fetch the block's step ---
+            S_PD: begin
+                xfd <= xpre[p];                                               // xf from 256 pulls ago (read before the write in S_AVG0)
+                ms_data <= {fidx, xf}; ms_wr <= 1'b1; fidx <= fidx + 1'b1;
+                if (cidx == 14'd0) cstarted <= 1'b1;
+                st <= S_MQ;
+            end
+            S_MQ: begin
+                if (cidx[5:0] != 6'd0) st <= S_ABS;
+                else if (!mr_empty && mr_data[12:5] == cidx[13:6]) begin    // the result for this block
+                    q_prev <= q_cur; q_cur <= mr_data[4:0]; mr_rd <= 1'b1; st <= S_MQW;
+                end else if (!mr_empty && $signed(mr_data[12:5] - cidx[13:6]) < 0) begin
+                    mr_rd <= 1'b1; st <= S_MQS;                               // an older (stale) result: drop it and look again
+                end else begin                                                // none in time: the safe step (only when on)
+                    q_prev <= q_cur;
+                    q_cur <= (mask_en && cstarted) ? 5'd31 : 5'd0;
+                    if (mask_en && cstarted && mask_miss != 8'hFF) mask_miss <= mask_miss + 1'b1;
+                    st <= S_ABS;
+                end
+            end
+            S_MQS: st <= S_MQ;                                               // the FIFO shows its next word one clock after a pop
+            S_MQW: st <= S_ABS;
             S_ABS: begin                                                      // sums for the two cubic midpoints around c = xh2 (m = (9(b+c) - (a+d))/16)
                 ps_a <= xh3 + xh2;  ps_b <= xh4 + xh1;                       // midpoint between xh3 and xh2:  neighbours xh4 and xh1
-                ps_c <= xh2 + xh1;  ps_d <= xh3 + xf;                        // midpoint between xh2 and xh1:  neighbours xh3 and xf
+                ps_c <= xh2 + xh1;  ps_d <= xh3 + xfd;                       // midpoint between xh2 and xh1:  neighbours xh3 and xfd
+                // mask gain for c: its block's step, in the first MC_OVL samples at least the previous block's
+                gmsk <= !mask_en ? 17'd65536
+                        : mc_gain((cidx[5:0] < MC_OVL && q_prev > q_cur) ? q_prev : q_cur);
                 axa  <= xh2[DW-1] ? (~{xh2[DW-1], xh2} + 1'b1) : {1'b0, xh2};   // |c|
                 st <= S_MA;
             end
@@ -236,7 +287,7 @@ module skypluto_sigcond #(
                 if (lim_en && (ax > {1'b0, ceil})) begin
                     rem <= {2'b00, ceil}; quo <= 0; it <= 5'd0; st <= S_DIV;
                 end else begin
-                    greq <= 17'd65536; st <= S_BLK;
+                    greq <= gmsk; st <= S_BLK;
                 end
             end
             // --- restoring divider: q = floor(ceil * 65536 / |x|) (ceil < |x|) ---
@@ -249,7 +300,7 @@ module skypluto_sigcond #(
                 it <= it + 1'b1;
                 if (it == 5'd15) st <= S_GREQ;
             end
-            S_GREQ: begin greq <= {1'b0, quo}; st <= S_BLK; end
+            S_GREQ: begin greq <= ({1'b0, quo} < gmsk) ? {1'b0, quo} : gmsk; st <= S_BLK; end
             S_BLK: begin
                 if (greq < 17'd65536) events <= events + 1'b1;
                 if (greq < gmin) gmin <= greq;
@@ -261,7 +312,9 @@ module skypluto_sigcond #(
             // --- block boundary: update bm/W and prepare the next gain (takes effect only after the multiplication, in S_OUT) ---
             S_AVG0: begin
                 xd[p] <= xh2;                    // the limited (delayed) sample c
-                xh4 <= xh3; xh3 <= xh2; xh2 <= xh1; xh1 <= xf;
+                xpre[p] <= xf;                   // the pre-delay
+                xh4 <= xh3; xh3 <= xh2; xh2 <= xh1; xh1 <= xfd;
+                cidx <= cidx + 1'b1;
                 p <= p + 1'b1;
                 if (sc == 4'd15) begin
                     bm[cb]  <= cmf;

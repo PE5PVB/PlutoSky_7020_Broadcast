@@ -72,6 +72,7 @@ body.dab .fmonly{display:none!important}body:not(.dab) .dabonly{display:none!imp
 <div style="margin:10px 0 0 16px"><button class="go alt" id="b_muxc">Close multiplex settings</button></div></div>
 <h2 class="fmonly">Modulation</h2><div class="g fmonly">
 <div class="f"><label for="i_k">Deviation range kdev <small id="kinfo" style="color:var(--tx2)"></small></label><span><input id="i_k" type="number" step="1" min="10" max="250"> <button class="go" data-set="k">Set</button></span></div>
+<div class="f"><label>Mask control <small id="mginfo" style="color:var(--tx2)">(the FPGA tests the RF spectrum ahead of time and lowers the deviation only where the signal would not fit the SM.1268 mask with this margin)</small></label><span class="seg" id="sg_mg"><button data-v="0.0">Off</button><button data-v="1.0">1 dB</button><button data-v="2.0">2 dB</button><button data-v="3.0">3 dB</button><button data-v="4.0">4 dB</button><button data-v="6.0">6 dB</button></span></div>
 <div class="f"><label>FPGA peak limiter</label><span class="seg" id="sg_b"><button data-v="0">Off</button><button data-v="1">On</button></span></div>
 <div class="f"><label for="i_h">Limiter ceiling, maximum (kHz)</label><span><input id="i_h" type="number" step="0.5" min="20" max="150"> <button class="go" data-set="h">Set</button></span></div>
 <div class="f"><label>Mask guard <small style="color:var(--tx2)">(lowers the ceiling automatically when the 5-minute mask margin drops below +3.5 dB)</small></label><span class="seg" id="sg_g"><button data-v="0">Off</button><button data-v="1">On</button></span></div>
@@ -397,15 +398,23 @@ function fillControl(force){
  seg('sg_cf',(Q.cfhw&&Q.cfhw!=='0')?(Q.cf||'0'):'');
  seg('sg_tb',Q.tb||'');
  if(E.cmax)$('i_h').value=E.cmax;
- kinfo();hw();
+ kinfo();hw();fillMask();
 }
 // highlight the button of a segmented switch whose data-v equals v
 function seg(id,v){document.querySelectorAll('#'+id+' button').forEach(b=>b.classList.toggle('on',b.dataset.v===v));}
+// mask control (?MG): the chosen margin, and how often / how much it acted since the last clear
+function fillMask(){
+ const M=kv(ST.MG||''),on=M.hw==='1';
+ $('sg_mg').closest('.f').style.display=on?'':'none';
+ seg('sg_mg',on?(M.mg||'0.0'):'');
+ if(on&&+M.mg>0)$('mginfo').textContent='(active: '+(M.lim||0)+' blocks of 0.33 ms limited, at most −'+(M.db||'0.0')+' dB'
+  +(+M.miss||+M.ov?', '+(+M.miss+ +M.ov)+' blocks without result':'')+')';
+}
 function kinfo(){const k=+$('i_k').value;$('kinfo').textContent=k>0?'(0 dBFS = ±'+(0.75*k).toFixed(1)+' kHz)':'';}
 function hw(){$('hwarn').style.display=(+$('i_h').value>60)?'block':'none';}
 $('i_k').oninput=kinfo;$('i_h').oninput=hw;
 // segmented switches that send '<command> <data-v>' and refill the form
-[['sg_e','E'],['sg_b','B'],['sg_q','QM'],['sg_g','G'],['sg_cf','CF'],['sg_tb','TB'],['sg_na','NULLAUTO']].forEach(([id,c])=>
+[['sg_e','E'],['sg_b','B'],['sg_q','QM'],['sg_g','G'],['sg_cf','CF'],['sg_tb','TB'],['sg_na','NULLAUTO'],['sg_mg','MG']].forEach(([id,c])=>
  document.querySelectorAll('#'+id+' button').forEach(b=>b.onclick=async()=>{
   await setcmd(c+' '+b.dataset.v);await poll();ctlFilled=false;fillControl(true);}));
 // 'Set' buttons: build the command from the input(s); empty optional inputs send nothing

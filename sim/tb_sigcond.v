@@ -31,7 +31,8 @@ module tb_sigcond;
     skypluto_sigcond #(.DW(DW)) dut (
         .clk(clk), .rst(rst), .up_data(up_data), .up_empty(up_empty), .up_count(up_count), .up_wrpos(up_wrpos), .up_rd(up_rd),
         .q_data(q_data), .q_empty(q_empty), .q_rd(q_rd), .ceil(ceil), .lim_en(lim_en), .fade_en(fade_en), .clr(clr),
-        .gmin(gmin), .events(events), .inpeak(inpeak), .state(state), .uf_events(uf_events), .fade_o(fade_o));
+        .gmin(gmin), .events(events), .inpeak(inpeak), .state(state), .uf_events(uf_events), .fade_o(fade_o),
+        .mask_en(1'b0), .ms_data(), .ms_wr(), .mr_data(13'd0), .mr_empty(1'b1), .mr_rd(), .mask_miss());
 
     // ---- writer (I2S side): 192.1875 kHz with fractional phase ----
     reg [23:0] wacc = 0; wire [24:0] wsum = {1'b0, wacc} + 25'd262400;

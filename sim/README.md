@@ -43,6 +43,20 @@ xsim tb_fm -runall
 
 - **tb_chanfilt** (`python3 sim/chanfilt_check.py`) — the channel filter after the modulator against the bit-exact model of `scripts/gen_chanfilt.py`, all modes; off = unchanged.
 - **tb_i2s_lowfreq** — format detection with a 20 Hz tone + pilot (the composite stays positive for >5 ms): the format must not flip.
+- **tb_maskctl** — the mask controller (`skypluto_maskctl.v`) against its bit-exact model `maskctl_model.py`: the gain step of every
+  block must match, with the samples arriving at 192 kHz against the 100 MHz clock (also reports the engine's clocks per block):
+  ```bash
+  python3 scripts/gen_maskctl.py                         # tables (only after a change of the model)
+  python3 sim/maskctl_model.py vectors /tmp/mc 0.05      # a loud synthetic multiplex, kdev 133, margin 3 dB
+  cp hdl/library/skypluto_wfm/data/maskctl_sin.mem /tmp/mc/
+  iverilog -g2012 -I hdl/library/skypluto_wfm -o /tmp/mc/tb.vvp sim/tb_maskctl.v \
+      hdl/library/skypluto_wfm/skypluto_maskctl.v hdl/library/skypluto_wfm/skypluto_sincos.v
+  (cd /tmp/mc && vvp -n tb.vvp)                          # PASS
+  ```
+- **tb_mask_top** — the whole exciter with mask control on, fed over I2S, against the model (`check_mask_top.py`): the samples the
+  conditioner sends, the controller's step per block and g_req per sample at the limiter. Same vectors as above, plus all
+  `data/*.mem` in the run directory; compile with all `hdl/library/skypluto_wfm/*.v`, run `vvp -n tb.vvp +MS=40`, then
+  `python3 <repo>/sim/check_mask_top.py` in that directory (PASS).
 
 ## Mask tool FFT (ARM only)
 

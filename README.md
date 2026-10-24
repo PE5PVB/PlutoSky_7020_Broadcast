@@ -187,6 +187,7 @@ for the encoder's splash screen. The encoder stays silent until `#B 100`. `?B` r
 | `F <Hz>` | tune (70 MHz … 6 GHz), e.g. `F 108000000`; opens the transmitter after boot |
 | `P <dBm>` | TX1 output level, −84.75 … −5.0 (`ERR range` outside) |
 | `K <n>` | deviation scale: 0 dBFS = 0.75 kHz × n, 10 … 250 (default and PicoAudio: 133 = 99.75 kHz) |
+| `MG 0/0.5…12` | mask control: keep the FM signal this many dB below the SM.1268 mask (0 = off, stored) |
 | `CF 0/120/125/130/135/140/150/160` | channel filter on the FM signal: off / −6 dB at that many kHz from the carrier (stored) |
 | `B 0/1` | FPGA limiter off (default) / on |
 | `H <kHz>` | deviation ceiling (maximum) of the limiter, 20 … 150 (only with `B 1`) |
@@ -235,6 +236,22 @@ decides how loud it is. Measured on programme with `CF 120`: peaks up to 93 kHz 
 | 140 | +1.3 dB | 63 dB |
 | 130 / 125 | +4.1 / +6.6 dB | — |
 | 120 | +9.9 dB | 53 dB |
+
+**Mask control** (`MG <dB>`, bitstream B1D00023 and later) limits on the spectrum instead of on the deviation: for every block of
+64 composite samples (0.33 ms) the FPGA works out ahead of time what the RF spectrum will look like and lowers the gain only where it
+would not fit the SM.1268 mask with the chosen margin. Low-frequency peaks may go far beyond 75 kHz; dense high-frequency content
+(L−R, RDS) at full deviation is what gets turned down. Simulated on 20 s of processed programme:
+
+| Method | Loudness (rms deviation 0–15 kHz) | Peak deviation | 5-minute mask margin |
+|---|---|---|---|
+| deviation limiter 75 kHz | 30.0 kHz | 75 kHz | −5.5 dB |
+| deviation limiter 65 kHz | 26.5 kHz | 65 kHz | −1.0 dB |
+| no limiter, channel filter ±120 | 29.8 kHz | 85 kHz | −2.1 dB |
+| limiting on the 99 % occupied bandwidth (180 kHz) | 30.2 kHz | 91 kHz | −5.2 dB |
+| **mask control, margin 3 dB** | **31.3 kHz** | 93 kHz | **+2.5 dB** |
+| **mask control, margin 6 dB** | 29.9 kHz | 87 kHz | **+5.6 dB** |
+
+The model is `sim/maskctl_model.py`; `sim/tb_maskctl.v` and `sim/tb_mask_top.v` check the hardware against it bit for bit.
 
 Whoever still wants a hard deviation limit switches the limiter on: `B 1` with a ceiling `H` (on the PicoAudio: *Max deviation* = a value
 with the SDR limiter on; *Max deviation* = Off sends `B 0`). The scale stays `K 133`, so pilot and RDS keep their level whatever the setting.

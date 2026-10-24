@@ -48,7 +48,8 @@ module tb_chain;
     skypluto_sigcond #(.DW(DW), .TGT(1 << (AW-1))) u_sc (
         .clk(rd_clk), .rst(rd_rst), .up_data(fdata), .up_empty(fempty), .up_count(fcount), .up_wrpos(fwrpos), .up_rd(sc_rd),
         .q_data(q_data), .q_empty(q_empty), .q_rd(frd), .ceil(ceil_r), .lim_en(1'b1), .fade_en(1'b1), .clr(1'b0),
-        .gmin(gmin), .events(events), .inpeak(inpeak), .state(scstate), .uf_events(uf_events), .fade_o(fade_o));
+        .gmin(gmin), .events(events), .inpeak(inpeak), .state(scstate), .uf_events(uf_events), .fade_o(fade_o),
+        .mask_en(1'b0), .ms_data(), .ms_wr(), .mr_data(13'd0), .mr_empty(1'b1), .mr_rd(), .mask_miss());
 
     skypluto_interp #(.DW(DW), .FRAC(FRAC), .CNTW(AW+1), .STEP_NOM(262400),
                       .COEF_FILE("data/interp_coefs.mem")) u_int (

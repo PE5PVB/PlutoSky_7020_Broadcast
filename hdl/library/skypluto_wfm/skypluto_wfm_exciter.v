@@ -133,6 +133,7 @@ module skypluto_wfm_exciter #(
     wire        [2:0]      chf_axi;
     wire imp_en_axi; wire [23:0] imp_thr_axi; wire [31:0] st_imp_stamp_a, st_imp_count_a; wire [31:0] st_fmt_a;
     wire [3:0] dab_ctrl_a; wire dab_wr_a, aud_rd_a, pw_full; wire [31:0] dab_wdata_a, dab_status_a, aud_data_a, aud_count_a;
+    wire mask_en_a, mask_clr_a, mthr_we_a; wire [31:0] mthr_data_a, st_mlim_a, st_mstat_a;
     skypluto_axi_regs #(.PHASE_W(PHASE_W), .LVL_W(LVL_W), .KDEV_W(KDEV_W), .DC_W(DC_W), .QC_W(QC_W)) u_regs (
         .s_axi_aclk(s_axi_aclk), .s_axi_aresetn(s_axi_aresetn),
         .s_axi_awaddr(s_axi_awaddr), .s_axi_awvalid(s_axi_awvalid), .s_axi_awready(s_axi_awready),
@@ -148,6 +149,7 @@ module skypluto_wfm_exciter #(
         .dbg_sel(dbg_sel_a), .st_dbg(st_dbg_a),
         .dab_ctrl(dab_ctrl_a), .dab_wr(dab_wr_a), .dab_wdata(dab_wdata_a), .dab_status(dab_status_a), .dab_wfull(pw_full),
         .aud_rd(aud_rd_a), .aud_data(aud_data_a), .aud_count(aud_count_a),
+        .mask_en(mask_en_a), .mask_clr(mask_clr_a), .mthr_we(mthr_we_a), .mthr_data(mthr_data_a), .st_mlim(st_mlim_a), .st_mstat(st_mstat_a),
         .i2s_ctrl(i2s_ctrl_axi), .imp_en(imp_en_axi), .imp_thr(imp_thr_axi), .st_imp_stamp(st_imp_stamp_a), .st_imp_count(st_imp_count_a), .st_fmt(st_fmt_a)
     );
 
@@ -220,14 +222,45 @@ module skypluto_wfm_exciter #(
     wire [DW-1:0]        sc_inpeak;
     wire [1:0]           sc_state;
     wire [31:0]          sc_dbg_pulls, sc_dbg_pops, sc_dbg_nz, sc_dbg_state, sc_dbg_wd, sc_dbg_gain, sc_dbg_sum;
+    // to and from the mask controller (below)
+    (* ASYNC_REG = "TRUE" *) reg me_s0 = 0, me_s1 = 0;
+    wire [37:0] ms_data, ms_rdata; wire ms_wr, ms_full, ms_empty, ms_rd;
+    wire [12:0] mr_data, mr_wdata; wire mr_empty, mr_rd, mr_wr, mr_full;
+    wire [7:0]  mask_miss;
     skypluto_sigcond #(.DW(DW), .TGT(1 << (FIFO_AW - 1))) u_sc (
         .clk(l_clk), .rst(l_rst),
         .up_data(fifo_rdata), .up_empty(fifo_empty), .up_count(fifo_count), .up_wrpos(fifo_wrpos), .up_rd(sc_up_rd),
         .q_data(sc_q_data), .q_empty(sc_q_empty), .q_rd(USE_SC ? ups_fifo_rd : 1'b0),
         .ceil(lc_s1), .lim_en(le_s1), .fade_en(fe_s1), .clr(lim_clr),
         .gmin(sc_gmin), .events(sc_events), .inpeak(sc_inpeak), .state(sc_state), .uf_events(sc_uf), .fade_o(sc_fade),
-        .dbg_pulls(sc_dbg_pulls), .dbg_pops(sc_dbg_pops), .dbg_nz(sc_dbg_nz), .dbg_state(sc_dbg_state), .dbg_wd(sc_dbg_wd), .dbg_gain(sc_dbg_gain), .dbg_sum(sc_dbg_sum)
+        .dbg_pulls(sc_dbg_pulls), .dbg_pops(sc_dbg_pops), .dbg_nz(sc_dbg_nz), .dbg_state(sc_dbg_state), .dbg_wd(sc_dbg_wd), .dbg_gain(sc_dbg_gain), .dbg_sum(sc_dbg_sum),
+        .mask_en(me_s1), .ms_data(ms_data), .ms_wr(ms_wr), .mr_data(mr_data), .mr_empty(mr_empty), .mr_rd(mr_rd), .mask_miss(mask_miss)
     );
+
+    // ---- mask controller (AXI clock): samples l_clk -> AXI, one gain step per block back -------------------------------------------
+    // The conditioner only uses the steps while mask control is on (me_s1); the controller itself evaluates only then (mask_en_a).
+    always @(posedge l_clk) begin me_s0 <= mask_en_a; me_s1 <= me_s0; end
+    skypluto_async_fifo_bram #(.DW(38), .AW(6)) u_msfifo (
+        .wr_clk(l_clk), .wr_rst(l_rst), .wr_en(ms_wr & ~ms_full), .wr_data(ms_data), .wr_full(ms_full),
+        .rd_clk(s_axi_aclk), .rd_rst(a_rst), .rd_en(ms_rd), .rd_data(ms_rdata), .rd_empty(ms_empty), .rd_count(), .wr_pos()
+    );
+    skypluto_async_fifo_bram #(.DW(13), .AW(4)) u_mrfifo (
+        .wr_clk(s_axi_aclk), .wr_rst(a_rst), .wr_en(mr_wr & ~mr_full), .wr_data(mr_wdata), .wr_full(mr_full),
+        .rd_clk(l_clk), .rd_rst(l_rst), .rd_en(mr_rd), .rd_data(mr_data), .rd_empty(mr_empty), .rd_count(), .wr_pos()
+    );
+    wire [31:0] mc_lim; wire [4:0] mc_maxq, mc_lastq; wire [15:0] mc_over, mc_resync;
+    // the deviation scale for the controller: kdev 1..255 (the daemon uses 133 = 99.75 kHz at full scale)
+    wire [7:0] kdev8 = kdev_axi[KDEV_W-1] ? 8'd0 : (|kdev_axi[KDEV_W-2:8]) ? 8'd255 : kdev_axi[7:0];
+    skypluto_maskctl u_mc (
+        .clk(s_axi_aclk), .rst(a_rst),
+        .s_data(ms_rdata), .s_empty(ms_empty), .s_rd(ms_rd), .r_data(mr_wdata), .r_wr(mr_wr), .r_full(mr_full),
+        .en(mask_en_a), .kdev(kdev8), .thr_we(mthr_we_a), .thr_idx(mthr_data_a[31:28]), .thr_val(mthr_data_a[27:0]), .clr(mask_clr_a),
+        .lim_blocks(mc_lim), .max_q(mc_maxq), .last_q(mc_lastq), .overruns(mc_over), .resyncs(mc_resync)
+    );
+    (* ASYNC_REG = "TRUE" *) reg [7:0] mm0 = 0, mm1 = 0;
+    always @(posedge s_axi_aclk) begin mm0 <= mask_miss; mm1 <= mm0; end
+    assign st_mlim_a  = mc_lim;
+    assign st_mstat_a = {mm1, mc_over[7:0], 6'd0, mc_maxq, mc_lastq};
     // status to the axi domain (2-flop; software reads twice for counters)
     (* ASYNC_REG = "TRUE" *) reg [31:0] sg0=0, sg1=0, se0=0, se1=0, sp0=0, sp1=0, ss0=0, ss1=0, su0=0, su1=0;
     always @(posedge s_axi_aclk) begin
@@ -334,7 +367,7 @@ module skypluto_wfm_exciter #(
         w_seq, {8'd0, w_out_q}, {8'd0, w_out_c},                             // 21 = window sequence number, 20 = peak after limiter (q), 19 = peak at modulator input (comp), 20 ms
         sc_dbg_wd, sc_dbg_state, ups_dbg_state,                              // 18 = watchdog {wd_idle,wd_fsm}, 17 = conditioner state, 16 = interp state
         ups_ovf, ups_take, d_hb,                                             // 15 = interp overflow pulses, 14 = samples taken, 13 = l_clk heartbeat
-        32'hB1D00022,                                                        // 12 = build id (identifies the bitstream)
+        32'hB1D00023,                                                        // 12 = build id (identifies the bitstream)
         ups_sat,                {8'd0, d_pk_comp},                           // 11 = FIR saturations, 10 = peak |interp output|
         {8'd0, d_pk_q},         sc_dbg_nz,                                   // 9 = peak |conditioner output|, 8 = x_new != 0 (count)
         sc_dbg_pops,            sc_dbg_pulls,                                // 7 = FIFO pops, 6 = pulls

@@ -94,6 +94,11 @@
 // channel filter on the FM signal: 0 off, 1..7 = -6 dB at +-130/125/120/135/140/150/160 kHz - 1..3 from bitstream
 // B1D0001C, 4..7 from B1D0001D
 #define R_CHF   0x60
+// mask control (bitstream B1D00023 and later): 0x74 [0] on [1] clear statistics, 0x78 write = threshold [27:0] of skirt bin
+// [31:28] / read = blocks limited, 0x7C status {misses[31:24], overruns[23:16], largest step[9:5], last step[4:0]}
+#define R_MCTL  0x74
+#define R_MTHR  0x78
+#define R_MSTAT 0x7C
 // 0x64: DAB control ([0] DAB mode, [1] OFDM reset), written directly as wr(0x64, ...) in the DAB section
 
 // fabric UART (U9) to the PicoAudio
@@ -155,6 +160,9 @@ static int dab_mode = 0, dab_tb_fm = 0;
 // CF: channel filter after the modulator (0 = off, or the -6 dB width in kHz); has_chf: 0 none, 1 = 3 widths, 2 = 7
 static int chf_khz = 0, has_chf = 0;
 static const int chf_tab[8] = { 0, 130, 125, 120, 135, 140, 150, 160 };  // register value -> width
+// MG: mask control margin in dB below the SM.1268 mask (0 = off); has_mask: the bitstream has the mask controller
+static double mg_db = 0.0;
+static int has_mask = 0;
 // TB: analog TX baseband bandwidth of the AD9361 (out_voltage_rf_bandwidth, kHz). The driver's default is 18 MHz, which lets the
 // DAC's quantisation noise and images through up to many MHz from the carrier; 1.6 MHz (filter corner ~0.8 MHz) passes the FM
 // signal flat and cuts that noise by >45 dB at 5 MHz. A change shifts the I/Q balance, so it recalibrates (and stored
@@ -976,6 +984,38 @@ static void chf_apply(void){
     if (has_chf)
         wr(R_CHF, (has_chf >= 2 || m <= 3) ? (uint32_t)m : 0u);
 }
+// Mask control: the FPGA tests every block of 64 composite samples (FM at the deviation scale kdev, 64-point FFT at
+// 384 kHz with a Hann window, 6 kHz bins) against the SM.1268 mask minus mg_db and lowers the gain where needed (see
+// skypluto_maskctl.v). The 16 thresholds are the power of a whole carrier in one bin times the mask level at 78..168 kHz
+// (bin |k| = 13..28), >> 10 - computed exactly as in sim/maskctl_model.py.
+static void mask_apply(void){
+    if (!has_mask)
+        return;
+    if (mg_db <= 0.0){
+        wr(R_MCTL, 0);
+        return;
+    }
+    static const double mf[6] = { 0, 74, 107.5, 124, 152.5, 170 }, md[6] = { 0, 0, -15, -30, -40, -40 };
+    double s = 0.0;
+    for (int t = 0; t < 64; t++){
+        long w = lround(32767.0 * 0.5 * (1.0 - cos(2.0 * M_PI * t / 64.0)));
+        s += (double)((w * 8191) >> 13);
+    }
+    double pref = s * s;
+    for (int k = 0; k < 16; k++){
+        double f = (13 + k) * 6.0, d = md[5];
+        for (int i = 0; i < 5; i++)
+            if (f >= mf[i] && f <= mf[i + 1]){
+                d = md[i] + (md[i + 1] - md[i]) * (f - mf[i]) / (mf[i + 1] - mf[i]);
+                break;
+            }
+        long long v = (long long)(pref * pow(10.0, (d - mg_db) / 10.0)) >> 10;
+        if (v > 0x0FFFFFFF)
+            v = 0x0FFFFFFF;
+        wr(R_MTHR, ((uint32_t)k << 28) | (uint32_t)v);
+    }
+    wr(R_MCTL, 1);
+}
 static void iq_apply(void){
     wr(R_DCI, (uint32_t)(iq_dc_i & 0xFFF));
     wr(R_DCQ, (uint32_t)(iq_dc_q & 0xFFF));
@@ -994,9 +1034,9 @@ static void iq_conf_write(void){
     // the FM bandwidth is stored, not the temporary one of DAB mode
     fprintf(f,
             "dc_i=%d\ndc_q=%d\nqgain_ppm=%d\nqskew_ppm=%d\nlowif_khz=%.3f\nlevel_db=%.1f\n"
-            "null_auto=%d\nnull_rx=%d\ncal_temp=%d\nchf_khz=%d\ntx_bw_khz=%d\n",
+            "null_auto=%d\nnull_rx=%d\ncal_temp=%d\nchf_khz=%d\ntx_bw_khz=%d\nmask_db=%.1f\n",
             iq_dc_i, iq_dc_q, iq_gain_ppm, iq_skew_ppm, lowif_khz, dig_db, null_auto, null_rx, cal_temp_auto, chf_khz,
-            (dab_mode && dab_tb_fm > 0) ? dab_tb_fm : tx_bw_khz);
+            (dab_mode && dab_tb_fm > 0) ? dab_tb_fm : tx_bw_khz, mg_db);
     if (fclose(f) == 0)  // a failed write (flash full) must not replace the good file
         rename(IQ_CONF ".new", IQ_CONF);
 }
@@ -1037,6 +1077,9 @@ static void iq_conf_read(void){
         else if (!strncmp(ln, "chf_khz=", 8)){
             v = atoi(ln + 8);
             chf_khz = chf_mode(v) ? v : 0;
+        } else if (!strncmp(ln, "mask_db=", 8)){
+            d = atof(ln + 8);
+            mg_db = (isfinite(d) && d >= 0.5 && d <= 12.0) ? d : 0.0;
         } else if (!strncmp(ln, "tx_bw_khz=", 10)){
             v = atoi(ln + 10);
             if (v >= 600 && v <= 18000)
@@ -2876,6 +2919,15 @@ static void handle(char *line){
             tx_str(buf);
             return;
         }
+        // ?MG -> mg=<margin dB, 0 = off> hw=<0|1> lim=<blocks limited since the last clear> q=<last step> qmax=<largest step>
+        //        db=<largest reduction, dB> ov=<blocks the FPGA could not evaluate in time> miss=<blocks without a result>
+        if (!strcmp(cmd, "?MG")){
+            uint32_t st = has_mask ? rd(R_MSTAT) : 0, nl = has_mask ? rd(R_MTHR) : 0;
+            snprintf(buf, sizeof buf, "mg=%.1f hw=%d lim=%u q=%u qmax=%u db=%.1f ov=%u miss=%u\n", mg_db, has_mask, nl, st & 31u,
+                     (st >> 5) & 31u, 0.375 * ((st >> 5) & 31u), (st >> 16) & 255u, st >> 24);
+            tx_str(buf);
+            return;
+        }
         if (!strcmp(cmd, "?CF")){
             snprintf(buf, sizeof buf, "cf=%d hw=%d\n", chf_khz, has_chf);
             tx_str(buf);
@@ -3514,6 +3566,35 @@ static void handle(char *line){
             fprintf(stderr, "   -> channel filter +-%d kHz\n", v);
         else
             fprintf(stderr, "   -> channel filter off\n");
+        fflush(stderr);
+        return;
+    }
+    // MG <dB>: mask control - the FPGA keeps the FM signal this many dB below the SM.1268 mask by lowering the gain of the
+    // composite for a moment where it would not fit (look-ahead, smooth); 0 = off. 0.5 .. 12 dB, stored. Needs bitstream
+    // B1D00023 or later (ERR nobit). MG with a negative value clears the statistics of ?MG.
+    if (!strcmp(cmd, "MG")){
+        double v = atof(arg);
+        if (!has_mask){
+            tx_str("ERR nobit\n");
+            return;
+        }
+        if (v < 0.0){
+            wr(R_MCTL, (mg_db > 0.0 ? 1u : 0u) | 2u);
+            tx_str("OK\n");
+            return;
+        }
+        if (!isfinite(v) || (v != 0.0 && (v < 0.5 || v > 12.0))){
+            tx_str("ERR range\n");
+            return;
+        }
+        mg_db = v;
+        mask_apply();
+        iq_conf_write();
+        tx_str("OK\n");
+        if (v > 0.0)
+            fprintf(stderr, "   -> mask control on, %.1f dB below the mask\n", v);
+        else
+            fprintf(stderr, "   -> mask control off\n");
         fflush(stderr);
         return;
     }
@@ -4465,12 +4546,12 @@ static void web_handle(struct wconn *c){
         } else if (!post && !strcmp(path, "/api/state")){
             // the replies of the main queries as one JSON object (keys = query without '?'), plus the bitstream id and the
             // state of the link to the Pico
-            static const char *k[] = { "S", "T", "P", "E", "V", "M", "D", "B", "J", "R", "O", "IQ", "NL", "RD", "DAB" };
+            static const char *k[] = { "S", "T", "P", "E", "V", "M", "D", "B", "J", "R", "O", "IQ", "NL", "RD", "DAB", "MG" };
             static const char *q[] = { "?S", "?T", "?P", "?E",  "?V",  "?M",  "?D",  "?B",
-                                       "?J", "?R", "?O", "?IQ", "?NL", "?RD", "?DAB" };
+                                       "?J", "?R", "?O", "?IQ", "?NL", "?RD", "?DAB", "?MG" };
             int n = 0;
             out[n++] = '{';
-            for (int i = 0; i < 15; i++){
+            for (int i = 0; i < 16; i++){
                 n = jadd(out, n, (int)sizeof out, k[i], web_cmd(q[i]));
                 out[n++] = ',';
             }
@@ -4787,6 +4868,7 @@ int main(int argc, char **argv){
         has_iq = (id >= 0xB1D00019u && id <= 0xB1D000FFu);
         has_chf = (id >= 0xB1D0001Du && id <= 0xB1D000FFu) ? 2 : (id == 0xB1D0001Cu) ? 1 : 0;
         has_dab = (id >= 0xB1D0001Eu && id <= 0xB1D000FFu);
+        has_mask = (id >= 0xB1D00023u && id <= 0xB1D000FFu);
     }
     if (has_dab)
         dab_mux_load();
@@ -4798,6 +4880,7 @@ int main(int argc, char **argv){
     iq_conf_read();
     iq_apply();
     chf_apply();
+    mask_apply();
     txbw_apply();  // the TX bandwidth before the first calibration
     pw_conf_read();
     // kdev (from conf, without limiter never > 100) + limiter ceiling

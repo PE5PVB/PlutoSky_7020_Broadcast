@@ -38,6 +38,10 @@
 //                      read: status [13:0] OFDM FIFO level, [16] underflow (sticky until DAB reset), [17] CDC FIFO full
 //   0x6C DAB_AUDIO     {left[23:8], right[23:8]} of the oldest I2S frame (DAB mode only); every read pops one   RO
 //   0x70 DAB_AUDCNT    number of audio frames waiting in that FIFO (0..1024)                              RO
+//   -- mask controller (skypluto_maskctl) --
+//   0x74 MASK_CTRL     [0]=mask control on, [1]=clear its statistics (pulse, reads 0)                     RW (default 0)
+//   0x78 MASK_THR      write: threshold [27:0] for skirt bin [31:28] (0..15 = 78..168 kHz); read: blocks limited since clear
+//   0x7C MASK_STAT     [4:0] last gain step, [9:5] largest step, [23:16] overruns, [31:24] blocks without a result   RO
 // =============================================================================
 `timescale 1ns/1ps
 
@@ -109,7 +113,14 @@ module skypluto_axi_regs #(
     output reg                      aud_rd = 1'b0,    // pulse: the audio sample at 0x6C was read
     input  wire        [31:0]       aud_data,         // {left[15:0], right[15:0]} (the head of the audio FIFO)
     input  wire        [31:0]       aud_count,        // audio samples waiting
-    input  wire        [31:0]       st_dbg            // the selected diagnostic word
+    input  wire        [31:0]       st_dbg,           // the selected diagnostic word
+    // mask controller
+    output wire                     mask_en,
+    output reg                      mask_clr = 1'b0,  // pulse
+    output reg                      mthr_we = 1'b0,   // pulse: threshold mthr_data[27:0] for bin mthr_data[31:28]
+    output reg         [31:0]       mthr_data = 32'd0,
+    input  wire        [31:0]       st_mlim,          // blocks limited
+    input  wire        [31:0]       st_mstat          // {misses, overruns, 6'd0, max step, last step}
 );
 
     localparam [31:0] MAGIC = 32'h57464D32;
@@ -117,7 +128,7 @@ module skypluto_axi_regs #(
     // ---- the RW registers and their outputs to the fabric -------------------------------------------------------------------------
     reg [31:0] reg_ctrl, reg_offset, reg_level, reg_kdev, reg_dci, reg_dcq, reg_lceil, reg_lctrl;
     reg [4:0]  reg_dbgsel;
-    reg [31:0] reg_impctrl, reg_impthr, reg_i2sctrl, reg_qg, reg_qs, reg_chf, reg_dab;
+    reg [31:0] reg_impctrl, reg_impthr, reg_i2sctrl, reg_qg, reg_qs, reg_chf, reg_dab, reg_mask;
     reg        clr_tog;
 
     assign enable        = reg_ctrl[0];
@@ -138,6 +149,7 @@ module skypluto_axi_regs #(
     assign imp_thr       = reg_impthr[23:0];
     assign i2s_ctrl      = reg_i2sctrl[15:0];
     assign dab_ctrl      = reg_dab[3:0];
+    assign mask_en       = reg_mask[0];
 
     // ---- write channel ---------------------------------------------------------------------------------------------------------------
     wire rst = ~s_axi_aresetn;
@@ -160,8 +172,9 @@ module skypluto_axi_regs #(
             reg_dcq    <= 32'h0;
             reg_lceil  <= 32'h733333; reg_lctrl <= 32'h3; clr_tog <= 1'b0; reg_dbgsel <= 5'd0;
             reg_impctrl <= 32'h0; reg_impthr <= 32'h0F5C28; reg_i2sctrl <= 32'h0; reg_qg <= 32'h0; reg_qs <= 32'h0; reg_chf <= 32'h0; reg_dab <= 32'h0; dab_wr <= 1'b0;
+            reg_mask <= 32'h0; mask_clr <= 1'b0; mthr_we <= 1'b0;
         end else begin
-            dab_wr <= 1'b0;
+            dab_wr <= 1'b0; mask_clr <= 1'b0; mthr_we <= 1'b0;
             if (wr_fire) begin
                 s_axi_awready <= 1'b1;
                 s_axi_wready  <= 1'b1;
@@ -184,6 +197,8 @@ module skypluto_axi_regs #(
                     5'h18: reg_chf     <= s_axi_wdata;
                     5'h19: reg_dab     <= s_axi_wdata;
                     5'h1A: begin dab_wr <= 1'b1; dab_wdata <= s_axi_wdata; end
+                    5'h1D: begin reg_mask <= {s_axi_wdata[31:2], 1'b0, s_axi_wdata[0]}; mask_clr <= s_axi_wdata[1]; end
+                    5'h1E: begin mthr_we <= 1'b1; mthr_data <= s_axi_wdata; end
                     default: ;                       // read-only and unused offsets: the write is acknowledged and ignored
                 endcase
                 s_axi_bvalid <= 1'b1;
@@ -235,6 +250,9 @@ module skypluto_axi_regs #(
                     5'h17: s_axi_rdata <= reg_qs;
                     5'h18: s_axi_rdata <= reg_chf;
                     5'h19: s_axi_rdata <= reg_dab;
+                    5'h1D: s_axi_rdata <= reg_mask;
+                    5'h1E: s_axi_rdata <= st_mlim;
+                    5'h1F: s_axi_rdata <= st_mstat;
                     5'h1A: s_axi_rdata <= dab_status;
                     5'h1B: begin s_axi_rdata <= aud_data; aud_rd <= 1'b1; end
                     5'h1C: s_axi_rdata <= aud_count;
