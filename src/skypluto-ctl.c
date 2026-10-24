@@ -1437,7 +1437,7 @@ static void dab_poll(double now){
 }
 // the test tone changed: restart the program (receivers lose the ensemble for about 2 s)
 static void dab_restart(void){ if (dab_mode){ dab_stop(); dab_next = mono() + 0.2; } }
-static int dab_label_ok(const char *s){ size_t n = strlen(s); if (n < 1 || n > 16) return 0; for (; *s; s++) if (*s < 0x20 || *s > 0x7E || *s == ';') return 0; return 1; }
+static int dab_label_ok(const char *s){ size_t n = strlen(s); if (n < 1 || n > 16) return 0; for (; *s; s++) if (*s < 0x20 || *s > 0x7E || *s == ';' || *s == '|') return 0; return 1; }
 
 // CRC-8/SMBUS (poly 0x07, init 0x00, not reflected, no final XOR) of a line's characters: the '#hh' check sum
 static unsigned crc8_line(const char *s, const char *end){
@@ -1492,6 +1492,26 @@ static void handle(char *line){
         // (fifo= OFDM FIFO words, uf= underflows, rst= OFDM restarts, aud= audio buffer, ppm= clock correction, sil= silent super frames, cpu= %,
         // svc= services, cu= capacity units in use, chg= CIF of an announced reconfiguration, z<n>=<port>:<buffered>/<received>/<silent>/<dropped>/<unusable>/<sender>
         // per outside service)
+        // ?MUX: the layout on one line, fields separated by '|': eid=<hex>|lab=<ensemble label>|cu=<used>|n=<services>|1=<service 1>|2=...
+        // with each service as in the layout file: source;SId;label;kbit/s;protection;slideshow;codec (codec aac or mp2)
+        if (!strcmp(cmd,"?MUX")){
+            static const char *const pr[9] = { "", "1A", "2A", "3A", "4A", "1B", "2B", "3B", "4B" };
+            static char rb[900]; int n = snprintf(rb, sizeof rb, "eid=%04X|lab=%s|cu=%d|n=%d", dmux.eid, dmux.label, mux_cu_total(&dmux), dmux.n);
+            for (int i = 0; i < dmux.n && n < (int)sizeof rb - 80; i++){
+                const mux_service *s = &dmux.s[i]; char src[24];
+                if (s->src == MUX_SRC_ZMQ) snprintf(src, sizeof src, "zmq:%d", s->port); else if (s->src == MUX_SRC_TONE) snprintf(src, sizeof src, "tone:%d", s->tone_hz); else snprintf(src, sizeof src, "i2s");
+                n += snprintf(rb + n, sizeof rb - (size_t)n, "|%d=%s;%04X;%s;%d;%s;%d;%s", i + 1, src, s->sid, s->label, s->kbps, pr[(s->prot >= 1 && s->prot <= 8) ? s->prot : 3], s->sls, s->mp2 ? "mp2" : "aac");
+            }
+            snprintf(rb + n, sizeof rb - (size_t)n, "\n"); tx_str(rb); return;
+        }
+        // ?SLS: the slideshow of the service encoded here: on=<flag in the layout> n=<slides> int=<s> kb=<kB together> free=<kB in the flash>
+        // s=<size of slide 1..8 in bytes, 0 = empty, comma-separated>
+        if (!strcmp(cmd,"?SLS")){
+            int li = mux_local(&dmux), cnt = 0; long tot = 0; char sz[120]; int k = 0;
+            for (int i = 1; i <= 8; i++){ long v = sls_size(i, NULL); cnt += v > 0; tot += v; k += snprintf(sz + k, sizeof sz - (size_t)k, "%s%ld", i > 1 ? "," : "", v); }
+            char rb[240]; snprintf(rb, sizeof rb, "on=%d n=%d int=%d kb=%ld free=%ld s=%s\n", li >= 0 && dmux.s[li].sls, cnt, sls_interval(), (tot + 512) / 1024, fs_free("/mnt/jffs2") / 1024, sz);
+            tx_str(rb); return;
+        }
         if (!strcmp(cmd,"?DAB")){
             if (!dab_mode){ tx_str("m=FM\n"); return; }
             char sl[700] = ""; FILE *sf = fopen(DAB_STATUS, "r");
@@ -1976,6 +1996,48 @@ static void handle(char *line){
             else { char *e; unsigned long v = strtoul(arg, &e, 16); if (e == arg || *e || strlen(arg) != 4 || v == 0){ tx_str("ERR range\n"); return; } c.s[li].sid = (unsigned)v; }
         }
         char txt[4096]; if (mux_format(&c, txt, sizeof txt) < 0 || mux_parse(txt, &c, err, sizeof err)){ tx_str("ERR range\n"); return; }   // e.g. the bitrate no longer fits (CU) or the SId is taken
+        if (!memcmp(&c, &dmux, sizeof c)){ tx_str("OK\n"); return; }
+        tx_str(dab_mux_store(&c) ? "ERR io\n" : "OK\n"); return;
+    }
+    // The rest of the layout over the serial line (the web interface edits the same file):
+    //   DSS 0|1      slideshow flag (FIG 0/13) of the service encoded here       DPR <1A..4A|1B..4B>  its protection
+    //   DEI <hex>    ensemble identifier                                           DSN <s>  seconds between two slides (5..3600)
+    //   MXA <svc>    add a service, MXS <n> <svc> replace service n, MXD <n> remove service n; <svc> = source;SId;label;kbit/s;protection;
+    //                slideshow[;codec] as in ?MUX (source i2s, tone:<Hz> or zmq:<port>). A ZeroMQ service keeps the bitrate its sender uses.
+    // Answers OK, or ERR range when the result would not be a valid layout (CU, SId taken, two local services, bitrate/codec ...).
+    if (!strcmp(cmd,"DSN")){ int v = atoi(arg); const char *r = (v >= 5 && v <= 3600) ? sls_set_interval(v) : "range"; tx_str(r ? "ERR range\n" : "OK\n"); return; }
+    if (!strcmp(cmd,"DSS") || !strcmp(cmd,"DPR") || !strcmp(cmd,"DEI") || !strcmp(cmd,"MXA") || !strcmp(cmd,"MXS") || !strcmp(cmd,"MXD")){
+        char txt[4096], nt[4300], err[160]; mux_conf c;
+        if (mux_format(&dmux, txt, sizeof txt) < 0){ tx_str("ERR range\n"); return; }
+        if (!strcmp(cmd,"DSS") || !strcmp(cmd,"DPR") || !strcmp(cmd,"DEI")){
+            c = dmux; int li = mux_local(&c);
+            if (!strcmp(cmd,"DEI")){ char *e; unsigned long v = strtoul(arg, &e, 16); if (e == arg || *e || strlen(arg) != 4 || !v){ tx_str("ERR range\n"); return; } c.eid = (unsigned)v; }
+            else if (li < 0){ tx_str("ERR nolocal\n"); return; }
+            else if (!strcmp(cmd,"DSS")){ if (strcmp(arg, "0") && strcmp(arg, "1")){ tx_str("ERR range\n"); return; } c.s[li].sls = arg[0] == '1'; }
+            else { static const char *const pr[9] = { "", "1A", "2A", "3A", "4A", "1B", "2B", "3B", "4B" }; int p = 0;
+                   for (int k = 1; k <= 8; k++) if (!strcasecmp(arg, pr[k])) p = k;
+                   if (!p){ tx_str("ERR range\n"); return; } c.s[li].prot = p; }
+            if (mux_format(&c, nt, sizeof nt) < 0){ tx_str("ERR range\n"); return; }
+        } else {
+            // edit the layout text: the service lines are numbered from 1
+            int n = 0; const char *spec = arg;
+            if (strcmp(cmd, "MXA")){ n = atoi(arg); spec = strchr(arg, ' '); spec = spec ? spec + 1 : ""; if (n < 1 || n > dmux.n){ tx_str("ERR range\n"); return; } }
+            if (strcmp(cmd, "MXD") && (!*spec || strchr(spec, '\n') || strchr(spec, '|'))){ tx_str("ERR range\n"); return; }
+            int k = 0, svc = 0; nt[0] = 0;
+            for (const char *p = txt; *p; ){
+                const char *e = strchr(p, '\n'); size_t len = e ? (size_t)(e - p) + 1 : strlen(p);
+                int is_svc = !strncmp(p, "svc=", 4); if (is_svc) svc++;
+                if (is_svc && svc == n && !strcmp(cmd, "MXS")) k += snprintf(nt + k, sizeof nt - (size_t)k, "svc=%s\n", spec);
+                else if (!(is_svc && svc == n && !strcmp(cmd, "MXD"))) k += snprintf(nt + k, sizeof nt - (size_t)k, "%.*s", (int)len, p);
+                p += len;
+            }
+            if (!strcmp(cmd, "MXA")) k += snprintf(nt + k, sizeof nt - (size_t)k, "svc=%s\n", spec);
+        }
+        if (mux_parse(nt, &c, err, sizeof err)){ fprintf(stderr, "   !! %s %s: %s\n", cmd, arg, err); fflush(stderr); tx_str("ERR range\n"); return; }
+        // a ZeroMQ service keeps the bitrate its sender uses (as stored); a new port starts with the given one
+        for (int i = 0; i < c.n; i++) if (c.s[i].src == MUX_SRC_ZMQ) for (int j = 0; j < dmux.n; j++)
+            if (dmux.s[j].src == MUX_SRC_ZMQ && dmux.s[j].port == c.s[i].port){ c.s[i].kbps = dmux.s[j].kbps; if (c.s[i].prot > 4 && c.s[i].kbps % 32) c.s[i].prot -= 4; }
+        if (mux_format(&c, txt, sizeof txt) < 0 || mux_parse(txt, &c, err, sizeof err)){ tx_str("ERR range\n"); return; }
         if (!memcmp(&c, &dmux, sizeof c)){ tx_str("OK\n"); return; }
         tx_str(dab_mux_store(&c) ? "ERR io\n" : "OK\n"); return;
     }

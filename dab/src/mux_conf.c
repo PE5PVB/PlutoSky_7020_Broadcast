@@ -21,7 +21,7 @@ void mux_default(mux_conf *c){
     c->s[0].kbps = 96; c->s[0].prot = 3;
 }
 
-static int label_ok(const char *s){ size_t n = strlen(s); if (n < 1 || n > 16) return 0; for (; *s; s++) if (*s < 0x20 || *s > 0x7E || *s == ';') return 0; return 1; }
+static int label_ok(const char *s){ size_t n = strlen(s); if (n < 1 || n > 16) return 0; for (; *s; s++) if (*s < 0x20 || *s > 0x7E || *s == ';' || *s == '|') return 0; return 1; }
 
 static int parse_prot(const char *p){
     if (strlen(p) != 2 || p[0] < '1' || p[0] > '4') return 0;

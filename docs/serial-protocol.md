@@ -206,6 +206,22 @@ encoder and builds the multiplex; the FPGA does the OFDM. The DAB settings are n
 | `DEN <text>` | 1 … 16 ASCII characters, no `;` | the ensemble label |
 | `DSI <hex>` | 4 hex digits, not used by another service | its service identifier |
 | `DLS <text>` | up to 128 bytes, UTF-8 | dynamic label (the successor of RDS RadioText); changes without interruption |
+| `DSS 0` / `DSS 1` | | slideshow flag (FIG 0/13) of the service encoded on the Pluto; the slides themselves are uploaded in the web interface |
+| `DSN <s>` | 5 … 3600; `20` | seconds between the starts of two slides |
+| `DPR <prot>` | `1A`…`4A`, `1B`…`4B` | protection of the service encoded on the Pluto (EEP-B: bitrate a multiple of 32) |
+| `DEI <hex>` | 4 hex digits | ensemble identifier |
+| `MXA <svc>` | | add a service at the end of the layout |
+| `MXS <n> <svc>` | n = 1 … services | replace service n |
+| `MXD <n>` | n = 1 … services | remove service n (the last one cannot be removed) |
+| `?MUX` | | the layout on one line, fields separated by `\|`: `eid=8FED\|lab=PicoAudio DAB\|cu=384\|n=2\|1=i2s;8F01;PicoAudio;192;2A;1;aac\|2=zmq:2491;8F02;MPB RADIO 1;128;1A;1;aac` |
+| `?SLS` | | slideshow: `on=1 n=1 int=20 kb=18 free=376 s=18432,0,0,0,0,0,0,0` (flag, slides, interval s, kB used, kB free in the flash, size of slide 1..8 in bytes) |
+
+`<svc>` is a service as in `?MUX` and the layout file: `source;SId;label;kbit/s;protection;slideshow[;codec]` with source `i2s`, `tone:<Hz>` or
+`zmq:<port>` and codec `aac` (default) or `mp2`. Labels may not contain `;` or `|`. The layout commands answer `OK`, or `ERR range` when the result
+would not be a valid layout (more than 864 CU, a SId or port taken twice, a second service encoded on the Pluto, a bitrate that does not suit the
+codec or protection), `ERR nolocal` when there is no service encoded on the Pluto. A ZeroMQ service keeps the bitrate its sender uses. Everything is
+stored in the same layout as the web interface edits; structural changes go through an announced reconfiguration, so send them only on a user's
+change, not at every resync.
 | `DTN <Hz>` | 0 … 10000; `0` | test tone (left Hz, right 1.5 × Hz, −12 dBFS) instead of the I2S input; `0` = I2S |
 | `?DAB` | | `m=FM`, or `m=DAB br=96 cod=aac src=i2s run=1 rs=0 fifo=7712 uf=0 rst=0 aud=11600 ppm=+12 sil=0 cpu=31`: `run` program running, `rs` restarts by the daemon, `fifo` OFDM FIFO words (~7700 = full), `uf` underflows, `rst` OFDM restarts, `aud` audio buffer (samples), `ppm` the clock correction toward the I2S source, `sil` super frames sent silent (no audio), `cpu` % of one core; with the slideshow on for the service encoded here also `sls=<slides>/<current>/<1 while being sent>` (the slides are uploaded through the web interface, /mnt/jffs2/sls) |
 
