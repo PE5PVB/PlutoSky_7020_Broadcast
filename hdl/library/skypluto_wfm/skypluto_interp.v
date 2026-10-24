@@ -131,7 +131,9 @@ module skypluto_interp #(
             // ===== prime phase: wait until the FIFO is half full =====
             // Carrier is on (comp_out=0 -> pure carrier), no audio yet.
             fifo_rd<=1'b0; comp_valid<=1'b1; comp_out<={DW{1'b0}};
-            acc2<=0; bp<=0; step_dyn<=STEP_NOM; acc_i<=0; lp<=0; macgo<=0;
+            // lp starts at 1: the first slow update of the rate loop comes a full period after priming, when the
+            // count->ferr->corr/sdcand pipeline holds real values (at lp=0 it would take sdcand_r=0 and stop pulling)
+            acc2<=0; bp<=0; step_dyn<=STEP_NOM; acc_i<=0; lp<=1; macgo<=0;
             if (fifo_count >= TGT) primed <= 1'b1;
         end else begin
             fifo_rd<=1'b0; comp_valid<=1'b1;

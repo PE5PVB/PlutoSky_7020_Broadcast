@@ -334,7 +334,7 @@ module skypluto_wfm_exciter #(
         w_seq, {8'd0, w_out_q}, {8'd0, w_out_c},                             // 21 = window sequence number, 20 = peak after limiter (q), 19 = peak at modulator input (comp), 20 ms
         sc_dbg_wd, sc_dbg_state, ups_dbg_state,                              // 18 = watchdog {wd_idle,wd_fsm}, 17 = conditioner state, 16 = interp state
         ups_ovf, ups_take, d_hb,                                             // 15 = interp overflow pulses, 14 = samples taken, 13 = l_clk heartbeat
-        32'hB1D00021,                                                        // 12 = build id (identifies the bitstream)
+        32'hB1D00022,                                                        // 12 = build id (identifies the bitstream)
         ups_sat,                {8'd0, d_pk_comp},                           // 11 = FIR saturations, 10 = peak |interp output|
         {8'd0, d_pk_q},         sc_dbg_nz,                                   // 9 = peak |conditioner output|, 8 = x_new != 0 (count)
         sc_dbg_pops,            sc_dbg_pulls,                                // 7 = FIFO pops, 6 = pulls
@@ -347,8 +347,9 @@ module skypluto_wfm_exciter #(
     assign st_dbg_a = dbg_s1[{dbg_sel_a, 5'd0} +: 32];
 
     // ---- DAB: control to l_clk, phase words AXI -> l_clk, OFDM, audio bclk -> AXI -----------------------------------------
-    (* ASYNC_REG = "TRUE" *) reg [3:0] dab_s0 = 0, dab_s1 = 0;
-    always @(posedge l_clk) begin dab_s0 <= dab_ctrl_a; dab_s1 <= dab_s0; end
+    // 2-flop synchronizer; the control word is only taken over after two equal samples, so a gain change never shows a torn value
+    (* ASYNC_REG = "TRUE" *) reg [3:0] dab_s0 = 0, dab_sr = 0;  reg [3:0] dab_s1 = 0;
+    always @(posedge l_clk) begin dab_s0 <= dab_ctrl_a; dab_sr <= dab_s0; if (dab_s0 == dab_sr) dab_s1 <= dab_s0; end
     wire dab_mode = dab_s1[0], dab_rst = dab_s1[1] | l_rst;
     wire [31:0] pw_data; wire pw_empty; wire [8:0] pw_cnt, pw_wpos;
     wire [13:0] ofdm_level; wire ofdm_uf;
@@ -372,11 +373,24 @@ module skypluto_wfm_exciter #(
         dab_gi <= (dgi > DMAX) ? DMAX[OUT_W-1:0] : (dgi < DMIN) ? DMIN[OUT_W-1:0] : dgi[OUT_W-1:0];
         dab_gq <= (dgq > DMAX) ? DMAX[OUT_W-1:0] : (dgq < DMIN) ? DMIN[OUT_W-1:0] : dgq[OUT_W-1:0];
     end
-    // DAB status to the axi domain (2-flop). ofdm_level is a binary counter: a read that coincides with a change can return a mix of
-    // old and new bits (rare; the ARM uses it for flow control of the phase words).
-    (* ASYNC_REG = "TRUE" *) reg [31:0] dst0 = 0, dst1 = 0;
-    always @(posedge s_axi_aclk) begin dst0 <= {14'd0, pw_full, ofdm_uf, 2'd0, ofdm_level}; dst1 <= dst0; end
-    assign dab_status_a = dst1;
+    // DAB status to the axi domain (2-flop). The OFDM FIFO level moves by at most 1 per l_clk, so it crosses in Gray code: a sample
+    // taken while it changes is the old or the new level, never a mix of bits (the ARM uses it for flow control of the phase words).
+    reg [13:0] lvl_gray = 0;
+    always @(posedge l_clk) lvl_gray <= ofdm_level ^ (ofdm_level >> 1);
+    function [13:0] gray2bin(input [13:0] g);
+        integer k;
+        begin
+            gray2bin[13] = g[13];
+            for (k = 12; k >= 0; k = k - 1) gray2bin[k] = gray2bin[k+1] ^ g[k];
+        end
+    endfunction
+    (* ASYNC_REG = "TRUE" *) reg [31:0] dst0 = 0, dst1 = 0;  reg [31:0] dst2 = 0;
+    always @(posedge s_axi_aclk) begin
+        dst0 <= {14'd0, pw_full, ofdm_uf, 2'd0, lvl_gray};
+        dst1 <= dst0;
+        dst2 <= {dst1[31:14], gray2bin(dst1[13:0])};
+    end
+    assign dab_status_a = dst2;
     // audio for the ARM's AAC encoder: {left[23:8], right[23:8]} per stereo frame, only in DAB mode
     (* ASYNC_REG = "TRUE" *) reg dm_b0 = 0, dm_b1 = 0;
     always @(posedge bclk_c) begin dm_b0 <= dab_ctrl_a[0]; dm_b1 <= dm_b0; end
