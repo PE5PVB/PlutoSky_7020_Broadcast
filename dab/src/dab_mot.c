@@ -4,7 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SEG_MAX 8189                       // MOT segment size (13 bits), and a data group stays below the 14-bit DGLI
+#define SEG_MAX 1013                       // MOT body segment: data groups of 1 kB as ODR-PadEnc sends them (receivers with small
+                                           // buffers take those; the format would allow 8189)
 
 void dab_mot_init(dab_mot *m){ memset(m, 0, sizeof *m); }
 void dab_mot_free(dab_mot *m){ free(m->buf); dab_mot_init(m); }
@@ -14,7 +15,7 @@ void dab_mot_abort(dab_mot *m){ m->cur = m->ndg; }
 // one MSC data group (EN 300 401 5.3.3) carrying a MOT segment: header with CRC, segment and user access flags, session
 // header (segment number, last flag, transport id), MOT segmentation header (EN 301 234 5.1.1), the data, CRC
 static int put_dg(dab_mot *m, int type, unsigned ci, int segno, int last, unsigned tid, const uint8_t *d, int n){
-    if (m->ndg >= 16) return -1;
+    if (m->ndg >= DAB_MOT_MAX_DG) return -1;
     int o = m->ndg ? m->dg_off[m->ndg - 1] + m->dg_len[m->ndg - 1] : 0, p = o;
     if (o + 13 + n > m->cap) return -1;
     uint8_t *b = m->buf;

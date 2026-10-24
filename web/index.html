@@ -281,7 +281,9 @@ function srcArg(s){const i=s.indexOf(':');return i<0?'':s.slice(i+1);}
 function muxChanged(){muxDirty=fmtMux(mux)!==muxOrig;$('db_undo').disabled=!muxDirty;drawCU();}
 function drawCU(){if(!mux)return;let tot=0,h='';mux.svc.forEach((s,i)=>{const c=cuOf(s.br,s.prot);if(c>0){tot+=c;h+='<div title="'+esc(s.label)+': '+c+' CU" style="width:'+(c/864*100)+'%;background:'+SVCOL[i%8]+'"></div>';}});
  $('db_bar').innerHTML=h;const over=tot>864;$('db_cu').innerHTML=(over?'<span style="color:var(--bad)">':'')+tot+' of 864 CU used, '+(864-tot)+' free'+(over?' — too much</span>':'')+(muxDirty?' · <span style="color:var(--warn)">not applied yet</span>':'');
- mux.svc.forEach((s,i)=>{const e=$('db_c'+i);if(e){const c=cuOf(s.br,s.prot);e.textContent=c<0?'—':c;e.style.color=c<0?'var(--bad)':'';}});}
+ mux.svc.forEach((s,i)=>{const e=$('db_c'+i);if(e){const c=cuOf(s.br,s.prot);e.textContent=c<0?'—':c;e.style.color=c<0?'var(--bad)':c>240?'var(--warn)':'';e.title=c>240?'more than 240 CU: some receivers (AbracaDABra) do not play this service':'';}});
+ const big=mux.svc.filter(s=>cuOf(s.br,s.prot)>240).map(s=>s.label);
+ if(big.length)$('db_cu').innerHTML+='<br><span style="color:var(--warn)">'+esc(big.join(', '))+': sub-channel larger than 240 CU. Some receivers (AbracaDABra for one) refuse such a service; choose a lighter protection (at 192 kbit/s: 1B, 2A or lower).</span>';}
 function brOpts(sel,prot){let o='';for(let b=8;b<=192;b+=8){if(prot[1]==='B'&&b%32)continue;o+='<option'+(b==sel?' selected':'')+'>'+b+'</option>';}if(prot[1]==='B'&&sel%32)o='<option selected>'+sel+'</option>'+o;return o;}
 function stCell(i){const s=mux.svc[i];if(!s)return '';const k=srcKind(s.src);if(k!=='zmq')return k==='tone'?'test tone':'I2S input';const z=muxStat['z'+(i+1)];if(!z)return '<span style="color:var(--tx2)">–</span>';
  const a=z.split(':'),p=(a[1]||'').split('/');const peer=p[5]||'-',fill=+p[0],sil=p[2],drop=p[3],bad=+p[4],kin=+p[6]||0;

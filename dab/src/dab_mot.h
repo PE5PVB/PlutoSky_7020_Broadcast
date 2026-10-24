@@ -12,10 +12,11 @@
 #define DAB_MOT_MAX_BODY  (60 * 1024)      // the SlideShow profile allows 50 kB per image; a little room above that
 #define DAB_MOT_JFIF      1                // MOT content subtypes of content type 2 (image)
 #define DAB_MOT_PNG       3
+#define DAB_MOT_MAX_DG    72               // the header and up to 71 body segments of 1013 bytes
 
 typedef struct {
     uint8_t *buf; int cap;                 // the data groups of the object, one after the other
-    int dg_off[16], dg_len[16], ndg;       // where each data group starts and its length
+    int dg_off[DAB_MOT_MAX_DG], dg_len[DAB_MOT_MAX_DG], ndg;   // where each data group starts and its length
     int cur, pos;                          // data group being sent and the bytes of it already sent
     uint8_t dgli[4];                       // the length indicator for the data group being started
     unsigned ci_hdr, ci_body;              // continuity index per data group type (4 bits)

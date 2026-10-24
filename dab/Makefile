@@ -10,8 +10,8 @@ PY      ?= python3
 
 all: $(BUILD)/test_sf $(BUILD)/test_mdct $(BUILD)/enc_file $(BUILD)/dab_tx_file $(BUILD)/skypluto-dab
 
-$(BUILD)/skypluto-dab: app/skypluto_dab.c $(OBJ) | $(BUILD)
-	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS) -lpthread
+$(BUILD)/skypluto-dab: app/skypluto_dab.c $(wildcard src/*.h) $(OBJ) | $(BUILD)
+	$(CC) $(CFLAGS) $(filter %.c %.o,$^) -o $@ $(LDLIBS) -lpthread
 
 $(BUILD)/dab_tx_file: tests/dab_tx_file.c $(OBJ) | $(BUILD)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
@@ -23,7 +23,9 @@ $(BUILD)/enc_file: tests/enc_file.c $(OBJ) | $(BUILD)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
 
 $(BUILD)/%.o: src/%.c | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(OBJ:.o=.d)   # an object is rebuilt when a header it uses changes (a struct size, say)
 
 $(BUILD)/test_sf: tests/test_sf.c $(OBJ) | $(BUILD)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
