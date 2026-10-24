@@ -633,8 +633,12 @@ int aacenc_frame(aacenc *e, const float *pcm, int target_bytes, int max_bytes, i
         double m = 0.5 * (lo + hi);
         if (quantise_all(e, m) <= target_bits){ best = m; hi = m; } else lo = m;
     }
-    e->last_off = best;
     int bits = quantise_all(e, best);
+    // the bit count is not strictly monotonic in the offset (and the recount above can come out a few bits higher than in the search):
+    // when it does not fit the hard maximum, step the offset up until it does. Only when nothing fits, an empty frame - which is heard as
+    // a ~10 ms gap: it used to happen to the last AU of a DAB+ super frame, whose target equals its maximum, several times a minute.
+    for (double o = best + 0.5; bits > max_bits && o <= 60.0; o += 0.5){ best = o; bits = quantise_all(e, o); }
+    e->last_off = best;
     layout Lw = *L;
     if (bits > max_bits){                                               // emergency: an empty frame
         Lw.max_sfb = 0; Lw.nbands = 0;

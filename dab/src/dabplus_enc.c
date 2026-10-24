@@ -72,6 +72,9 @@ int dabplus_enc_superframe(dabplus_enc *e, const float *pcm, uint8_t *out){
         // last AU alone could not take the rest of the super frame); the last AU takes all that remains
         const int need = remaining - left * cap;
         if (need > 0){ pad = need > target ? need : target; if (pad > cap) return -1; maxb = pad; if (target > pad) target = pad; }
+        // aim a little below the hard maximum: the encoder's bit count can overshoot its target by a few bits, and the fill elements
+        // (pad) make up the difference where the size must be exact (the last AU, whose target would otherwise equal its maximum)
+        if (target > maxb - 8 && maxb - 8 >= MIN_AU) target = maxb - 8;
         {                                                          // PAD: one DLS segment per super frame (first AU), slideshow pieces in every AU
             dab_xpad_sub s[4]; int ns = 0; uint8_t dlg[20];
             if (i == 0){ int n = dab_dls_next_dg(&e->dls, dlg); if (n > 0) s[ns++] = (dab_xpad_sub){ 2, dlg, n }; }
