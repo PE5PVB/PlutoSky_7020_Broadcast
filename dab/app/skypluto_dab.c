@@ -433,6 +433,10 @@ static void hw_restart(void){
     atomic_fetch_add(&st_resets, 1);
 }
 static unsigned long long g_in_total = 0; static unsigned g_in_nmax = 0;   // audio words read from the FPGA, the largest batch (-v)
+// diagnosis: SIGUSR1 records the next 10 s of the I2S input as read from the FPGA (with the size of each read batch) to
+// /tmp/dab_i2s.raw: per batch a word 0xBA7C0000 | n and the CLOCK_MONOTONIC time in us (2 words, low first), then the n samples {L16, R16}
+#define DUMP_WORDS (48000 * 11)
+static volatile sig_atomic_t g_dump_req = 0; static uint32_t *g_dump; static atomic_uint g_dump_n; static atomic_int g_dump_done;
 static void hw_io_step(void){
     poll_streams();                                                  // the outside services' super frames from the network
     unsigned n = rd(R_AUDCNT);
@@ -449,8 +453,14 @@ static void hw_io_step(void){
     g_in_total += n; if (n > g_in_nmax) g_in_nmax = n;
     const int use = g_local >= 0 && g_tone <= 0;                    // the audio is read in any case (the FIFO must not fill), kept only when it is used
     unsigned w = atomic_load(&aud_w), room = AUD_RING - RS_TAPS - aud_fill(), kept = 0;
+    if (g_dump_req && !g_dump){ g_dump = calloc(DUMP_WORDS, 4); g_dump_req = 0; }
+    if (g_dump && !atomic_load(&g_dump_done)){                       // batch header: marker | n, then the time in us (two words)
+        unsigned k = atomic_load(&g_dump_n);
+        if (k + 3 < DUMP_WORDS){ uint64_t us = (uint64_t)(now_s() * 1e6); g_dump[k] = 0xBA7C0000u | (n & 0xFFFF); g_dump[k+1] = (uint32_t)us; g_dump[k+2] = (uint32_t)(us >> 32); atomic_store(&g_dump_n, k + 3); }
+    }
     for (unsigned i = 0; i < n; i++){
         uint32_t v = rd(R_AUDIO);                                    // every read pops; keep what fits (the rate control prevents a full ring)
+        if (g_dump && !atomic_load(&g_dump_done)){ unsigned k = atomic_load(&g_dump_n); if (k < DUMP_WORDS) g_dump[k] = v, atomic_store(&g_dump_n, k + 1); else atomic_store(&g_dump_done, 1); }
         if (!use || kept == room) continue;
         aud_ring[(w + kept) % AUD_RING][0] = (float)(int16_t)(v >> 16) * (1.0f / 32768.0f);
         aud_ring[(w + kept) % AUD_RING][1] = (float)(int16_t)(v & 0xFFFF) * (1.0f / 32768.0f);
@@ -482,6 +492,7 @@ static void print_streams(FILE *f, int verbose){
 }
 
 static void on_signal(int sig){ (void)sig; g_stop = 1; }
+static void on_usr1(int sig){ (void)sig; g_dump_req = 1; }
 
 static void usage(void){
     fprintf(stderr,
@@ -549,7 +560,7 @@ int main(int argc, char **argv){
     log_mux("multiplex", &g_mux);
     g_pcm = calloc(SF_SAMPLES * 2, sizeof(float));
     rs_init();
-    signal(SIGINT, on_signal); signal(SIGTERM, on_signal);
+    signal(SIGINT, on_signal); signal(SIGTERM, on_signal); signal(SIGUSR1, on_usr1);
 
     if (o_simin){
         // ---- simulation: audio arrives at 48 kHz x (1 + ppm), the OFDM block takes 76000 words/s; steps of 4 ms ----------------
@@ -619,6 +630,12 @@ int main(int argc, char **argv){
         if (o_status && t - last_st >= 1.0){
             // one line for skypluto-ctl (?DAB), replaced as a whole (rename) so a reader never sees half a line
             last_st = t;
+            if (g_dump && atomic_load(&g_dump_done)){                // the I2S recording is complete: write it out and stop
+                FILE *df = fopen("/tmp/dab_i2s.raw", "wb");
+                if (df){ fwrite(g_dump, 4, atomic_load(&g_dump_n), df); fclose(df); }
+                fprintf(stderr, "I2S recording written: %u words\n", atomic_load(&g_dump_n));
+                uint32_t *b = g_dump; g_dump = NULL; atomic_store(&g_dump_n, 0); atomic_store(&g_dump_done, 0); free(b);
+            }
             char tmp[256]; snprintf(tmp, sizeof tmp, "%s.new", o_status);
             FILE *sf = fopen(tmp, "w");
             if (sf){

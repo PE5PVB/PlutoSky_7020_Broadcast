@@ -2298,6 +2298,10 @@ static int bootmsg_main(const char *arg){
     return 0;
 }
 
+// diagnosis: SIGUSR2 logs 12 s of UART traffic with CLOCK_MONOTONIC times to /tmp/uart_ts.txt ("R <t> <head>" when a line starts
+// arriving, "T <t0> <t1>" while the reply is sent), to lay next to skypluto-dab's I2S recording (SIGUSR1)
+static volatile sig_atomic_t uts_req = 0; static FILE *uts = NULL; static double uts_end = 0;
+static void on_usr2(int s){ (void)s; uts_req = 1; }
 int main(int argc, char **argv){
     if (argc >= 3 && !strcmp(argv[1],"-c")) return cli_main(argv[2]);
     if (argc >= 3 && !strcmp(argv[1],"-b")) return bootmsg_main(argv[2]);
@@ -2355,7 +2359,7 @@ int main(int argc, char **argv){
       if (sched_setscheduler(0, SCHED_FIFO, &sp) != 0) perror("sched_setscheduler (verder zonder RT)");
       mlockall(MCL_CURRENT|MCL_FUTURE); }
 
-    signal(SIGPIPE, SIG_IGN);
+    signal(SIGPIPE, SIG_IGN); signal(SIGUSR2, on_usr2);
     t_start = mono();
     wr(U_CLR, 1);
     while (rx_byte() >= 0) { /* drain */ }
@@ -2403,8 +2407,11 @@ int main(int argc, char **argv){
                 if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)){ close(cfd); cfd = -1; }
             }
         }
+        if (uts_req){ uts_req = 0; if (!uts){ uts = fopen("/tmp/uart_ts.txt", "w"); uts_end = mono() + 12.0; } }
+        if (uts && mono() > uts_end){ fclose(uts); uts = NULL; }
         while ((b = rx_byte()) >= 0){
             got = 1; bs_active = 0; pico_last_rx = mono();                                // the Pico is speaking: no more unsolicited boot lines
+            if (uts && idx == 0 && b != 13 && b != 10) fprintf(uts, "R %.6f\n", pico_last_rx);
             if (b == '\r') continue;
             if (b == '\n'){
                 line[idx]=0;
@@ -2412,6 +2419,7 @@ int main(int argc, char **argv){
                 double t0 = mono();
                 pico_cmds++;
                 handle(line);
+                if (uts) fprintf(uts, "T %.6f %.6f %s\n", t0, mono(), head);
                 double dt = mono() - t0;                      // line in -> reply sent
                 if (dt > h_max) h_max = dt;
                 if (dt > 0.1){ fprintf(stderr,"   !! traag: '%s' %.0f ms\n", head, dt*1000.0); fflush(stderr); }
