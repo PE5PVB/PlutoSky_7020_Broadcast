@@ -50,14 +50,13 @@ set_property  -dict {PACKAGE_PIN  J20 IOSTANDARD LVCMOS25} [get_ports gpio_ctl[3
 set_property  -dict {PACKAGE_PIN  P20  IOSTANDARD LVCMOS25} [get_ports gpio_en_agc]
 set_property  -dict {PACKAGE_PIN  R19  IOSTANDARD LVCMOS25} [get_ports gpio_resetb]
 
-# Header GPIO, broken out on connector JP5 as 3V3_IO1..4 (pins 7, 9, 11, 13).
-# Free in the stock design; driven here either by Linux (EMIO GPIO) or by the
-# low nibble of the transmit sample.
+# Header pins, broken out on connector JP5 as 3V3_IO1..4 (pins 7, 9, 11, 13).
+# Free in the stock design; here they carry the I2S input (3 pins) and the
+# single-wire control UART (1 pin), see below.
 #
-# Balls read off the vendor schematic, sheet 5 (U1G, "PL端BANK13"):
+# Balls read off the vendor schematic, sheet 5 (U1G, "PL BANK13"):
 #   3V3_IO1 = V10 (IO_L20N)   3V3_IO3 = U10 (IO_L12N)
 #   3V3_IO2 = U9  (IO_L16P)   3V3_IO4 = T9  (IO_L12P)
-# sample_gpio[n] is wired to 3V3_IO(n+1), so the bit number matches the silk.
 #
 # LVCMOS33 is right: sheet 1 ties VCCO_13_1..4 (T8, U11, W7, Y10) to VCC3V3.
 # Note this is NOT the same as the rest of the design, which declares LVCMOS25
@@ -69,22 +68,12 @@ set_property  -dict {PACKAGE_PIN  R19  IOSTANDARD LVCMOS25} [get_ports gpio_rese
 # PACKAGE_PIN is not a build error, it is a bitstream that drives a pad wired
 # to nothing.
 #
-# PULLDOWN gives the pins a DEFINED idle state. Each of these four nets appears
-# exactly twice in the whole schematic - once at the FPGA ball, once at JP5 -
-# so there is no external pull, series part or ESD diode anywhere on them, and
-# nothing for an internal pull to fight. Undriven they would genuinely float,
-# which for a line something downstream reads as a trigger is the wrong
-# default: a floating input that drifts high looks asserted. Idle low is the
-# de-asserted state for a sync or frame signal, so pull down rather than up.
-#
-# These four outputs are deliberately left UNCONSTRAINED, like every other
-# LVCMOS output in this design. Skew between them is then whatever the router
-# gives - a few hundred picoseconds, set by placement, not checked by timing
-# analysis. That is far below one sample period (16 ns at 61.44 MSPS) and so
-# irrelevant for the frame and sync signals this feature exists for. If you
-# are doing something where it is not irrelevant, add a set_output_delay
-# against the AD9361 datapath clock and re-run implementation; do not assume
-# the numbers here have been verified, because they have not been.
+# Each of these four nets appears exactly twice in the whole schematic - once
+# at the FPGA ball, once at JP5 - so there is no external pull, series part or
+# ESD diode on them: an undriven pin genuinely floats. The UART pin therefore
+# gets an internal PULLUP (idle high); the I2S inputs have no pull (the source
+# drives them, and the exciter filters short spikes).
+
 # SkyPluto_WFM: I2S input on the 3.3V header pins (bank 13, LVCMOS33).
 # Pluto = I2S slave; no level shifter needed for a 3.3V source.
 set_property  -dict {PACKAGE_PIN  T9   IOSTANDARD LVCMOS33} [get_ports i2s_in_bclk]    ;# JP5-13

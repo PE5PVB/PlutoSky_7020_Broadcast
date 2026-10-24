@@ -1,12 +1,12 @@
 // =============================================================================
-// skypluto_interp - band-limiting polyfase interpolator
+// skypluto_interp - band-limiting polyphase interpolator
 // -----------------------------------------------------------------------------
 // Composite 192,187.5 Hz (async FIFO) -> l_clk, 2 stages:
-//   Stage 1: x4 polyfase FIR (96 taps, 24/branch, 18-bit) -> 768,750 Hz stream.
+//   Stage 1: x4 polyphase FIR (96 taps, 24/branch, 18-bit) -> 768,750 Hz stream.
 //            Flat +-0.002 dB up to 76 kHz; image >=116 kHz -73 dB. HARD <=76 kHz.
 //   Stage 2: fractional LINEAR interpolation -> l_clk.
 //
-// PIPELINED for the 250 MHz l_clk constraint:
+// PIPELINED for the 250 MHz rx_clk constraint (l_clk is timed as rx_clk; physically it runs at 12.288 MHz):
 //   - MAC: 4 parallel lanes, registered products -> registered
 //     accumulation -> 2-stage final sum. 6 feed clocks + ~4 latency << 16 (the
 //     fractional overflow interval), so mac_done is ready well in time.
@@ -45,7 +45,6 @@ module skypluto_interp #(
     output wire [31:0]          dbg_state        // {primed, bp[2:0], 4'b0, step_dyn[23:0]}
 );
     localparam integer TGT = (1 << (CNTW-2));    // half full (DEPTH/2)
-    localparam integer DB  = 2;                  // deadband
     localparam integer PRODW = DW + COEFW;      // 42
     localparam integer ACCMW = PRODW + 5;       // 47
 

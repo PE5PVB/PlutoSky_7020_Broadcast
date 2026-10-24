@@ -1,6 +1,6 @@
 // =============================================================================
 // tb_fm_modulator - test of the FM modulator with NCO offset and carrier level
-// Checks: constant envelope, rotation with DC audio, AND carrier rotation with
+// Checks: constant envelope (with and without DC audio), carrier rotation with
 // NO audio but an offset (requirement: always a carrier), and level=0 -> silent.
 //
 // Run (from the repo root):
@@ -46,10 +46,11 @@ module tb_fm_modulator;
         .offset_inc(offset_inc), .level(level),
         .dc_i(12'sd0), .dc_q(12'sd0), .qgain(18'sd0), .qskew(18'sd0),
         .comp(comp), .comp_valid(comp_valid),
+        .ext_en(1'b0), .ext_i(16'sd0), .ext_q(16'sd0),          // DAB input unused (left open it made every output X)
         .i_out(i_out), .q_out(q_out), .iq_valid(iq_valid)
     );
 
-    // envelope-check (level=max -> ~amp)
+    // envelope check (level = max -> amplitude ~32767)
     localparam real AMP = 32767.0;
     localparam real MAG2_EXP = AMP*AMP;
     real mag2, err_frac;
@@ -59,7 +60,7 @@ module tb_fm_modulator;
             err_frac = (mag2 - MAG2_EXP) / MAG2_EXP;
             if (err_frac < 0) err_frac = -err_frac;
             if (err_frac > 0.02) begin
-                $display("FOUT envelope: I=%0d Q=%0d mag2=%.0f (afw %.2f%%)",
+                $display("ERROR envelope: I=%0d Q=%0d mag2=%.0f (deviation %.2f%%)",
                          i_out, q_out, mag2, err_frac*100.0);
                 errors = errors + 1;
             end
@@ -83,10 +84,10 @@ module tb_fm_modulator;
         i_changed   = 0;
         repeat (2000) @(posedge clk);
         if (i_changed < 10) begin
-            $display("FOUT: geen carrier-rotatie bij offset zonder audio (%0d)", i_changed);
+            $display("ERROR: no carrier rotation with an offset and no audio (%0d)", i_changed);
             errors = errors + 1;
         end else
-            $display("OK: draaggolf roteert zonder audio (offset), i_changed=%0d", i_changed);
+            $display("OK: carrier rotates without audio (offset), i_changed=%0d", i_changed);
 
         // --- Test 2: DC audio on top of offset -> envelope still constant --------
         comp <= 24'sd100000;
@@ -96,13 +97,13 @@ module tb_fm_modulator;
         level <= 16'd0;
         repeat (20) @(posedge clk);
         if (i_out !== 0 || q_out !== 0) begin
-            $display("FOUT: level=0 maar output niet nul (I=%0d Q=%0d)", i_out, q_out);
+            $display("ERROR: level=0 but the output is not zero (I=%0d Q=%0d)", i_out, q_out);
             errors = errors + 1;
         end else
-            $display("OK: level=0 -> carrier uit");
+            $display("OK: level=0 -> carrier off");
 
-        if (errors == 0) $display("PASS: FM-modulator (offset+level) - %0d monsters.", nsamp);
-        else             $display("FAIL: %0d fouten.", errors);
+        if (errors == 0) $display("PASS: FM modulator (offset+level) - %0d samples.", nsamp);
+        else             $display("FAIL: %0d errors.", errors);
         $finish;
     end
 

@@ -62,19 +62,19 @@ module tb_i2s_lowfreq;
             send_slot(1'b0, dl);
             if (i > SKIP && left !== dl_prev) begin
                 d = left - dl_prev; if (d < 0) d = -d; if (d > worst) worst = d;
-                if (nerr < 3) $display("  FOUT i=%0d: L=%0d verwacht %0d (mode=%0d bits=%0d)", i, left, dl_prev, fmt_mode, fmt_bits);
+                if (nerr < 3) $display("  ERROR i=%0d: L=%0d expected %0d (mode=%0d bits=%0d)", i, left, dl_prev, fmt_mode, fmt_bits);
                 nerr = nerr + 1;
             end
             if (i > SKIP && (fmt_mode != mode_prev || fmt_bits != bits_prev)) begin
                 nfmt = nfmt + 1;
-                if (nfmt < 5) $display("  formaatwissel i=%0d (%.1f ms): mode %0d bits %0d", i, i / 192.0, fmt_mode, fmt_bits);
+                if (nfmt < 5) $display("  format change i=%0d (%.1f ms): mode %0d bits %0d", i, i / 192.0, fmt_mode, fmt_bits);
             end
             mode_prev = fmt_mode; bits_prev = fmt_bits;
             send_slot(1'b1, dl);
             dl_prev = dl;
         end
-        if (nerr == 0 && nfmt == 0) $display("PASS: %0d frames 20 Hz + piloot, formaat bleef I2S 24/32, alles exact.", FRAMES);
-        else $display("FAIL: %0d foute frames (grootste afwijking %0d LSB = %.1f %% FS), %0d formaatwisselingen.", nerr, worst, worst * 100.0 / 8388608.0, nfmt);
+        if (nerr == 0 && nfmt == 0) $display("PASS: %0d frames 20 Hz + pilot, format stayed I2S 24/32, all exact.", FRAMES);
+        else $display("FAIL: %0d wrong frames (largest error %0d LSB = %.1f %% FS), %0d format changes.", nerr, worst, worst * 100.0 / 8388608.0, nfmt);
         $finish;
     end
 endmodule

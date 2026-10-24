@@ -15,10 +15,12 @@ module tb_iqcorr;
     skypluto_fm_modulator #(.KSHIFT(13)) m1 (
         .clk(clk), .rst(rst), .en(1'b1), .kdev(18'sd100), .offset_inc(24'sd136533), .level(16'd56000),
         .dc_i(12'sd0), .dc_q(12'sd0), .qgain(18'sd0), .qskew(18'sd0), .comp(24'sd0), .comp_valid(1'b1),
+        .ext_en(1'b0), .ext_i(16'sd0), .ext_q(16'sd0),
         .i_out(i1), .q_out(q1), .iq_valid(v1));
     skypluto_fm_modulator #(.KSHIFT(13)) m2 (
         .clk(clk), .rst(rst), .en(1'b1), .kdev(18'sd100), .offset_inc(24'sd136533), .level(16'd56000),
         .dc_i(dci), .dc_q(dcq), .qgain(qg), .qskew(qs), .comp(24'sd0), .comp_valid(1'b1),
+        .ext_en(1'b0), .ext_i(16'sd0), .ext_q(16'sd0),
         .i_out(i2), .q_out(q2), .iq_valid(v2));
 
     integer n = 0, bad = 0, checked = 0, maxerr = 0;

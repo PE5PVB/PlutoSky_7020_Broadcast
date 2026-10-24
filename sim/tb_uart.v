@@ -72,8 +72,8 @@ module tb_uart;
         axi_write(5'h00, 8'h69);   // 'i'
         // wait until both frames are received
         repeat(BITC*40) @(posedge clk);
-        $display("T1 extern ontvangen: %0d bytes: %02X %02X", erxn, erx[0], erx[1]);
-        if (erxn!=2 || erx[0]!=8'h48 || erx[1]!=8'h69) begin ok=0; $display("  FOUT T1"); end
+        $display("T1 received externally: %0d bytes: %02X %02X", erxn, erx[0], erx[1]);
+        if (erxn!=2 || erx[0]!=8'h48 || erx[1]!=8'h69) begin ok=0; $display("  ERROR T1"); end
 
         // --- Test 2: external transmits 0x37, 0x39 -> DUT RX ---
         ext_send(8'h37); ext_send(8'h39);
@@ -81,9 +81,9 @@ module tb_uart;
         axi_read(5'h08, rv);
         $display("T2 STATUS=%08X  rx_count=%0d", rv, rv[15:8]);
         axi_read(5'h04, rv); $display("  RXDATA=%03X (valid=%b byte=%02X)", rv[8:0], rv[8], rv[7:0]);
-        if (rv[8]!=1 || rv[7:0]!=8'h37) begin ok=0; $display("  FOUT T2a"); end
+        if (rv[8]!=1 || rv[7:0]!=8'h37) begin ok=0; $display("  ERROR T2a"); end
         axi_read(5'h04, rv); $display("  RXDATA=%03X (valid=%b byte=%02X)", rv[8:0], rv[8], rv[7:0]);
-        if (rv[8]!=1 || rv[7:0]!=8'h39) begin ok=0; $display("  FOUT T2b"); end
+        if (rv[8]!=1 || rv[7:0]!=8'h39) begin ok=0; $display("  ERROR T2b"); end
 
         if (ok) $display("UART-TB: PASS"); else $display("UART-TB: FAIL");
         $finish;

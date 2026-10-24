@@ -84,13 +84,13 @@ module system_top (
   inout   [ 3:0]  gpio_ctl,
   inout   [ 7:0]  gpio_status,
 
-  // I2S input op de 3.3V header-pinnen (bank 13). Pluto = I2S-slave.
+  // I2S input on the 3.3V header pins (bank 13). Pluto = I2S slave.
   //   i2s_in_bclk  = JP5-13 (T9),  i2s_in_lrclk = JP5-11 (U10),  i2s_in_data = JP5-7 (V10)
   input           i2s_in_bclk,
   input           i2s_in_lrclk,
   input           i2s_in_data,
 
-  // Half-duplex control-UART op de 3.3V header (U9 = JP5-9), single-wire
+  // Half-duplex control UART on the 3.3V header (U9 = JP5-9), single wire
   inout           uart_pin,
 
   output          spi_csn,
@@ -124,11 +124,11 @@ module system_top (
 
   assign gpio_i[16:14] = gpio_o[16:14];
 
-  // De sample_gpio-header-pinnen zijn nu I2S-inputs; loop de EMIO-bits terug
-  // zodat gpio_i[21:18] gedefinieerd blijft.
+  // The header pins that the stock design uses as sample_gpio are I2S inputs here; loop the EMIO bits
+  // back so that gpio_i[21:18] stays defined. (The block design's sample_gpio_o/_t outputs are left unconnected.)
   assign gpio_i[21:18] = gpio_o[21:18];
 
-  // half-duplex control-UART single-wire buffer (U9): drijf txd als oe=1, anders Hi-Z
+  // half-duplex control UART, single-wire buffer (U9): drive txd when oe = 1, otherwise Hi-Z
   wire uart_txd, uart_oe, uart_rxd;
   ad_iobuf #(
     .DATA_WIDTH(1)

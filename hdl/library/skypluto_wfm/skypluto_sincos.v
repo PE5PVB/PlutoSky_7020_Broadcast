@@ -7,8 +7,8 @@
 //   cos_out = sin(phase + 90deg) = table[phase + 2^ADDR_W/4]
 // 1 clock latency (registered outputs).
 //
-// BRAM cost: 2^ADDR_W * DATA_W bits, read twice -> 1 dual-port BRAM
-// (e.g. 4096*16 = 64 kbit -> 2x 36k or 1x 36k dual-port). Ample room on the 7020.
+// BRAM cost: 2^ADDR_W * DATA_W bits, read through both ports of a dual-port BRAM
+// (ADDR_W = 14: 16384 x 16 = 256 kbit = 8 BRAM36). Ample room on the 7020.
 // =============================================================================
 `timescale 1ns/1ps
 

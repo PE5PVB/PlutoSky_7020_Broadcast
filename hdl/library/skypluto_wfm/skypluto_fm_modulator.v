@@ -31,7 +31,7 @@ module skypluto_fm_modulator #(
 )(
     input  wire                      clk,
     input  wire                      rst,
-    input  wire                      en,
+    input  wire                      en,              // 1: the phase advances; 0: it stands still (constant I/Q vector, NOT muted)
     input  wire signed [KDEV_W-1:0]  kdev,
     input  wire signed [PHASE_W-1:0] offset_inc,
     input  wire        [LVL_W-1:0]   level,
@@ -46,7 +46,7 @@ module skypluto_fm_modulator #(
     input  wire signed [OUT_W-1:0]   ext_q,
     output reg  signed [OUT_W-1:0]   i_out,
     output reg  signed [OUT_W-1:0]   q_out,
-    output reg                       iq_valid
+    output reg                       iq_valid         // pipeline valid flag (informative: i_out/q_out are produced on every clock)
 );
     localparam integer PROD_W = KDEV_W + COMP_W;
     localparam signed [OUT_W:0] MAXO =  (1 << (OUT_W-1)) - 1;

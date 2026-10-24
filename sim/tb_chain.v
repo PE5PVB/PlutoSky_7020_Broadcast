@@ -90,7 +90,7 @@ module tb_chain;
                  comp_out, comp_valid, u_mod.prod_r, u_mod.phase_inc_r, u_mod.phase, u_mod.v1, u_mod.v2, u_mod.v3,
                  u_mod.sin_raw, u_mod.cos_raw, iq_valid);
         $display("LOOP: step_dyn=%0d fifo=%0d wr_full=%0d rd_empty=%0d | sigcond: state=%0d events=%0d gmin=%0d uf=%0d inpeak=%0d", u_int.step_dyn, fcount, ovf_w, unf_r, scstate, events, gmin, uf_events, inpeak);
-        $display("CHAIN klaar: comp piek=%0d (%0f %% van 2^23), fifo=%0d", pkmax, 100.0*pkmax/8388608.0, fcount);
+        $display("CHAIN done: comp peak=%0d (%0f %% of 2^23), fifo=%0d", pkmax, 100.0*pkmax/8388608.0, fcount);
         $finish;
     end
 endmodule

@@ -1,6 +1,7 @@
 // Integration TB: async FIFO + skypluto_interp with adaptive STEP.
 // Pico write rate deliberately offset by +PPM -> proves that the loop tracks:
-// FIFO stays around half full, no over/underflow, output tone = input tone.
+// FIFO stays around half full, no over/underflow, output tone = input tone. Prints the FIFO range, the
+// over/underflow counts and step_dyn, and writes comp_out to track_out.txt (no automatic pass/fail).
 `timescale 1ns/1ps
 module tb_interp_track;
     localparam DW=24, AW=6, FRAC=24;

@@ -12,6 +12,7 @@
 //     flat to the outermost carriers and stopping from 900 kHz (no images, and the OFDM sidelobes around the ensemble cut).
 // clk is the AD9361 data clock l_clk (12.288 MHz); the output changes every 4 clocks (3.072 MS/s), like the FM path.
 // Per symbol: load ~1100 + 11 stages x 1031 clocks = ~12.5k clocks (1.02 ms) against a symbol period of 1.246 ms.
+// This file exists twice, in hdl/library/skypluto_wfm/ and dab/hdl/; keep the two byte-identical (check_hdl.py TOP=1 checks it).
 // =============================================================================
 `timescale 1ns/1ps
 
@@ -164,6 +165,8 @@ module skypluto_dab_ofdm (
         end
     end
 
+    // butterfly cnt of stage s pairs bins bi and bi + h (h = 1024 >> s) with twiddle index m = (cnt mod h) << s. In stage 0, h[9:0]
+    // is 0 (1024 does not fit in 10 bits), so h[9:0] - 1 wraps to 10'h3FF, which is exactly the mask needed there.
     always @(posedge clk) begin
         q0_v <= (st == S_STAGE); q0_i <= bi; q0_j <= bi + h; q0_m <= (cnt & (h[9:0] - 10'd1)) << stage;
         // T+1: RAM data of q0 has arrived

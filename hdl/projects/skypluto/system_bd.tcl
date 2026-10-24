@@ -26,6 +26,8 @@ create_bd_port -dir O -from 21 -to 0 gpio_t
 
 # The four header pins themselves, driven either by EMIO GPIO or by the low
 # nibble of the transmit sample. See tx_gpio_bitmap.v.
+# SkyPluto: system_top.v leaves sample_gpio_o/_t unconnected - those JP5 pins are
+# the I2S input and the control UART here - so this path is trimmed by Vivado.
 create_bd_port -dir O -from 3 -to 0 sample_gpio_o
 create_bd_port -dir O -from 3 -to 0 sample_gpio_t
 
@@ -217,7 +219,7 @@ ad_ip_parameter axi_ad9361 CONFIG.ADC_INIT_DELAY 30
 
 # --- SkyPluto_WFM exciter (I2S -> FM -> DAC, Option B direct) --------------
 # I2S input on the 3.3V header pins (bank 13). The exciter is the source of
-# dac_data_i0/q0 (instead of tx_fir_interpolator). See SkyPluto_WFM/docs.
+# dac_data_i0/q0 (instead of tx_fir_interpolator). See docs/ in this repository.
 create_bd_port -dir I i2s_in_bclk
 create_bd_port -dir I i2s_in_lrclk
 create_bd_port -dir I i2s_in_data

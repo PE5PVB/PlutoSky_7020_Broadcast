@@ -1,5 +1,5 @@
 // Testbench for skypluto_interp: feed 1 kHz + 76 kHz (via mock FIFO at 192,187.5 Hz),
-// dump comp_out (on l_clk) to a file for Python FFT analysis.
+// dump comp_out (on l_clk) to interp_out.txt for an FFT analysis outside the simulator (no automatic pass/fail).
 `timescale 1ns/1ps
 module tb_interp;
     localparam DW=24, FRAC=24;
@@ -41,7 +41,7 @@ module tb_interp;
             $fwrite(f, "%0d\n", comp_out);
         end
         $fclose(f);
-        $display("TB klaar: 65536 samples gedumpt (n=%0d inputsamples verbruikt)", n);
+        $display("TB done: 65536 samples dumped (n=%0d input samples consumed)", n);
         $finish;
     end
 endmodule

@@ -3,9 +3,14 @@
 // -----------------------------------------------------------------------------
 //   I2S-RX (bclk) -> async FIFO (CDC) -> conditioner -> interpolator (l_clk) -> FM modulator
 //                 -> channel filter (optional, off by default) -> i_out/q_out  (to axi_ad9361 dac_data_i0/q0)
-//   + skypluto_axi_regs: enable / freq_offset (zero-IF) / carrier_level / kdev
+//   + skypluto_axi_regs: the control and status registers (the register map is in skypluto_axi_regs.v)
 //   DAB mode (0x64 bit 0): the ARM writes OFDM phase words (0x68) -> skypluto_dab_ofdm -> the modulator's I/Q input (level, I/Q correction
 //   and DC as for FM; the channel filter is bypassed); the I2S stereo samples go to the ARM through an audio FIFO (0x6C, 0x70).
+//
+// Clock domains: l_clk (AD9361 data clock, 12.288 MHz: interpolator, modulator, filters, OFDM), bclk_c (the filtered I2S bit clock:
+// receiver, FIFO write sides) and s_axi_aclk (100 MHz: registers, I2S pin sampling). Data crosses through gray-code FIFOs, events
+// through toggle synchronizers, settings through 2-flop synchronizers (multi-bit settings into l_clk also wait for two equal samples);
+// status and diagnostic words go to the AXI domain through plain 2-flop synchronizers (a counter read while it changes may tear).
 //
 // The carrier is ALWAYS on (even without I2S): at comp=0 the phase keeps running
 // with freq_offset. Level and offset are adjustable at runtime via AXI (ssh/devmem).
@@ -97,16 +102,21 @@ module skypluto_wfm_exciter #(
         assign bclk_c = i2s_in_bclk; assign ws_c = i2s_in_lrclk; assign sd_c = i2s_in_data;
     end endgenerate
 
-    // ---- reset-synchronizers --------------------------------------------------
-    reg [1:0] lrst_sync = 2'b11;
+    // ---- reset synchronizers (asynchronous assert, synchronous release) -----------------------------------------------------------
+    reg [1:0] lrst_sync = 2'b11;                                // l_clk domain
     always @(posedge l_clk or negedge l_clk_resetn)
         if (!l_clk_resetn) lrst_sync <= 2'b11; else lrst_sync <= {lrst_sync[0], 1'b0};
     wire l_rst = lrst_sync[1];
 
-    reg [1:0] brst_sync = 2'b11;
+    reg [1:0] brst_sync = 2'b11;                                // I2S (filtered BCLK) domain
     always @(posedge bclk_c or negedge l_clk_resetn)
         if (!l_clk_resetn) brst_sync <= 2'b11; else brst_sync <= {brst_sync[0], 1'b0};
     wire b_rst = brst_sync[1];
+
+    reg [1:0] arst_sync = 2'b11;                                // AXI (s_axi_aclk) domain
+    always @(posedge s_axi_aclk or negedge s_axi_aresetn)
+        if (!s_axi_aresetn) arst_sync <= 2'b11; else arst_sync <= {arst_sync[0], 1'b0};
+    wire a_rst = arst_sync[1];
 
     // ---- AXI registers (s_axi_aclk domain) ------------------------------------
     wire                     en_axi;
@@ -336,17 +346,10 @@ module skypluto_wfm_exciter #(
     always @(posedge s_axi_aclk) begin dbg_s0 <= dbg_flat; dbg_s1 <= dbg_s0; end
     assign st_dbg_a = dbg_s1[{dbg_sel_a, 5'd0} +: 32];
 
-    // ---- FM-modulator ---------------------------------------------------------
-    wire mod_en = en_s1 & dac_enable_i0;
-    wire signed [OUT_W-1:0] mod_i, mod_q;
     // ---- DAB: control to l_clk, phase words AXI -> l_clk, OFDM, audio bclk -> AXI -----------------------------------------
     (* ASYNC_REG = "TRUE" *) reg [3:0] dab_s0 = 0, dab_s1 = 0;
     always @(posedge l_clk) begin dab_s0 <= dab_ctrl_a; dab_s1 <= dab_s0; end
     wire dab_mode = dab_s1[0], dab_rst = dab_s1[1] | l_rst;
-    reg [1:0] arst_sync = 2'b11;
-    always @(posedge s_axi_aclk or negedge s_axi_aresetn)
-        if (!s_axi_aresetn) arst_sync <= 2'b11; else arst_sync <= {arst_sync[0], 1'b0};
-    wire a_rst = arst_sync[1];
     wire [31:0] pw_data; wire pw_empty; wire [8:0] pw_cnt, pw_wpos;
     wire [13:0] ofdm_level; wire ofdm_uf;
     wire pw_move = ~pw_empty & (ofdm_level < 14'd8180);
@@ -369,6 +372,8 @@ module skypluto_wfm_exciter #(
         dab_gi <= (dgi > DMAX) ? DMAX[OUT_W-1:0] : (dgi < DMIN) ? DMIN[OUT_W-1:0] : dgi[OUT_W-1:0];
         dab_gq <= (dgq > DMAX) ? DMAX[OUT_W-1:0] : (dgq < DMIN) ? DMIN[OUT_W-1:0] : dgq[OUT_W-1:0];
     end
+    // DAB status to the axi domain (2-flop). ofdm_level is a binary counter: a read that coincides with a change can return a mix of
+    // old and new bits (rare; the ARM uses it for flow control of the phase words).
     (* ASYNC_REG = "TRUE" *) reg [31:0] dst0 = 0, dst1 = 0;
     always @(posedge s_axi_aclk) begin dst0 <= {14'd0, pw_full, ofdm_uf, 2'd0, ofdm_level}; dst1 <= dst0; end
     assign dab_status_a = dst1;
@@ -384,6 +389,10 @@ module skypluto_wfm_exciter #(
     );
     assign aud_count_a = {21'd0, aud_cnt};
 
+    // ---- FM modulator (in DAB mode its I/Q input is the OFDM signal instead of cos/sin) ------------------------------------------
+    // CTRL[0] = 0 (or dac_enable_i0 = 0) stops the phase accumulator; the output then holds a constant I/Q vector (it is not muted).
+    wire mod_en = en_s1 & dac_enable_i0;
+    wire signed [OUT_W-1:0] mod_i, mod_q;
     skypluto_fm_modulator #(
         .COMP_W(DW), .KDEV_W(KDEV_W), .KSHIFT(KSHIFT), .PHASE_W(PHASE_W),
         .LUT_ADDR_W(LUT_ADDR_W), .OUT_W(OUT_W), .LVL_W(LVL_W), .DC_W(DC_W), .QC_W(QC_W), .LUT_FILE(LUT_FILE)

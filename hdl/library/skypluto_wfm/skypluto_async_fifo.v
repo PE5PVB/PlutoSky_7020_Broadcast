@@ -30,7 +30,7 @@ module skypluto_async_fifo #(
 
     reg [DW-1:0] mem [0:DEPTH-1];
 
-    // ---- pointers (binair + gray) --------------------------------------------
+    // ---- pointers (binary + gray) --------------------------------------------
     reg  [AW:0] wr_bin = 0, wr_gray = 0;
     reg  [AW:0] rd_bin = 0, rd_gray = 0;
 

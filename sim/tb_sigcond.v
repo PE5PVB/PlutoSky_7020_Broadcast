@@ -87,7 +87,7 @@ module tb_sigcond;
             repeat (64 * 700) @(posedge clk);
         end
         $fclose(fin); $fclose(fout);
-        $display("SCEN %0d: gemiste pulls=%0d, events=%0d, gmin=%0d, uf_events=%0d, inpeak=%0d, state=%0d", SCEN, missed, events, gmin, uf_events, inpeak, state);
+        $display("SCEN %0d: missed pulls=%0d, events=%0d, gmin=%0d, uf_events=%0d, inpeak=%0d, state=%0d", SCEN, missed, events, gmin, uf_events, inpeak, state);
         $finish;
     end
 endmodule

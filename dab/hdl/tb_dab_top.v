@@ -4,7 +4,8 @@
 // whose samples are read back through the audio FIFO (0x70 count, 0x6C pop).
 //   +WORDS=<hex phase words>  +NCLK=<l_clk clocks>  +X=<file>  +Y=<file>   (X/Y as tb_dab_ofdm, compared by check_hdl.py TOP=1)
 // Checks itself: i_out/q_out = the OFDM output x 2^gain x level / 2^16 (through the modulator's I/Q path, any fixed delay) and the
-// audio words (left = counter, right = ~counter, no gaps).
+// audio words (left = counter, right = ~counter, no gaps). These two results are printed as MOD:/AUDIO: lines (with FAIL on an error);
+// check_hdl.py's own PASS/FAIL covers only the X/Y streams.
 `timescale 1ns/1ps
 module tb_dab_top;
     localparam integer GSH = 1;              // DAB gain 2^1
@@ -76,7 +77,7 @@ module tb_dab_top;
         sat16 = (v > 32767) ? 16'sd32767 : (v < -32768) ? -16'sd32768 : v[15:0];
     endfunction
     reg signed [15:0] hi [0:15], hq [0:15];
-    integer bad [0:15]; integer checked = 0, d, j;
+    integer bad [0:15]; integer checked = 0, d, j, nmatch;
     initial for (d = 0; d < 16; d = d + 1) begin bad[d] = 0; hi[d] = 0; hq[d] = 0; end
     reg checking = 0;
     always @(posedge l_clk) if (checking) begin
@@ -131,10 +132,13 @@ module tb_dab_top;
             if (burst == 0) #20000;
         end
         $fclose(fx); $fclose(fy);
-        for (d = 0; d < 16; d = d + 1) if (bad[d] == 0) $display("MOD: delay %0d clocks, %0d samples checked, 0 errors", d, checked);
+        nmatch = 0;
+        for (d = 0; d < 16; d = d + 1) if (bad[d] == 0) begin $display("MOD: delay %0d clocks, %0d samples checked, 0 errors", d, checked); nmatch = nmatch + 1; end
+        if (nmatch == 0 || checked == 0) $display("MOD: FAIL (no fixed delay matches the modulator output, %0d samples checked)", checked);
         $display("tb_dab_top: %0d clocks, %0d words written, underflow %0d, max FIFO level %0d, CDC full seen %0d",
                  lc, n, dut.u_dab.underflow, maxlvl, sat_seen);
         $display("AUDIO: %0d samples read, %0d errors", aud_n, aud_bad);
+        if (aud_bad != 0 || aud_n == 0) $display("AUDIO: FAIL");
         $finish;
     end
 endmodule

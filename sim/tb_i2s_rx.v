@@ -105,7 +105,7 @@ module tb_i2s_rx;
                 if (i >= FRAMES - CHECK && i > 0) begin
                     // at the start of this L slot, right of the previous frame has been latched; left of the previous one at the start of the previous R slot
                     if (left !== expect24(dl_prev, nb) || right !== expect24(dr_prev, nb)) begin
-                        if (nerr_cfg < 2) $display("  FOUT fmt=%0d slot=%0d n=%0d i=%0d: L=%h (verw %h) R=%h (verw %h) herkend: mode=%0d bits=%0d slot=%0d",
+                        if (nerr_cfg < 2) $display("  ERROR fmt=%0d slot=%0d n=%0d i=%0d: L=%h (exp %h) R=%h (exp %h) detected: mode=%0d bits=%0d slot=%0d",
                             fm, sl, nb, i, left, expect24(dl_prev, nb), right, expect24(dr_prev, nb), fmt_mode, fmt_bits, fmt_slot);
                         nerr_cfg = nerr_cfg + 1;
                     end
@@ -115,7 +115,7 @@ module tb_i2s_rx;
             end
             ncfg = ncfg + 1;
             if (nerr_cfg != 0) begin nfail = nfail + 1; errors = errors + nerr_cfg; end
-            else $display("  ok  fmt=%0d slot=%0d n=%0d -> herkend mode=%0d bits=%0d slot=%0d", fm, sl, nb, fmt_mode, fmt_bits, fmt_slot);
+            else $display("  ok  fmt=%0d slot=%0d n=%0d -> detected mode=%0d bits=%0d slot=%0d", fm, sl, nb, fmt_mode, fmt_bits, fmt_slot);
         end
     endtask
 
@@ -134,9 +134,9 @@ module tb_i2s_rx;
         man_en = 1'b1; man_mode = 2'd2; man_bits = 8'd20;
         run_cfg(2, 32, 20);
 
-        if (valid_count < 1000) begin $display("FOUT: valid pulseerde te weinig (%0d)", valid_count); errors = errors + 1; end
-        if (errors == 0) $display("PASS: %0d formaten automatisch herkend en correct ontvangen (valid x%0d).", ncfg, valid_count);
-        else             $display("FAIL: %0d fouten in %0d van %0d formaten.", errors, nfail, ncfg);
+        if (valid_count < 1000) begin $display("ERROR: too few valid pulses (%0d)", valid_count); errors = errors + 1; end
+        if (errors == 0) $display("PASS: %0d formats detected automatically and received correctly (valid x%0d).", ncfg, valid_count);
+        else             $display("FAIL: %0d errors in %0d of %0d formats.", errors, nfail, ncfg);
         $finish;
     end
 

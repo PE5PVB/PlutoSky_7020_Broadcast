@@ -66,10 +66,10 @@ module skypluto_uart_hd #(
     reg  rx_ovf;
 
     // ---- TX transmitter ------------------------------------------------------
-    localparam TX_IDLE=0, TX_LOAD=1, TX_BIT=2, TX_GUARD=3;
+    localparam TX_IDLE=0, TX_BIT=2, TX_GUARD=3;   // state codes (1 is not used)
     reg [1:0]  tx_st;
     reg [31:0] tx_div;
-    reg [3:0]  tx_bit;        // 0=start,1..8=data,9=stop
+    reg [3:0]  tx_bit;        // bit on the line: 0 = start, 1..8 = data bit 0..7 (the stop bit + guard is TX_GUARD)
     reg [7:0]  tx_sh;
     reg [7:0]  tx_guard_cnt;
 
@@ -79,7 +79,7 @@ module skypluto_uart_hd #(
     reg [31:0] rx_div;
     reg [3:0]  rx_bit;
     reg [7:0]  rx_sh;
-    reg        rxd_s0, rxd_s1;   // synchronizer + debouncing
+    reg        rxd_s0, rxd_s1;   // 2-flop synchronizer (no debouncing: the start bit is confirmed at its middle)
 
     // ---- AXI write -----------------------------------------------------------
     wire wr_fire = s_axi_awvalid & s_axi_wvalid & ~s_axi_bvalid;
@@ -88,7 +88,6 @@ module skypluto_uart_hd #(
     reg  rx_pop;
     reg  clr_ovf;
 
-    integer i;
     always @(posedge s_axi_aclk) begin
         if (!s_axi_aresetn) begin
             s_axi_awready<=0; s_axi_wready<=0; s_axi_bvalid<=0; s_axi_bresp<=0;
