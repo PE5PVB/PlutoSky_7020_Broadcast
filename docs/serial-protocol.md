@@ -46,7 +46,7 @@ Note: at every resync the encoder sends E/F/P/K/B/H again and thus overwrites ma
 
 ### Web interface
 
-The same daemon serves a web interface on **port 80** (HTTP). Commands entered there go through exactly the same parser as the serial line. Endpoints: `GET /` (page), `POST /login`, `POST /api/cmd` (body = one command line; requires the header `X-Requested-With: skypluto`), `GET /api/state` (JSON with the answers to `?S ?T ?P ?E ?V ?M ?D ?B ?J ?R ?O`, plus link status), `GET /api/mask` (`?L ?W ?N`), `GET /api/g` (`?G`), `GET /api/tone` (`?A`) and `GET /api/ir.csv` (result of the impulse measurement). If `/mnt/jffs2/skypluto-web.conf` contains `password=<password>`, a login is required (session cookie); without this file or password the interface is open.
+The same daemon serves a web interface on **port 80** (HTTP). Commands entered there go through exactly the same parser as the serial line. Endpoints: `GET /` (page), `POST /login`, `POST /api/cmd` (body = one command line; requires the header `X-Requested-With: skypluto`), `GET /api/state` (JSON with the answers to `?S ?T ?P ?E ?V ?M ?D ?B ?J ?R ?O`, plus link status), `GET /api/mask` (`?L ?W ?N`), `GET /api/g` (`?G`), `GET /api/tone` (`?A`), `GET /api/ir.csv` (result of the impulse measurement) and for DAB `GET`/`POST /api/mux` (the multiplex layout), `/api/sls` (slides) and `GET`/`POST /api/epg` (the programme guide, section 4b); every POST needs the `X-Requested-With: skypluto` header. If `/mnt/jffs2/skypluto-web.conf` contains `password=<password>`, a login is required (session cookie); without this file or password the interface is open.
 
 ## 2. Framing
 
@@ -254,6 +254,50 @@ bitrate goes out, and a super frame is dropped now and then when the remote cloc
 an announced reconfiguration, and per outside service `z<n>=<port>:<buffered>/<received>/<silent>/<dropped>/<unusable>/<sender>/<kbit/s the sender uses>`.
 Anyone who can reach a ZeroMQ port can feed that service: open it to the internet only towards the encoder's address.
 
+**Programme guide (EPG).** The ensemble's EPG (DAB SPI, ETSI TS 102 371, basic profile) is planned in the web interface
+(multiplex settings, `GET`/`POST /api/epg`) and stored in `/mnt/jffs2/epg.conf`; there are no serial commands for it (yet).
+Per service (SId) a list of programme rules, one line each:
+
+```
+on=1                                                   1 = broadcast the EPG, 0 = not
+p=8F01|07:00|120|weekdays|||Morning Show|||Wake up with the news
+  SId |start|min|repeat  |from|until|long name|medium|short|description
+```
+
+start = local time `HH:MM`; duration 1..1080 minutes; repeat `daily`, `weekdays` (Mon–Fri), `weekend` (Sat, Sun),
+`weekly:<days>` (1 = Monday .. 7 = Sunday, e.g. `weekly:1,3,5`) or `once:YYYY-MM-DD`; from/until optional dates
+(`YYYY-MM-DD`, empty = open). Long name 1..128 characters, medium name ≤ 16 and short name ≤ 8 (empty = cut from the long
+name, at a space when possible), description ≤ 180; UTF-8, `|` and control characters are not allowed (`|` becomes `/`). At
+most 128 rules. On a day a rule applies when its repeat matches and the day lies within from/until; at the same start time
+the more specific rule wins (once > weekly/weekdays/weekend > daily, then the earlier line), and a programme that runs into
+the next one ends at its start. Local time = UTC + the layout's local time offset (`lto`, half hours, FIG 0/9, set with
+`TM <utc> <offset>`); there is no time zone database, so across a change of daylight saving time the offset the encoder
+sends is used for both days.
+
+From the planner the daemon builds the SPI objects of **today and tomorrow** (local days) in `/tmp/epg/`: `si.bin` (Service
+Information: ensemble ECC + EId with short/medium name, every service of the layout with its short/medium name and bearer
+`dab:<gcc>.<eid>.<sid>.0`) and per service and day with programmes `pi_<SId>_<YYYYMMDD>.bin` (Programme Information: schedule
+with version, scope, programmes with shortId, medium/long name, UTC time + duration, short description), plus `index`, one
+line per object: `o <file> <ContentType> <ContentSubType> <ContentName> [ss=<UTC s>] [se=<UTC s>] [lto=<half hours>]
+[scope=<hex>]` (ScopeStart/ScopeEnd/ScopeID of the MOT header; ContentNames `SI` and `PI_<SId>_<YYYYMMDD>`). It is rebuilt
+after every change of the planner, at local midnight, when the layout or the clock changes, and at start, each time with a
+new version (16 bit), so receivers fetch it again. Only while the clock is valid (2025 or later, as for FIG 0/10): before
+the encoder has sent `TM`, and with the EPG off or no programmes today or tomorrow, there is no index and no EPG on the air.
+A PI object is kept within 16 kB (descriptions, then the last programmes are left out).
+
+skypluto-dab (`-E /tmp/epg`) sends the objects as a MOT directory-mode carousel in the PAD of the service encoded on the
+Pluto (X-PAD application types 16/17, announced in FIG 0/13 as user application 0x007 with the profile list "basic", only
+while the index lists objects): directory, SI, then the PI objects; a new turn at most every 30 s (the directory at least
+every 60 s); the EPG takes every third MOT piece of the PAD while it sends, the slideshow the rest, the DLS is not affected.
+Without a service encoded on the Pluto (only ZeroMQ services) the EPG is not sent. `?DAB` does not show it; the web
+interface shows `spi=<objects>/<turns>/<bytes per turn>` from the program's status line.
+
+`GET /api/epg` → `{"on":1,"lto":<minutes>,"clock":0|1,"today":"YYYY-MM-DD","max":128,"e":[{"sid","t","d","r","from","until",
+"ln","mn","sn","ds","dm" (medium name used),"dsn" (short name used)}],"pv":[{"sid","day","p":[{"t","d","e" (rule),"c" (1 =
+from the day before)}]}],"nobj":<objects>,"ver":<version>,"has":<DAB bitstream>,"dab":<DAB on>,"air":"<objects>/<turns>/<bytes>",
+"msg":"<last generation>"}`. `POST /api/epg` with the whole planner text (as in the file; header `X-Requested-With:
+skypluto`, at most 48 kB) → `OK <n> programme rules stored; EPG <state>` or `ERR line <n>: <reason>`.
+
 Switching to DAB: `E 0` → `F <channel>` → the encoder's I2S to 48 kHz stereo → `M DAB` → `E 1`. Back: `E 0` → `M FM` → I2S to
 MPX 192 kHz → `F <FM frequency>` → `E 1`. After a restart of the Pluto (see `up`), send `M` with the rest. The D settings are stored on the Pluto (the layout): send them only when they are changed in the encoder's menu, not at a resync, or they undo what was set in the web interface.
 
@@ -284,6 +328,7 @@ so this is a relative control, not an absolute dBm measurement.
 | `skypluto-iq.conf` | `dc_i=`, `dc_q=`, `qgain_ppm=`, `qskew_ppm=` (written by `DC`, `IQ` and the nulling), `lowif_khz=` (`OFS`), `level_db=` (`LVL`), `null_auto=` (default 1), `null_rx=` (default 2), `cal_temp=` (default 0, `CT`), `chf_khz=` (default 0, `CF`), `mask_db=` (default 0, `MG`) |
 | `skypluto-pwr.conf` | `enable=`, `atten_db=`, `cal_db=` (power meter; written by `Q`, `QK`, `QM`) |
 | `skypluto-web.conf` | `password=` (optional password for the web interface) |
+| `epg.conf` | the EPG planner: `on=`, `p=<SId>\|<HH:MM>\|<minutes>\|<repeat>\|<from>\|<until>\|<long name>\|<medium>\|<short>\|<description>` (section 4b) |
 
 ### Diagnostic registers (FPGA)
 

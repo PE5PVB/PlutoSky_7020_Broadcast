@@ -8,7 +8,7 @@
 // The transmission runs on the FPGA's sample clock (the AD9361), the audio on the I2S master's clock (the Pico). The two
 // drift apart, so the audio goes through a polyphase resampler whose ratio is steered by the latency of the audio.
 //
-//   skypluto-dab -m mux.conf [-t DLS file] [-P slideshow dir] [-S status file] [-g gain 0..3] [-L level] [-T Hz] [-v]
+//   skypluto-dab -m mux.conf [-t DLS file] [-P slideshow dir] [-E EPG dir] [-S status file] [-g gain 0..3] [-L level] [-T Hz] [-v]
 //   -m file: the multiplex layout, re-read when it changes: labels at once, everything else (services added or removed,
 //            bitrate, protection, SId, source) through an announced multiplex reconfiguration ~3 s later, so receivers follow
 //            without retuning; a service that keeps SId, bitrate and protection runs on without a gap
@@ -17,7 +17,12 @@
 //   -P dir:  the slideshow of the service encoded here: images 1.jpg .. 8.jpg (or .png) sent in turn in the PAD, a new or changed
 //            one first; dir/sls.conf may hold int=<seconds> between the starts of two slides (default 20). Only while the
 //            service has the slideshow flag in the layout (that is what announces it in FIG 0/13).
-//   -S file: a status line once a second (fifo= uf= rst= aud= ppm= sil= cpu= svc= cu= [chg=] [sls=] and z<i>= per outside
+//   -E dir:  the SPI (EPG, basic profile, ETSI TS 102 371) of the ensemble, in the PAD of the service encoded here: the objects
+//            listed in dir/index (written by skypluto-ctl, re-read when it changes) as a MOT directory-mode carousel on X-PAD
+//            application types 16/17, announced in FIG 0/13 while the index lists objects. It gets every third MOT piece
+//            of the PAD while it has something to send (the slideshow the others); a new turn at most every 30 s.
+//   -D file: (test) the PAD bytes of every audio frame of the service encoded here (2-byte length, then the bytes)
+//   -S file: a status line once a second (fifo= uf= rst= aud= ppm= sil= cpu= svc= cu= [chg=] [sls=] [spi=] and z<i>= per outside
 //            service), read by skypluto-ctl (?DAB); the keys are parsed there, keep them stable
 //   -T Hz:   test tone for the service encoded here (left Hz, right 1.5 x Hz, -12 dBFS) instead of the I2S input
 //   skypluto-dab -f in.f32 -o phases.bin [-p ppm] [-n seconds] [-X recorded.zmq] [-R next.conf -W seconds] ...
@@ -29,6 +34,7 @@
 // 0x70 = audio samples waiting, 0x08 = carrier level (16 bit, 65535 = x1), 0x00 bit 0 = enable.
 #include "../src/dabplus_enc.h"
 #include "../src/dab_mot.h"
+#include "../src/dab_spi.h"
 #include "../src/dab_mod.h"
 #include "../src/ext_stream.h"
 #include "../src/mux_conf.h"
@@ -218,6 +224,12 @@ static int g_local = -1;                                      // the service enc
 static double g_tone = 0.0;                                   // its test tone (Hz), 0 = the I2S input
 static int g_chg_cif = -1;                                    // the CIF at which g_next takes effect
 #define CHG_LEAD 125 // CIFs between the announcement and the change (3 s; FIG 0/0 allows up to 6 s)
+// the SPI carousel (-E dir): its objects come from dir/index (written by skypluto-ctl); g_spi_on = it holds objects (FIG 0/13)
+static const char *o_epgdir = NULL, *o_paddump = NULL;
+static FILE *g_paddump = NULL;
+static dab_motdir g_spi;
+static atomic_int g_spi_on, g_spi_nobj, g_spi_bytes;
+static atomic_ulong g_spi_cycles;
 
 static void mux_to_ens(const mux_conf *c, dab_ensemble *e){
     memset(e, 0, sizeof *e);
@@ -235,6 +247,9 @@ static void mux_to_ens(const mux_conf *c, dab_ensemble *e){
         e->svc[i].mp2 = c->s[i].mp2;
         e->svc[i].pty = c->s[i].pty;
     }
+    // the SPI (EPG) travels in the PAD of the service encoded here: announced in FIG 0/13 while the carousel holds objects
+    const int li = mux_local(c);
+    if (li >= 0 && atomic_load(&g_spi_on)) e->svc[li].spi = 1;
 }
 // the same services in the same sub-channels (only labels, slideshow flags, programme types or the test tone differ)
 static int same_structure(const mux_conf *a, const mux_conf *b){
@@ -283,6 +298,8 @@ static int local_encoder(int kbps, int mp2){
         if (!g_enc) return -1;
         if (g_dls_text[0]) dabplus_enc_set_dls(g_enc, g_dls_text, 15);
         else if (o_dls) dabplus_enc_set_dls(g_enc, o_dls, 15);
+        if (o_epgdir) dabplus_enc_set_spi(g_enc, &g_spi); // the carousel goes on where it was
+        if (g_paddump) dabplus_enc_pad_dump(g_enc, g_paddump);
         return 0;
     }
     if (g_cfg.bitrate_kbps == kbps) return 0;
@@ -380,6 +397,116 @@ static void sls_poll(void){
     else if (o_verbose)
         fprintf(stderr, "slide %d: %d bytes, transport id %u, about %d s on the air\n", n, len, g_sls_tid,
                 (len + 200) / (dabplus_enc_slide_rate(g_enc) > 0 ? dabplus_enc_slide_rate(g_enc) : 1) + 1);
+}
+
+// ---- SPI / EPG of the ensemble (-E dir) -------------------------------------------------------------------------------------
+// dir/index (replaced as a whole by skypluto-ctl), one line per object:
+//   o <file> <ContentType> <ContentSubType> <ContentName> [ss=<UTC s>] [se=<UTC s>] [lto=<half hours>] [scope=<hex bytes>]
+// ss/se: ScopeStart/ScopeEnd (PI objects), scope: the ScopeID (SI: ECC + EId, PI: the service's bearerURI). The objects are the
+// binary SPI objects (dab/src/dab_spi.h). No index (or an empty one): no EPG, and FIG 0/13 no longer announces it.
+static struct timespec g_epg_mt;
+static off_t g_epg_size = -1;
+static ino_t g_epg_ino = 0;
+static long g_epg_scan = 0;
+static int g_spi_fig = 0; // what FIG 0/13 announces
+static void epg_load(void){
+    char fn[400];
+    snprintf(fn, sizeof fn, "%s/index", o_epgdir);
+    FILE *f = fopen(fn, "r");
+    static dab_motdir_obj obj[DAB_MOTDIR_MAX_OBJ];
+    static uint8_t body[DAB_MOTDIR_MAX_OBJ][DAB_SPI_MAX_OBJECT], prm[DAB_MOTDIR_MAX_OBJ][64];
+    static char name[DAB_MOTDIR_MAX_OBJ][DAB_MOTDIR_MAX_NAME + 1];
+    int n = 0;
+    char l[512];
+    while (f && n < DAB_MOTDIR_MAX_OBJ && fgets(l, sizeof l, f)){
+        char file[128], nm[DAB_MOTDIR_MAX_NAME + 1];
+        int ct, cst, used = 0;
+        if (sscanf(l, "o %127s %d %d %64s%n", file, &ct, &cst, nm, &used) != 4 || strchr(file, '/')) continue;
+        long long ss = -1, se = -1;
+        int lto = DAB_SPI_NO_LTO, np = 0;
+        for (char *t = strtok(l + used, " \t\r\n"); t; t = strtok(NULL, " \t\r\n")){
+            if (!strncmp(t, "ss=", 3)) ss = atoll(t + 3);
+            else if (!strncmp(t, "se=", 3)) se = atoll(t + 3);
+            else if (!strncmp(t, "lto=", 4)) lto = atoi(t + 4);
+            else if (!strncmp(t, "scope=", 6)){
+                uint8_t sb[16];
+                int k = 0;
+                for (const char *h = t + 6; h[0] && h[1] && k < 16; h += 2){
+                    unsigned v;
+                    if (sscanf(h, "%2x", &v) != 1) break;
+                    sb[k++] = (uint8_t)v;
+                }
+                if (k) np += dab_spi_param(prm[n] + np, DAB_SPI_PARAM_SCOPE_ID, sb, k);
+            }
+        }
+        if (lto < -28 || lto > 28) lto = DAB_SPI_NO_LTO;
+        uint8_t tp[24];
+        int tn = 0;
+        if (ss >= 0) tn += dab_spi_param_time(tp + tn, DAB_SPI_PARAM_SCOPE_START, ss, lto);
+        if (se >= 0) tn += dab_spi_param_time(tp + tn, DAB_SPI_PARAM_SCOPE_END, se, lto);
+        // ScopeStart, ScopeEnd, then ScopeID (the order of TS 102 371 table 10)
+        memmove(prm[n] + tn, prm[n], (size_t)np);
+        memcpy(prm[n], tp, (size_t)tn);
+        np += tn;
+        char path[600];
+        snprintf(path, sizeof path, "%s/%s", o_epgdir, file);
+        FILE *bf = fopen(path, "rb");
+        if (!bf) continue;
+        int len = (int)fread(body[n], 1, DAB_SPI_MAX_OBJECT, bf);
+        int more = fgetc(bf) != EOF;
+        fclose(bf);
+        if (len < 1 || more){
+            fprintf(stderr, "EPG: %s: empty or larger than %d bytes, left out\n", file, DAB_SPI_MAX_OBJECT);
+            continue;
+        }
+        snprintf(name[n], sizeof name[n], "%s", nm);
+        obj[n] = (dab_motdir_obj){ name[n], ct, cst, prm[n], np, body[n], len };
+        n++;
+    }
+    if (f) fclose(f);
+    if (dab_motdir_load(&g_spi, obj, n)){
+        fprintf(stderr, "EPG: the carousel could not be built (%d objects), EPG off\n", n);
+        dab_motdir_load(&g_spi, obj, 0);
+        n = 0;
+    }
+    atomic_store(&g_spi_nobj, g_spi.nobj);
+    atomic_store(&g_spi_bytes, g_spi.bytes);
+    atomic_store(&g_spi_on, g_spi.nobj > 0);
+    if (o_verbose || n)
+        fprintf(stderr, "EPG: %d objects, directory %d bytes, %d bytes of data groups per turn\n", g_spi.nobj, g_spi.dir_size,
+                g_spi.bytes);
+}
+// once per super frame: the index (about every 2 s), FIG 0/13 when the EPG comes or goes
+static void epg_poll(void){
+    if (!o_epgdir) return;
+    if (g_epg_scan-- <= 0){
+        g_epg_scan = 16;
+        char fn[400];
+        struct stat st;
+        snprintf(fn, sizeof fn, "%s/index", o_epgdir);
+        if (stat(fn, &st)){
+            if (g_epg_size != -1 || g_spi.nobj){
+                g_epg_size = -1;
+                epg_load(); // gone: empty
+            }
+        } else if (st.st_mtim.tv_sec != g_epg_mt.tv_sec || st.st_mtim.tv_nsec != g_epg_mt.tv_nsec ||
+                   st.st_size != g_epg_size || st.st_ino != g_epg_ino){
+            g_epg_mt = st.st_mtim;
+            g_epg_size = st.st_size;
+            g_epg_ino = st.st_ino;
+            epg_load();
+        }
+    }
+    atomic_store(&g_spi_cycles, g_spi.cycles);
+    const int want = atomic_load(&g_spi_on) && g_local >= 0;
+    if (want != g_spi_fig && g_chg_cif < 0){ // not during an announced reconfiguration (the next layout carries it then)
+        dab_ensemble e;
+        mux_to_ens(&g_mux, &e);
+        if (dab_mod_set_meta(g_mod, &e) == 0){
+            g_spi_fig = want;
+            if (o_verbose) fprintf(stderr, "EPG: %s in FIG 0/13\n", want ? "announced" : "no longer announced");
+        }
+    }
 }
 
 static void log_mux(const char *what, const mux_conf *c){
@@ -523,6 +650,7 @@ static int produce_superframe(void){
         if (!g_enc) return -1; // a change of codec could not open the new encoder
         dls_poll(g_enc);
         sls_poll();
+        epg_poll();
         if (dabplus_enc_superframe(g_enc, g_pcm, g_sf)) return -1;
         atomic_store(&g_sls_busy, dabplus_enc_slide_busy(g_enc));
     }
@@ -724,8 +852,8 @@ static void on_usr1(int sig){
 
 static void usage(void){
     fprintf(stderr,
-            "skypluto-dab -m mux.conf [-t DLS file] [-P slideshow dir] [-S status file] [-g gain 0..3] [-L level] "
-            "[-T tone Hz] [-v]\n"
+            "skypluto-dab -m mux.conf [-t DLS file] [-P slideshow dir] [-E EPG dir] [-S status file] [-g gain 0..3] "
+            "[-L level] [-T tone Hz] [-v]\n"
             "skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-i service id hex] [-d DLS text] [-x outside.conf] ...   "
             "(without a layout file)\n"
             "skypluto-dab -f in.f32 -o phases.bin [-p audio clock ppm] [-n seconds] [-X recorded.zmq] ...   "
@@ -734,7 +862,7 @@ static void usage(void){
 
 int main(int argc, char **argv){
     int c;
-    while ((c = getopt(argc, argv, "m:b:s:e:i:d:t:P:x:X:R:W:g:L:T:S:vf:o:p:n:h")) != -1){
+    while ((c = getopt(argc, argv, "m:b:s:e:i:d:t:P:E:D:x:X:R:W:g:L:T:S:vf:o:p:n:h")) != -1){
         switch (c){
         case 'm': o_muxfile = optarg; break;
         case 'b': o_kbps = atoi(optarg); break;
@@ -743,6 +871,8 @@ int main(int argc, char **argv){
         case 'd': o_dls = optarg; break;
         case 't': o_dlsfile = optarg; break;
         case 'P': o_slsdir = optarg; break;
+        case 'E': o_epgdir = optarg; break;
+        case 'D': o_paddump = optarg; break;
         case 'g': o_gain = atoi(optarg) & 3; break;
         case 'L': o_level = atoi(optarg); break;
         case 'T': o_tone = atof(optarg); break;
@@ -799,6 +929,9 @@ int main(int argc, char **argv){
             }
         }
     }
+    // the SPI carousel: TransportIds start from the clock, so a restart does not repeat the ids of the run before
+    dab_motdir_init(&g_spi, DAB_SPI_XPAD_APP, (unsigned)time(NULL) * 7u);
+    if (o_paddump && !(g_paddump = fopen(o_paddump, "wb"))) perror(o_paddump);
     g_local = mux_local(&g_mux);
     g_tone = tone_of(&g_mux, g_local);
     if (g_local >= 0 && local_encoder(g_mux.s[g_local].kbps, g_mux.s[g_local].mp2)){
@@ -975,6 +1108,9 @@ int main(int argc, char **argv){
                         100 * (g_t_enc + g_t_mod) / t, nsvc, cu);
                 if (g_chg_cif >= 0) fprintf(sf, " chg=%d", g_chg_cif);
                 if (sls_on) fprintf(sf, " sls=%d/%d/%d", g_sls_count, g_sls_cur, atomic_load(&g_sls_busy));
+                if (o_epgdir) // SPI carousel: objects / turns started / bytes per turn
+                    fprintf(sf, " spi=%d/%lu/%d", atomic_load(&g_spi_on) && loc >= 0 ? atomic_load(&g_spi_nobj) : 0,
+                            atomic_load(&g_spi_cycles), atomic_load(&g_spi_bytes));
                 print_streams(sf, 0);
                 fputc('\n', sf);
                 fclose(sf);

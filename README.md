@@ -84,6 +84,9 @@ and put it on the air** — with a small FPGA-only signal path (no ARM, no DMA, 
 - **Boot status** is sent to the encoder, which shows it on its splash screen.
 - **Measurement-path detection**: a warning when RX2 gets no signal from the coupler.
 - Measurement tools: tone meter, end-to-end impulse response, LO leakage, demodulated-MPX capture.
+- **DAB+ (branch `dab-integration`, see `dab/README.md`)**: multiplex of up to 8 services with DLS, MOT slideshow and a
+  **programme guide (EPG, DAB SPI basic profile)**: planned per service in the web interface (daily, weekdays, weekend, weekly
+  or one-off programmes), sent as today's and tomorrow's schedule in the PAD of the service encoded on the Pluto.
 
 ---
 

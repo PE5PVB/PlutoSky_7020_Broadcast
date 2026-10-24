@@ -26,10 +26,12 @@
 // I/Q corrections, stored calibrations and LO nulling, ALC and mask monitor (child processes), DAB+ multiplex and
 // slideshow, the command handler handle(), web interface, client/boot-message modes, main loop.
 //
-// Build: scripts/build/build_daemon.sh (buildroot cross compiler; also compiles dab/src/mux_conf.c, links -lm).
+// Build: scripts/build/build_daemon.sh (buildroot cross compiler; also compiles dab/src/mux_conf.c, epg_plan.c and dab_spi.c,
+// links -lm).
 // =============================================================================
 #include <ctype.h>
 #include "mux_conf.h"
+#include "epg_plan.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2734,6 +2736,56 @@ static const char *sls_set_interval(int s){
     return rename(DAB_SLS "/sls.conf.new", DAB_SLS "/sls.conf") ? "could not be written" : NULL;
 }
 
+// ---- EPG (SPI, basic profile) of the ensemble: planner and generation (dab/src/epg_plan.h) ----
+// The planner (EPG_CONF) holds programme rules per service; from them the SPI objects of today and tomorrow (local days:
+// UTC + the layout's LTO, dmux.lto half hours) are built into EPG_DIR (RAM) with an index, which skypluto-dab (-E) sends as a
+// MOT carousel in the PAD of the service encoded here. Generated again after every edit, at local midnight, when the layout
+// or the clock changes, and at start; every generation has a new version, so receivers fetch it anew. Only with a valid clock
+// (2025 or later, set by the encoder with TM), as for FIG 0/10. There is no time zone database: the local time follows the
+// offset the encoder sends (TM <utc> <offset>), also across a change of daylight saving time.
+#define EPG_CONF "/mnt/jffs2/epg.conf"
+#define EPG_DIR  "/tmp/epg"
+static epg_plan eplan;                // the planner as stored
+static int epg_dirty = 1, epg_nobj = 0;
+static unsigned epg_version = 0;
+static long long epg_day_done = -1;   // local day of the last generation
+static int epg_clock_done = -1;
+static mux_conf epg_mux_done;         // the layout of the last generation
+static char epg_msg[200] = "not generated yet";
+static void epg_load(void){
+    char err[160];
+    if (epg_read(EPG_CONF, &eplan, err, sizeof err)){
+        if (access(EPG_CONF, F_OK) == 0){
+            fprintf(stderr, "   !! %s: %s - empty planner\n", EPG_CONF, err);
+            fflush(stderr);
+        }
+        memset(&eplan, 0, sizeof eplan);
+        eplan.on = 1;
+    }
+    epg_version = (unsigned)time(NULL) / 60; // a restart continues with a version the receivers have not seen
+    epg_dirty = 1;
+}
+// main loop (about once a second): generate when something it depends on changed
+static void epg_poll(double now_mono){
+    static double next = 0.0;
+    if (now_mono < next && !epg_dirty)
+        return;
+    next = now_mono + 1.0;
+    const long long now = (long long)time(NULL);
+    const int clock_ok = now >= EPG_CLOCK_VALID;
+    const long long day = clock_ok ? (now + (long long)dmux.lto * 1800) / 86400 : -1; // the local day (the clock is >= 2025)
+    if (!epg_dirty && clock_ok == epg_clock_done && day == epg_day_done && !memcmp(&dmux, &epg_mux_done, sizeof dmux))
+        return;
+    epg_dirty = 0;
+    epg_clock_done = clock_ok;
+    epg_day_done = day;
+    epg_mux_done = dmux;
+    epg_version = (epg_version + 1) & 0xFFFF;
+    epg_nobj = epg_generate(&eplan, &dmux, now, epg_version, EPG_DIR, epg_msg, sizeof epg_msg);
+    fprintf(stderr, "   -> EPG %s\n", epg_msg);
+    fflush(stderr);
+}
+
 // ---- the DAB program (skypluto-dab) as a child process ----
 static void dab_start(void){
     char tone[12];
@@ -2760,7 +2812,8 @@ static void dab_start(void){
             dup2(lf, 2);
             close(lf);
         }
-        execl(DAB_BIN, DAB_BIN, "-v", "-m", DAB_MUX, "-t", DAB_DLS, "-P", DAB_SLS, "-S", DAB_STATUS, "-T", tone, (char *)NULL);
+        execl(DAB_BIN, DAB_BIN, "-v", "-m", DAB_MUX, "-t", DAB_DLS, "-P", DAB_SLS, "-E", EPG_DIR, "-S", DAB_STATUS, "-T", tone,
+              (char *)NULL);
         _exit(127);
     }
     if (p < 0){
@@ -4860,9 +4913,10 @@ static void web_handle(struct wconn *c){
     }
     char *body = hend + 4;
     int have = c->len - (int)(body - c->buf);
-    const int up = !strncmp(path, "/api/sls/", 9);  // a slide upload: the only large body
+    // the large bodies: a slide upload and the EPG planner
+    const int up = !strncmp(path, "/api/sls/", 9) || !strcmp(path, "/api/epg");
     if (up && clen > SLS_ONE){
-        web_send(c->fd, 200, "text/plain", "ERR larger than 50 kB", 21, NULL);
+        web_send(c->fd, 200, "text/plain", "ERR larger than 48 kB", 21, NULL);
         close(c->fd);
         c->fd = -1;
         return;
@@ -5043,6 +5097,53 @@ static void web_handle(struct wconn *c){
                     else
                         snprintf(r, sizeof r, "OK %d services, %d of 864 CU%s", nc.n, mux_cu_total(&nc),
                                  dab_mode ? "" : " (DAB is off: takes effect with M DAB)");
+                }
+                web_send(c->fd, 200, "text/plain; charset=utf-8", r, strlen(r), NULL);
+            }
+        } else if (!post && !strcmp(path, "/api/epg")){
+            // the EPG planner: GET -> {"on","lto" (minutes),"clock","today","max","e":[entries],"pv":[programmes of today and
+            // tomorrow per service], "msg" (last generation), "nobj", "ver", "has", "dab", "air" (skypluto-dab: spi=...)}
+            static char ej[160 * 1024];
+            int n = epg_json(&eplan, &dmux, (long long)time(NULL), ej, (int)sizeof ej - 600);
+            if (n < 2)
+                n = snprintf(ej, sizeof ej, "{\"e\":[],\"pv\":[]}");
+            n--;  // the closing brace: the state follows
+            char air[48] = "";
+            {
+                FILE *sf = dab_mode && dab_pid > 0 ? fopen(DAB_STATUS, "r") : NULL;
+                char sl[700] = "";
+                if (sf){
+                    if (!fgets(sl, sizeof sl, sf))
+                        sl[0] = 0;
+                    fclose(sf);
+                }
+                const char *s = strstr(sl, " spi=");
+                if (s)
+                    sscanf(s + 5, "%47s", air);
+            }
+            n += snprintf(ej + n, sizeof ej - (size_t)n, ",\"nobj\":%d,\"ver\":%u,\"has\":%d,\"dab\":%d,\"air\":\"%s\",", epg_nobj,
+                          epg_version, has_dab, dab_mode ? 1 : 0, air);
+            n = jadd(ej, n, (int)sizeof ej, "msg", epg_msg);
+            ej[n++] = '}';
+            web_send(c->fd, 200, "application/json; charset=utf-8", ej, (size_t)n, NULL);
+        } else if (post && !strcmp(path, "/api/epg")){
+            // POST <planner file text> (dab/src/epg_plan.h) -> "OK ..." or "ERR <reason>"
+            if (!xrw){
+                web_send(c->fd, 403, "text/plain", "no", 2, NULL);
+            } else {
+                static epg_plan np;
+                char err[200], r[320];
+                if (!has_dab)
+                    snprintf(r, sizeof r, "ERR this bitstream has no DAB");
+                else if (epg_parse(body, &np, err, sizeof err))
+                    snprintf(r, sizeof r, "ERR %s", err);
+                else if (epg_write(EPG_CONF, &np))
+                    snprintf(r, sizeof r, "ERR the planner could not be written");
+                else {
+                    eplan = np;
+                    epg_dirty = 1;
+                    epg_poll(mono());
+                    snprintf(r, sizeof r, "OK %d programme rules stored; EPG %s", eplan.n, epg_msg);
                 }
                 web_send(c->fd, 200, "text/plain; charset=utf-8", r, strlen(r), NULL);
             }
@@ -5260,8 +5361,10 @@ int main(int argc, char **argv){
         has_dab = (id >= 0xB1D0001Eu && id <= 0xB1D000FFu);
         has_mask = (id >= 0xB1D00026u && id <= 0xB1D000FFu);
     }
-    if (has_dab)
+    if (has_dab){
         dab_mux_load();
+        epg_load();
+    }
     if (has_dab){  // start in FM (a DAB program of an earlier daemon has ended with it)
         wr(0x64, 0x2);
         usleep(20);
@@ -5911,6 +6014,8 @@ int main(int argc, char **argv){
             }
         }
         dab_poll(now);
+        if (has_dab)
+            epg_poll(now);
         dab_follow_streams(now);
         // ALC measurement when due (FM only)
         if (!dab_mode && m_pid <= 0 && cal_pid <= 0 && !cal_pending && !tx_off && last_f > 0 && now >= m_next)
