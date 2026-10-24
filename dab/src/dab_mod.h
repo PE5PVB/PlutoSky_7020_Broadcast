@@ -20,6 +20,8 @@ typedef struct {
                                            // show it)
     int      mp2;                          // 1: MPEG-1 Layer II audio (DAB, ASCTy 0) instead of DAB+ (ASCTy 63)
     int      pty;                          // programme type 0..31 (FIG 0/17, international table), 0 = none
+    int      spi;                          // 1: the PAD carries the SPI (EPG, basic profile) on X-PAD application types 16/17
+                                           // (signalled in FIG 0/13 next to the slideshow)
 } dab_service;
 
 typedef struct {

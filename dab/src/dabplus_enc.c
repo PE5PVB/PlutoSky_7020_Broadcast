@@ -18,6 +18,10 @@ struct dabplus_enc {
     int len[6];
     dab_dls dls;
     dab_mot mot;
+    dab_motdir *spi;   // the SPI carousel (owned by the caller), NULL = none
+    int spi_go;        // the carousel sends in this super frame (decided at its start: the AU budget keeps room for it)
+    unsigned slot;     // access units since the start, for the share of the PAD
+    FILE *pad_dump;    // test: the PAD bytes of every access unit
 };
 
 static aacenc *open_aac(const dabplus_cfg *cfg, int bandwidth_hz){
@@ -96,20 +100,41 @@ static int mot_chunk(int kbps) { return kbps >= 128 ? 48 : kbps >= 80 ? 32 : kbp
 
 int dabplus_enc_frames(const dabplus_enc *e) { return e->n; }
 
-// the PAD of one audio frame: one DLS segment per 120 ms (the first frame), slideshow pieces in every frame
+// The PAD of one audio frame: one DLS segment per 120 ms (the first frame), and one MOT piece (up to mot_chunk() bytes) in every
+// frame: every third frame belongs to the SPI carousel while it has something to send, all other frames (and the SPI's frames
+// while it is idle) to the slideshow. So the SPI takes at most a third of the MOT capacity, the slideshow keeps at least two
+// thirds, and neither adds to the PAD size of a frame (one MOT piece per frame, as before).
+#define SPI_EVERY 3
 static int frame_pad(dabplus_enc *e, int first, uint8_t *padb, int cap){
     dab_xpad_sub s[4];
-    int ns = 0;
+    int ns = 0, k = 0;
     uint8_t dlg[20];
     if (first){
         int n = dab_dls_next_dg(&e->dls, dlg);
         if (n > 0) s[ns++] = (dab_xpad_sub){ 2, dlg, n };
     }
-    ns += dab_mot_next(&e->mot, mot_chunk(e->cfg.bitrate_kbps), s + ns);
-    return ns ? dab_xpad_build(s, ns, padb, cap) : 0;
+    const int chunk = mot_chunk(e->cfg.bitrate_kbps);
+    if (e->spi && e->spi_go && e->slot % SPI_EVERY == SPI_EVERY - 1) k = dab_motdir_next(e->spi, chunk, s + ns);
+    if (!k) k = dab_mot_next(&e->mot, chunk, s + ns);
+    ns += k;
+    e->slot++;
+    const int len = ns ? dab_xpad_build(s, ns, padb, cap) : 0;
+    if (e->pad_dump){ // test record: 2-byte length (big endian), then the PAD bytes as they go into the frame
+        uint8_t h[2] = { (uint8_t)(len >> 8), (uint8_t)len };
+        fwrite(h, 1, 2, e->pad_dump);
+        if (len > 0) fwrite(padb, 1, (size_t)len, e->pad_dump);
+    }
+    return len;
+}
+// at the start of a super frame: the carousel's clock, and whether it sends in this super frame
+static void spi_frame(dabplus_enc *e){
+    if (!e->spi) return;
+    dab_motdir_tick(e->spi, 120);
+    e->spi_go = dab_motdir_pending(e->spi);
 }
 
 int dabplus_enc_superframe(dabplus_enc *e, const float *pcm, uint8_t *out){
+    spi_frame(e);
     if (e->mp2){ // DAB: 5 MPEG-1 Layer II frames of 3 x kbit/s bytes each
         const int fb = 3 * e->cfg.bitrate_kbps;
         for (int i = 0; i < 5; i++){
@@ -124,7 +149,7 @@ int dabplus_enc_superframe(dabplus_enc *e, const float *pcm, uint8_t *out){
     const int cap = 768 * ch < (int)sizeof e->au[0] ? 768 * ch : (int)sizeof e->au[0];
     int remaining = dabplus_payload_budget(&e->cfg);
     // what every later AU must keep: a silent frame plus its slideshow piece (CI list, length indicator, the piece)
-    const int resv = MIN_AU + (dab_mot_busy(&e->mot) ? mot_chunk(e->cfg.bitrate_kbps) + 12 : 0);
+    const int resv = MIN_AU + (dab_mot_busy(&e->mot) || e->spi_go ? mot_chunk(e->cfg.bitrate_kbps) + 12 : 0);
     for (int i = 0; i < e->n; i++){
         const int left = e->n - 1 - i;
         int maxb = remaining - left * resv, target = remaining / (e->n - i), pad = 0;
@@ -175,5 +200,10 @@ int dabplus_enc_set_slide(dabplus_enc *e, const uint8_t *img, int len, int subty
 int dabplus_enc_slide_busy(const dabplus_enc *e) { return dab_mot_busy(&e->mot); }
 void dabplus_enc_slide_abort(dabplus_enc *e) { dab_mot_abort(&e->mot); }
 int dabplus_enc_slide_rate(const dabplus_enc *e) { return mot_chunk(e->cfg.bitrate_kbps) * e->n * 1000 / 120; }
+void dabplus_enc_set_spi(dabplus_enc *e, dab_motdir *c){
+    e->spi = c;
+    e->spi_go = 0;
+}
+void dabplus_enc_pad_dump(dabplus_enc *e, FILE *f) { e->pad_dump = f; }
 
 int dabplus_enc_asc(const dabplus_enc *e, uint8_t asc[2]) { return e->aac ? aacenc_asc(e->aac, asc) : -1; }

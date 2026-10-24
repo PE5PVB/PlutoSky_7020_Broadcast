@@ -35,4 +35,56 @@ void dab_mot_abort(dab_mot *m);
 // and the start of a data group, or a continuation. Returns the number of subfields put into s (0, 1 or 2).
 int  dab_mot_next(dab_mot *m, int chunk, dab_xpad_sub *s);
 
+// ---- MOT directory mode (EN 301 234 7.2): a data carousel -----------------------------------------------------------------
+// A set of objects described by one MOT directory (data group type 6, uncompressed, header information sorted by
+// ContentName and signalled with SortedHeaderInformation), the bodies in data groups of type 4. Used for the SPI (EPG,
+// ETSI TS 102 371) on its own X-PAD application type pair (app = start of a data group, app + 1 = continuation), next to
+// the slideshow on 12/13. A turn of the carousel: the directory, the SI object(s) (ContentType 7/0), then the other objects;
+// a new turn starts at most every DAB_MOTDIR_MIN_CYCLE_MS (time counted with dab_motdir_tick), and inside a longer turn the
+// directory and the SI are repeated every DAB_MOTDIR_DIR_MS. A new set (dab_motdir_load) starts a new turn at once; an
+// object whose name, header and body are unchanged keeps its TransportId, the directory always gets a new one.
+#define DAB_MOTDIR_MAX_OBJ      24
+#define DAB_MOTDIR_MAX_NAME     64
+#define DAB_MOTDIR_MAX_DIR      8192       // TS 102 371 6.2: the MOT directory at most 8 kbytes
+#define DAB_MOTDIR_MIN_CYCLE_MS 30000
+#define DAB_MOTDIR_DIR_MS       60000
+
+typedef struct {
+    const char *name;                      // ContentName (UTF-8, unique, 1..64 bytes)
+    int ct, cst;                           // ContentType / ContentSubType
+    const uint8_t *param; int nparam;      // further header extension parameters, already encoded (e.g. ScopeStart)
+    const uint8_t *body; int len;
+} dab_motdir_obj;
+
+typedef struct {
+    int app;                               // X-PAD application type of a data group start
+    uint8_t *buf; int cap, used;           // the data groups of the directory and all bodies
+    int *dg_off, *dg_len, ndg, max_dg;
+    struct { int dg0, ndg, type; unsigned tid; } ent[DAB_MOTDIR_MAX_OBJ + 1];   // 0 = directory, 1.. = bodies (name order)
+    int nent, nobj, dir_size, bytes;
+    int first[DAB_MOTDIR_MAX_OBJ], nfirst; // SI objects (sent right after the directory)
+    int obj_si[DAB_MOTDIR_MAX_OBJ + 1];
+    unsigned obj_tid[DAB_MOTDIR_MAX_OBJ];  // per object (name order): TransportId, hash of header + body, name
+    uint32_t obj_hash[DAB_MOTDIR_MAX_OBJ];
+    char obj_name[DAB_MOTDIR_MAX_OBJ][DAB_MOTDIR_MAX_NAME + 1];
+    unsigned next_tid;
+    int plan[2 * DAB_MOTDIR_MAX_OBJ + 4], nplan, plan_i;   // the entities of the current turn
+    int cur_ent, cur_dg, pos;              // data group being sent (-1: none) and bytes of it sent
+    uint8_t dgli[4];
+    unsigned ci[8]; int last_dg[8];        // continuity index per data group type
+    long long t_ms, next_cycle_ms, last_dir_ms;
+    unsigned long cycles, sent;            // turns started, data group bytes sent
+} dab_motdir;
+
+void dab_motdir_init(dab_motdir *c, int app, unsigned tid_seed);
+void dab_motdir_free(dab_motdir *c);       // empty again (keeps app and the TransportId counter)
+// a new set of objects (copied); n = 0 empties the carousel. 0 = ok, -1: too many, names not unique, directory too large,
+// out of memory (the carousel is then empty)
+int  dab_motdir_load(dab_motdir *c, const dab_motdir_obj *objs, int n);
+void dab_motdir_tick(dab_motdir *c, int ms);
+// 1 when there is something to send now
+int  dab_motdir_pending(dab_motdir *c);
+// as dab_mot_next(), on the carousel's application types
+int  dab_motdir_next(dab_motdir *c, int chunk, dab_xpad_sub *s);
+
 #endif

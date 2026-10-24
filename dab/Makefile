@@ -4,11 +4,11 @@ CC      ?= gcc
 CFLAGS  ?= -O2 -g -Wall -Wextra -std=gnu11
 LDLIBS  += -lm
 BUILD   := build
-SRC     := src/dab_crc.c src/dab_rs.c src/dabplus_sf.c src/aac_mdct.c src/aac_huff_tab.c src/aac_enc.c src/dabplus_enc.c src/dab_mod.c src/dab_pad.c src/dab_mot.c src/mp2_enc.c src/zmtp_sub.c src/ext_stream.c src/mux_conf.c
+SRC     := src/dab_crc.c src/dab_rs.c src/dabplus_sf.c src/aac_mdct.c src/aac_huff_tab.c src/aac_enc.c src/dabplus_enc.c src/dab_mod.c src/dab_pad.c src/dab_mot.c src/dab_spi.c src/epg_plan.c src/mp2_enc.c src/zmtp_sub.c src/ext_stream.c src/mux_conf.c
 OBJ     := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 PY      ?= python3
 
-all: $(BUILD)/test_sf $(BUILD)/test_mdct $(BUILD)/enc_file $(BUILD)/dab_tx_file $(BUILD)/skypluto-dab
+all: $(BUILD)/test_sf $(BUILD)/test_spi $(BUILD)/test_mdct $(BUILD)/enc_file $(BUILD)/dab_tx_file $(BUILD)/skypluto-dab
 
 $(BUILD)/skypluto-dab: app/skypluto_dab.c $(wildcard src/*.h) $(OBJ) | $(BUILD)
 	$(CC) $(CFLAGS) $(filter %.c %.o,$^) -o $@ $(LDLIBS) -lpthread
@@ -27,6 +27,9 @@ $(BUILD)/%.o: src/%.c | $(BUILD)
 
 -include $(OBJ:.o=.d)   # an object is rebuilt when a header it uses changes (a struct size, say)
 
+$(BUILD)/test_spi: tests/test_spi.c $(OBJ) | $(BUILD)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
+
 $(BUILD)/test_sf: tests/test_sf.c $(OBJ) | $(BUILD)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
 
@@ -37,6 +40,8 @@ test: all
 	$(BUILD)/test_mdct
 	$(BUILD)/test_sf $(BUILD)/out
 	$(PY) tests/check_sf.py $(BUILD)/out
+	$(BUILD)/test_spi $(BUILD)/epg
+	$(PY) tests/check_spi.py $(BUILD)/epg
 
 clean:
 	rm -rf $(BUILD)

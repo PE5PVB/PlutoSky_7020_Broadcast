@@ -4,7 +4,9 @@
 #define DABPLUS_ENC_H
 
 #include "dabplus_sf.h"
+#include "dab_mot.h"
 #include <stdint.h>
+#include <stdio.h>
 
 typedef struct dabplus_enc dabplus_enc;
 
@@ -31,5 +33,10 @@ int          dabplus_enc_set_slide(dabplus_enc *e, const uint8_t *img, int len, 
 int          dabplus_enc_slide_busy(const dabplus_enc *e);
 void         dabplus_enc_slide_abort(dabplus_enc *e);
 int          dabplus_enc_slide_rate(const dabplus_enc *e);
+// SPI (EPG) carousel in the PAD (owned by the caller, NULL = none): it gets every third MOT piece while it has something to
+// send (see frame_pad() in dabplus_enc.c); its clock advances by 120 ms per super frame
+void         dabplus_enc_set_spi(dabplus_enc *e, dab_motdir *c);
+// test: write the PAD of every access unit (or MP2 frame) to f: a 2-byte length, big endian, then the PAD bytes
+void         dabplus_enc_pad_dump(dabplus_enc *e, FILE *f);
 
 #endif

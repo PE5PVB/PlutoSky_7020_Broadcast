@@ -4,6 +4,7 @@
 #include "dab_mod.h"
 #include "dab_crc.h"
 #include "aac_mdct.h"
+#include "dab_spi.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -213,20 +214,30 @@ static void build_figs(dab_mod *m){
     m->fig_next = 0;
     figs_subch(m, m->sc, e->nsvc, 0);
     figs_service(m, e, 0);
-    // FIG 0/13 user application information: SlideShow (user application type 0x002) in X-PAD, application type 12 (MOT,
-    // start of data group), DSCTy 60 (MOT) - per service whose PAD carries one (TS 101 756, EN 300 401 8.1.20)
+    // FIG 0/13 user application information (TS 101 756, EN 300 401 8.1.20), per service whose PAD carries one or two MOT
+    // applications: SlideShow (user application type 0x002) on X-PAD application type 12, the SPI (0x007, TS 102 371 7.1.1)
+    // on 16; both DSCTy 60 (MOT), data groups with CRC. The SPI's user application data: the profile list (0x01 basic).
     for (int i = 0; i < e->nsvc; i++)
-        if (e->svc[i].sls){
+        if (e->svc[i].sls || e->svc[i].spi){
             p = 0;
             f[p++] = 0;
             f[p++] = 0x0D; // C/N=0 OE=0 P/D=0 (16-bit SId), extension 13
             f[p++] = (uint8_t)(e->svc[i].sid >> 8);
             f[p++] = (uint8_t)e->svc[i].sid;
-            f[p++] = 0x01; // SCIdS 0, one user application
-            f[p++] = 0x00;
-            f[p++] = 0x42; // user application type 0x002 (SlideShow), data length 2
-            f[p++] = 0x0C; // CA 0, CA Org 0, X-PAD application type 12
-            f[p++] = 0x3C; // DG flag 0 (data groups with CRC), DSCTy 60 (MOT)
+            f[p++] = (uint8_t)((e->svc[i].sls != 0) + (e->svc[i].spi != 0)); // SCIdS 0, number of user applications
+            if (e->svc[i].sls){
+                f[p++] = 0x00;
+                f[p++] = 0x42; // user application type 0x002 (SlideShow), data length 2
+                f[p++] = 0x0C; // CA 0, CA Org 0, X-PAD application type 12
+                f[p++] = 0x3C; // DG flag 0 (data groups with CRC), DSCTy 60 (MOT)
+            }
+            if (e->svc[i].spi){
+                f[p++] = (uint8_t)(DAB_SPI_UA_TYPE >> 3);
+                f[p++] = (uint8_t)(((DAB_SPI_UA_TYPE & 7) << 5) | 3); // user application type 0x007 (SPI), data length 3
+                f[p++] = DAB_SPI_XPAD_APP;                             // CA 0, CA Org 0, X-PAD application type 16
+                f[p++] = 0x3C;                                         // DG flag 0, DSCTy 60 (MOT)
+                f[p++] = 0x01;                                         // profile: basic
+            }
             f[0] = (uint8_t)((0 << 5) | (p - 1));
             fig_add(m, f, p);
         }
@@ -607,6 +618,7 @@ int dab_mod_set_meta(dab_mod *m, const dab_ensemble *e){
     for (int i = 0; i < e->nsvc; i++){
         snprintf(m->ens.svc[i].label, sizeof m->ens.svc[i].label, "%s", e->svc[i].label);
         m->ens.svc[i].sls = e->svc[i].sls;
+        m->ens.svc[i].spi = e->svc[i].spi;
         m->ens.svc[i].pty = e->svc[i].pty;
     }
     build_figs(m);
