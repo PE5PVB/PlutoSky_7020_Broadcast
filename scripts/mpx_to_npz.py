@@ -15,4 +15,4 @@ x = x[:n * 96000].reshape(n, 96000)
 rows = np.genfromtxt(idx, delimiter=',', skip_header=1, dtype=float)
 rows = np.atleast_2d(rows)[:n]
 np.savez(out, x=x, fs=192000.0, t_s=rows[:, 1], utc_ms=rows[:, 2].astype(np.int64), tone_Hz=rows[:, 3], tone_dev_kHz=rows[:, 4])
-print('%d vensters -> %s' % (n, out))
+print('%d windows -> %s' % (n, out))

@@ -8,9 +8,9 @@ SM.1268 mask margin, are cut. Multirate, so it fits the FPGA:
 Seven channel filters, -6 dB at +-130 / +-125 / +-120 / +-135 / +-140 / +-150 / +-160 kHz (modes 1..7, Kaiser beta 8). Coefficients 18 bit signed, CB fraction bits.
 
     python scripts/gen_chanfilt.py            rewrite the coefficient functions in the Verilog
-    python scripts/gen_chanfilt.py --model    also print the model's self-check
+(sim/chanfilt_check.py imports this module for model().)
 """
-import os, re, sys
+import os, re
 import numpy as np
 from scipy.signal import firwin
 

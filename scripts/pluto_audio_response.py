@@ -44,15 +44,16 @@ def main(out):
     gd_fir = -np.gradient(np.unwrap(np.angle(H1)), 2 * np.pi * f)
     tot_delay = gd + COND_DELAY + FIFO_DELAY
     with open(out, 'w') as fo:
-        fo.write('f_Hz,mag_dB_fir,mag_dB_interp,mag_dB_totaal,fase_deg_totaal,groepsvertraging_us_filters,groepsvertraging_us_totaal_incl_cond_fifo\n')
+        fo.write('f_Hz,mag_dB_fir,mag_dB_interp,mag_dB_total,phase_deg_total,group_delay_us_filters,group_delay_us_total_incl_cond_fifo\n')
         for i, fi in enumerate(f):
             fo.write('%.2f,%.5f,%.5f,%.5f,%.3f,%.3f,%.3f\n' % (
                 fi, 20 * np.log10(abs(H1[i])), 20 * np.log10(abs(H2[i])), 20 * np.log10(abs(H[i])),
                 np.degrees(ph[i]), gd[i] * 1e6, tot_delay[i] * 1e6))
     for fi in (200, 1000, 5000, 10000, 15000, 19000, 20000, 38000, 57000, 76000):
         i = int(np.argmin(abs(f - fi)))
-        print('%6d Hz  fir %+.4f dB  interp %+.4f dB  totaal %+.4f dB  gd %.2f us' % (fi, 20 * np.log10(abs(H1[i])), 20 * np.log10(abs(H2[i])), 20 * np.log10(abs(H[i])), gd[i] * 1e6))
-    print('vertraging: conditioner %.1f us, FIFO ~%.1f us (max %.1f), FIR %.1f us' % (COND_DELAY * 1e6, FIFO_DELAY * 1e6, 32 / FS_IN * 1e6, 47.5 / FS1 * 1e6))
+        print('%6d Hz  fir %+.4f dB  interp %+.4f dB  total %+.4f dB  gd %.2f us'
+              % (fi, 20 * np.log10(abs(H1[i])), 20 * np.log10(abs(H2[i])), 20 * np.log10(abs(H[i])), gd[i] * 1e6))
+    print('delay: conditioner %.1f us, FIFO ~%.1f us (max %.1f), FIR %.1f us' % (COND_DELAY * 1e6, FIFO_DELAY * 1e6, 32 / FS_IN * 1e6, 47.5 / FS1 * 1e6))
 
 
 if __name__ == '__main__':

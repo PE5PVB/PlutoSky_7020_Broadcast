@@ -6,7 +6,7 @@
 # offset to zero-IF, (3) adjustable carrier level.
 #
 #   frequency = AD9361-LO (iio)         -> skypluto-wfm.sh freq  <Hz>
-#   offset    = digitale NCO (AXI-reg)  -> skypluto-wfm.sh offset <Hz>   (LO+offset)
+#   offset    = digital NCO (AXI reg)   -> skypluto-wfm.sh offset <Hz>   (LO+offset)
 #   level     = digital (AXI reg)      -> skypluto-wfm.sh level  <0..65535>
 #             + AD9361 TX-atten (iio)   -> skypluto-wfm.sh atten  <dB 0..89>
 #
@@ -23,11 +23,11 @@ LCLK=12288000                       # ACTUAL fabric clock (l_clk) = 4x RATE, mea
 FREQ_DEFAULT=98200000               # 98.2 MHz - ADJUST to an allowed frequency
 ATTEN_DEFAULT=10                    # dB TX attenuation (10 dB + full digital = ~-5 dBm)
 
-# AXI-Lite registers (basis 0x7C440000)
+# AXI-Lite registers (base 0x7C440000)
 R_CTRL=0x7C440000                   # [0]=enable
 R_OFFSET=0x7C440004                 # NCO phase-increment (signed 24-bit)
 R_LEVEL=0x7C440008                  # carrier-level 0..65535
-R_KDEV=0x7C44000C                   # FM-deviatie-gain
+R_KDEV=0x7C44000C                   # FM deviation gain
 R_STAT=0x7C440010                   # ro
 
 TWO24=16777216                      # 2^24 (PHASE_W)
@@ -38,7 +38,7 @@ lo()    { iio_attr -q -o -c "$PHY" altvoltage1 frequency "$1" >/dev/null; }
 rate()  { iio_attr -q -o -c "$PHY" voltage0 sampling_frequency "$1" >/dev/null; }
 atten() { iio_attr -q -o -c "$PHY" voltage0 hardwaregain -- "-$1" >/dev/null; }
 
-# offset in Hz -> phase increment = round(Hz * 2^24 / l_clk), 32-bit two's complement
+# offset in Hz -> phase increment = Hz * 2^24 / l_clk (truncated towards zero), 32-bit two's complement
 # (l_clk = 12.288 MHz, NOT the baseband rate - the phase accumulator runs on l_clk)
 offset_hz() {
     inc=$(( $1 * TWO24 / LCLK ))
@@ -60,7 +60,7 @@ enable_fabric_tx() {
     nohup sh -c "iio_writedev -c -b 8192 '$DDS' voltage0 voltage1 < /dev/zero" \
         >/tmp/wfm_tx.log 2>&1 &
     sleep 1
-    echo "  fabric-TX geactiveerd (dac_data_sel=2 via cyclische buffer)"
+    echo "  fabric TX enabled (dac_data_sel=2 through a cyclic buffer)"
 }
 disable_fabric_tx() { pkill -f "iio_writedev.*$DDS" 2>/dev/null || true; }
 
@@ -81,9 +81,9 @@ case "$1" in
     devmem $R_LEVEL 32 65535     # full
     devmem $R_CTRL  32 1         # enable
     enable_fabric_tx
-    echo "draaggolf actief op $F Hz (+ offset). Stel bij met: offset/level/atten/kdev."
+    echo "carrier active at $F Hz (+ offset). Adjust with: offset/level/atten/kdev."
     ;;
-  stop)    atten 89; iio_attr -q -o -c "$PHY" altvoltage1 powerdown 1 >/dev/null 2>&1 || true; disable_fabric_tx; devmem $R_CTRL 32 0; echo "TX gedempt + TX-LO uit" ;;
+  stop)    atten 89; iio_attr -q -o -c "$PHY" altvoltage1 powerdown 1 >/dev/null 2>&1 || true; disable_fabric_tx; devmem $R_CTRL 32 0; echo "TX muted + TX LO off" ;;
   status)
     echo "LO     : $(iio_attr -o -c $PHY altvoltage1 frequency 2>/dev/null) Hz"
     echo "rate   : $(iio_attr -o -c $PHY voltage0 sampling_frequency 2>/dev/null) SPS"
@@ -93,6 +93,6 @@ case "$1" in
     echo "status : $(devmem $R_STAT)"
     ;;
   *)
-    echo "gebruik: $0 {start [Hz] [atten]|stop|freq Hz|offset Hz|level 0..65535|atten dB|kdev n|enable|disable|status}"
+    echo "usage: $0 {start [Hz] [atten]|stop|freq Hz|offset Hz|level 0..65535|atten dB|kdev n|enable|disable|status}"
     exit 1 ;;
 esac

@@ -16,18 +16,18 @@ import os
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Sinus-LUT generator (.mem hex)")
+    ap = argparse.ArgumentParser(description="Sine LUT generator (.mem hex)")
     ap.add_argument("--depth", type=int, default=16384,
-                    help="aantal entries (= 2^ADDR_W), default 4096")
+                    help="number of entries (= 2^ADDR_W), default 16384")
     ap.add_argument("--width", type=int, default=16,
                     help="bits per entry (signed), default 16")
-    ap.add_argument("--out", default="sine_lut.mem", help="uitvoerbestand")
+    ap.add_argument("--out", default="sine_lut.mem", help="output file")
     ap.add_argument("--full-scale", type=float, default=None,
                     help="max amplitude (default 2^(width-1)-1)")
     args = ap.parse_args()
 
     if args.depth & (args.depth - 1):
-        ap.error("--depth moet een macht van 2 zijn")
+        ap.error("--depth must be a power of 2")
 
     amp = args.full_scale if args.full_scale is not None else (2 ** (args.width - 1) - 1)
     mask = (1 << args.width) - 1
@@ -44,7 +44,7 @@ def main():
             val = max(lo, min(hi, val))
             f.write(f"{val & mask:0{hexdigits}X}\n")
 
-    print(f"geschreven: {args.out}  ({args.depth} entries, {args.width}-bit)")
+    print(f"written: {args.out}  ({args.depth} entries, {args.width}-bit)")
 
 
 if __name__ == "__main__":

@@ -46,7 +46,7 @@ while true; do
     $JD/skypluto-ctl >> /tmp/ctl.log 2>&1
     rc=$?
     t1=$(cut -d. -f1 /proc/uptime)
-    echo "uptime $(cut -d. -f1 /proc/uptime) s: skypluto-ctl beeindigd (rc $rc na $((t1 - t0)) s): herstart" >> /tmp/ctl.log
+    echo "uptime $(cut -d. -f1 /proc/uptime) s: skypluto-ctl ended (rc $rc after $((t1 - t0)) s): restarting" >> /tmp/ctl.log
     echo "uptime $(cut -d. -f1 /proc/uptime) s rc=$rc" >> /tmp/ctl_restarts.log
     if [ $((t1 - t0)) -lt 10 ]; then fast=$((fast + 1)); else fast=0; fi
     if [ $fast -ge 5 ]; then sleep 30; else sleep 2; fi
