@@ -337,7 +337,7 @@ static const char WEB_INDEX[] =
 "   else if(k==='sid')s.sid=el.value.toUpperCase();else if(k==='label')s.label=el.value;else if(k==='sls')s.sls=el.checked;\n"
 "   else if(k==='br')s.br=el.value;else if(k==='prot'){s.prot=el.value;if(s.prot[1]==='B'&&s.br%32){s.br=String(Math.max(32,Math.round(s.br/32)*32));}renderMux();}\n"
 "   muxChanged();};\n"
-"  el.onchange=upd;if(el.tagName==='INPUT'&&el.type==='text')el.oninput=upd;});\n"
+"  if(el.tagName==='BUTTON')el.onclick=upd;else el.onchange=upd;if(el.tagName==='INPUT'&&el.type==='text')el.oninput=upd;});\n"
 " drawCU();$('db_undo').disabled=!muxDirty;}\n"
 "function nextPort(){const used=mux.svc.filter(s=>srcKind(s.src)==='zmq').map(s=>+srcArg(s.src));let p=2491;while(used.includes(p))p++;return p;}\n"
 "function nextSid(){const used=mux.svc.map(s=>parseInt(s.sid,16));let v=0x8F01;while(used.includes(v))v++;return v.toString(16).toUpperCase();}\n"
