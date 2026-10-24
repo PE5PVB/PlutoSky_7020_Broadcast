@@ -10,6 +10,6 @@ static uint16_t crc16_msb(const uint8_t *data, size_t len, uint16_t poly, uint16
     return crc;
 }
 
-uint16_t dab_crc16(const uint8_t *data, size_t len){ return (uint16_t)~crc16_msb(data, len, 0x1021u, 0xFFFFu); }
+uint16_t dab_crc16(const uint8_t *data, size_t len) { return (uint16_t)~crc16_msb(data, len, 0x1021u, 0xFFFFu); }
 
-uint16_t dab_firecode(const uint8_t *data9){ return crc16_msb(data9, 9, 0x782Fu, 0x0000u); }
+uint16_t dab_firecode(const uint8_t *data9) { return crc16_msb(data9, 9, 0x782Fu, 0x0000u); }

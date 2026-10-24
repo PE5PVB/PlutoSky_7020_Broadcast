@@ -14,7 +14,14 @@ typedef struct {
     int      overflow; // set when a write did not fit
 } bitwriter;
 
-static inline void bw_init(bitwriter *w, uint8_t *buf, size_t cap){ w->buf = buf; w->cap = cap; w->pos = 0; w->overflow = 0; memset(buf, 0, cap); }
+// start writing at the beginning of buf (cap bytes, cleared here: bw_put only sets the 1 bits)
+static inline void bw_init(bitwriter *w, uint8_t *buf, size_t cap){
+    w->buf = buf;
+    w->cap = cap;
+    w->pos = 0;
+    w->overflow = 0;
+    memset(buf, 0, cap);
+}
 
 // write the n (0..32) least significant bits of v, most significant first
 static inline void bw_put(bitwriter *w, uint32_t v, int n){

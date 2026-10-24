@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Host build (gcc). Cross build for the Pluto later with CC=arm-linux-gnueabihf-gcc.
+# Host build (gcc). Cross build for the Pluto: tools/build_arm.sh (CC = the devkit's arm-linux-gnueabihf-gcc, BUILD=build-arm).
 CC      ?= gcc
 CFLAGS  ?= -O2 -g -Wall -Wextra -std=gnu11
 LDLIBS  += -lm
@@ -34,6 +34,7 @@ $(BUILD):
 	mkdir -p $(BUILD)/out
 
 test: all
+	$(BUILD)/test_mdct
 	$(BUILD)/test_sf $(BUILD)/out
 	$(PY) tests/check_sf.py $(BUILD)/out
 

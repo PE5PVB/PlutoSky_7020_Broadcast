@@ -11,7 +11,7 @@ WELLE=${WELLE:-welle-cli}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
-DLS="PlutoSky DAB+ ketentest: dynamic label over meerdere segmenten"
+DLS="PlutoSky DAB+ chain test: dynamic label over several segments"
 "$HERE/build/dab_tx_file" "$IN" 48000 "$KBPS" "$W/tx.cf32.iq" "PlutoSky Test" "PlutoSky DAB" "$DLS"
 # welle-cli prints its prompt without a newline in front of other messages: cut the prompt out and keep the lines;
 # stdout must be line buffered, or the DLS line is lost when the timeout stops welle-cli

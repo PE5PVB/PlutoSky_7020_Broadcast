@@ -20,7 +20,7 @@ l = sum(0.08 * np.sin(2 * np.pi * f * t) for f in (310, 1020, 3150, 7030))
 r = sum(0.08 * np.sin(2 * np.pi * f * t) for f in (440, 1500, 5000, 11000))
 np.stack([l, r], 1).astype(np.float32).tofile(sys.argv[1])
 EOF
-"$HERE/build/skypluto-dab" -f "$W/in.f32" -o "$W/ph.bin" -p "$PPM" -T "$TONE" -b "$BR" -s "PlutoSky Test" -e "PlutoSky DAB" -d "skypluto-dab simulatie" -v
+"$HERE/build/skypluto-dab" -f "$W/in.f32" -o "$W/ph.bin" -p "$PPM" -T "$TONE" -b "$BR" -s "PlutoSky Test" -e "PlutoSky DAB" -d "skypluto-dab simulation" -v
 python3 - "$W/ph.bin" "$W/tx.cf32.iq" <<EOF
 import sys, numpy as np
 sys.path.insert(0, "$HERE/hdl")

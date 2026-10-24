@@ -19,7 +19,5 @@ int     mp2enc_valid_kbps(int kbps);
 // (X-PAD in transmission order followed by the 2 F-PAD bytes), padlen its length; 0 = no X-PAD (F-PAD 00 00).
 // Writes exactly 3 * kbps bytes to out; returns that number, or -1.
 int     mp2enc_frame(mp2enc *e, const float *pcm, const uint8_t *pad, int padlen, uint8_t *out);
-// bytes at the end of a frame that are not audio (ScF-CRC + F-PAD), so that the caller can size the X-PAD
-int     mp2enc_tail_bytes(const mp2enc *e);
 
 #endif
