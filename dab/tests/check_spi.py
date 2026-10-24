@@ -10,7 +10,9 @@
                                              (EN 300 401 7.4), reassemble the MSC data groups (5.3.3, CRC) per application,
                                              the MOT directory carousel (EN 301 234 7.2) on X-PAD application types 16/17 and
                                              the slideshow on 12/13 (header mode), the DLS on 2/3; compare the received
-                                             objects with the files, decode them, and report the timing
+                                             objects with the files, decode them, and report the timing;
+                                             SPI_DG_DUMP=<file> also writes the SPI data groups (2-byte length + group),
+                                             e.g. for a check with another receiver's MOT/SPI decoder
 
 Exit status 0 when everything checks out.
 """
@@ -535,6 +537,10 @@ def check_pad(pad_path, epg_dir, sls_dir=None, au_per_s=50.0):
         fail('no DLS label')
     # ---- SPI carousel
     spi = asm[16]
+    if os.environ.get('SPI_DG_DUMP'):  # the SPI data groups as received (2-byte length, then the group), for other decoders
+        with open(os.environ['SPI_DG_DUMP'], 'wb') as f:
+            for _, dg in spi.groups:
+                f.write(len(dg).to_bytes(2, 'big') + dg)
     if spi.bad:
         fail('SPI: %d data group starts without a valid length indicator' % spi.bad)
     ents = reassemble(spi.groups, (4, 6))
