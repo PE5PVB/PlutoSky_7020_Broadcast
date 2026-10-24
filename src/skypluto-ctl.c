@@ -2807,7 +2807,8 @@ static void handle(char *line){
     if (cmd[0] == '?'){
         // ?MUX: the layout on one line, fields separated by '|':
         //   eid=<hex>|lab=<ensemble label>|cu=<used>|n=<services>|1=<service 1>|2=...
-        // with each service as in the layout file: source;SId;label;kbit/s;protection;slideshow;codec (codec aac or mp2)
+        // with each service as in the layout file: source;SId;label;kbit/s;protection;slideshow;codec;pty (codec aac or mp2,
+        // pty = programme type 0..31, 0 = none)
         if (!strcmp(cmd, "?MUX")){
             static const char *const pr[9] = { "", "1A", "2A", "3A", "4A", "1B", "2B", "3B", "4B" };
             static char rb[900];
@@ -2821,8 +2822,8 @@ static void handle(char *line){
                     snprintf(src, sizeof src, "tone:%d", s->tone_hz);
                 else
                     snprintf(src, sizeof src, "i2s");
-                n += snprintf(rb + n, sizeof rb - (size_t)n, "|%d=%s;%04X;%s;%d;%s;%d;%s", i + 1, src, s->sid, s->label, s->kbps,
-                              pr[(s->prot >= 1 && s->prot <= 8) ? s->prot : 3], s->sls, s->mp2 ? "mp2" : "aac");
+                n += snprintf(rb + n, sizeof rb - (size_t)n, "|%d=%s;%04X;%s;%d;%s;%d;%s;%d", i + 1, src, s->sid, s->label,
+                              s->kbps, pr[(s->prot >= 1 && s->prot <= 8) ? s->prot : 3], s->sls, s->mp2 ? "mp2" : "aac", s->pty);
             }
             snprintf(rb + n, sizeof rb - (size_t)n, "\n");
             tx_str(rb);
@@ -3338,6 +3339,7 @@ static void handle(char *line){
                 tb_set_now(dab_tb_fm);
             alc_reset(ALC_SETTLE);
             mask_next = mono() + 4.0;
+            rfdc_lo = 0;  // back to FM: redo the RX DC offset calibration at the next tune (see M FM)
             fprintf(stderr, "   -> F %lld outside Band III: FM mode\n", hz);
             fflush(stderr);
         }
@@ -3907,6 +3909,9 @@ static void handle(char *line){
                     tb_set_now(dab_tb_fm);
                 alc_reset(ALC_SETTLE);
                 mask_next = mono() + 4.0;
+                // the mask monitor measures on RX2 again: redo its RF DC offset calibration at the next tune even when the
+                // LO moved less than 100 MHz (Band III -> Band II is ~70 MHz; the stale DC offset rejected every capture)
+                rfdc_lo = 0;
                 fprintf(stderr, "   -> FM mode\n");
                 fflush(stderr);
             }
@@ -4015,8 +4020,11 @@ static void handle(char *line){
     //   MXA <svc>            add a service
     //   MXS <n> <svc>        replace service n
     //   MXD <n>              remove service n
-    // <svc> = source;SId;label;kbit/s;protection;slideshow[;codec] as in ?MUX (source i2s, tone:<Hz> or zmq:<port>).
-    // A ZeroMQ service keeps the bitrate its sender uses.
+    //   DPT <0..31>          programme type (FIG 0/17) of the service encoded here, 0 = none; on the air without a reconfiguration
+    // <svc> = source;SId;label;kbit/s;protection;slideshow[;codec[;pty]] as in ?MUX (source i2s, tone:<Hz> or zmq:<port>).
+    // A ZeroMQ service keeps the bitrate its sender uses; for zmq: the kbit/s and codec may be '-' (from the stream: until
+    // data arrives the stored bitrate of that port, or 96 for a new port; the codec of a ZeroMQ service is always DAB+).
+    // A change of only labels, slideshow flags or programme types goes on the air without a reconfiguration.
     // Answers OK, or ERR range when the result would not be a valid layout (CU, SId taken, two local services,
     // bitrate/codec ...).
     if (!strcmp(cmd, "DSN")){
@@ -4025,15 +4033,15 @@ static void handle(char *line){
         tx_str(r ? "ERR range\n" : "OK\n");
         return;
     }
-    if (!strcmp(cmd, "DSS") || !strcmp(cmd, "DPR") || !strcmp(cmd, "DEI") || !strcmp(cmd, "MXA") || !strcmp(cmd, "MXS") ||
-        !strcmp(cmd, "MXD")){
+    if (!strcmp(cmd, "DSS") || !strcmp(cmd, "DPR") || !strcmp(cmd, "DEI") || !strcmp(cmd, "DPT") || !strcmp(cmd, "MXA") ||
+        !strcmp(cmd, "MXS") || !strcmp(cmd, "MXD")){
         char txt[4096], nt[4300], err[160];
         mux_conf c;
         if (mux_format(&dmux, txt, sizeof txt) < 0){
             tx_str("ERR range\n");
             return;
         }
-        if (!strcmp(cmd, "DSS") || !strcmp(cmd, "DPR") || !strcmp(cmd, "DEI")){
+        if (!strcmp(cmd, "DSS") || !strcmp(cmd, "DPR") || !strcmp(cmd, "DEI") || !strcmp(cmd, "DPT")){
             c = dmux;
             int li = mux_local(&c);
             if (!strcmp(cmd, "DEI")){
@@ -4053,6 +4061,14 @@ static void handle(char *line){
                     return;
                 }
                 c.s[li].sls = arg[0] == '1';
+            } else if (!strcmp(cmd, "DPT")){
+                char *e;
+                long v = strtol(arg, &e, 10);
+                if (e == arg || *e || v < 0 || v > 31){
+                    tx_str("ERR range\n");
+                    return;
+                }
+                c.s[li].pty = (int)v;
             } else {
                 static const char *const pr[9] = { "", "1A", "2A", "3A", "4A", "1B", "2B", "3B", "4B" };
                 int p = 0;
@@ -4085,6 +4101,26 @@ static void handle(char *line){
             if (strcmp(cmd, "MXD") && (!*spec || strchr(spec, '\n') || strchr(spec, '|'))){
                 tx_str("ERR range\n");
                 return;
+            }
+            // zmq:<port> with kbit/s '-' or empty: the bitrate stored for that port, or 96 for a new one (the stream's own
+            // bitrate takes over when its data arrives, see dab_follow_streams)
+            char spec2[200];
+            if (strcmp(cmd, "MXD") && !strncmp(spec, "zmq:", 4) && strlen(spec) < sizeof spec2 - 8){
+                const char *f3 = spec;
+                for (int f = 0; f < 3 && f3; f++){
+                    f3 = strchr(f3, ';');
+                    if (f3)
+                        f3++;
+                }
+                if (f3 && (*f3 == ';' || (f3[0] == '-' && (f3[1] == ';' || !f3[1])))){
+                    int port = atoi(spec + 4), kb = 96;
+                    for (int j = 0; j < dmux.n; j++)
+                        if (dmux.s[j].src == MUX_SRC_ZMQ && dmux.s[j].port == port)
+                            kb = dmux.s[j].kbps;
+                    const char *rest = (*f3 == '-') ? f3 + 1 : f3;
+                    snprintf(spec2, sizeof spec2, "%.*s%d%s", (int)(f3 - spec), spec, kb, rest);
+                    spec = spec2;
+                }
             }
             int k = 0, svc = 0;
             nt[0] = 0;

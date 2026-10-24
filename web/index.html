@@ -625,7 +625,7 @@ function parseMux(t){
   const k=l.slice(0,i),v=l.slice(i+1);
   if(k==='svc'){
    const f=v.split(';');
-   m.svc.push({src:f[0]||'i2s',sid:f[1]||'',label:f[2]||'',br:f[3]||'96',prot:(f[4]||'3A').toUpperCase(),sls:f[5]==='1',mp2:f[6]==='mp2'});
+   m.svc.push({src:f[0]||'i2s',sid:f[1]||'',label:f[2]||'',br:f[3]||'96',prot:(f[4]||'3A').toUpperCase(),sls:f[5]==='1',mp2:f[6]==='mp2',pty:+(f[7]||0)});
   }
   else m[k]=v;
  });
@@ -633,7 +633,7 @@ function parseMux(t){
 }
 function fmtMux(m){
  let t='eid='+m.eid+'\nlabel='+m.label+'\necc='+m.ecc+'\nlto='+m.lto+'\n';
- m.svc.forEach(s=>{t+='svc='+s.src+';'+s.sid+';'+s.label+';'+s.br+';'+s.prot+';'+(s.sls?1:0)+(s.mp2?';mp2':'')+'\n';});
+ m.svc.forEach(s=>{t+='svc='+s.src+';'+s.sid+';'+s.label+';'+s.br+';'+s.prot+';'+(s.sls?1:0)+(s.pty>0?';'+(s.mp2?'mp2':'aac')+';'+s.pty:(s.mp2?';mp2':''))+'\n';});
  return t;
 }
 function srcKind(s){return s.startsWith('zmq:')?'zmq':s.startsWith('tone:')?'tone':'i2s';}

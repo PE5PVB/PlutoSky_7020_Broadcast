@@ -225,6 +225,23 @@ static void build_figs(dab_mod *m){
             f[0] = (uint8_t)((0 << 5) | (p - 1));
             fig_add(m, f, p);
         }
+    // FIG 0/17 programme type (EN 300 401 8.1.5): per service SId, S/D = 1 (dynamic: it may change), international code
+    for (int i = 0; i < e->nsvc;){
+        p = 0;
+        f[p++] = 0;
+        f[p++] = 0x11; // C/N=0 OE=0 P/D=0, extension 17
+        for (; i < e->nsvc && p + 4 <= 30; i++){
+            if (e->svc[i].pty <= 0 || e->svc[i].pty > 31) continue;
+            f[p++] = (uint8_t)(e->svc[i].sid >> 8);
+            f[p++] = (uint8_t)e->svc[i].sid;
+            f[p++] = 0x80;                          // S/D = 1, rfa, rfu
+            f[p++] = (uint8_t)(e->svc[i].pty & 0x1F);
+        }
+        if (p > 2){
+            f[0] = (uint8_t)((0 << 5) | (p - 1));
+            fig_add(m, f, p);
+        }
+    }
     if (m->change_at >= 0){ // announced reconfiguration: the next organisation as well
         if (m->change_flags & 1) figs_subch(m, m->next_sc, m->next_ens.nsvc, 1);
         if (m->change_flags & 2){
@@ -563,6 +580,7 @@ int dab_mod_set_meta(dab_mod *m, const dab_ensemble *e){
     for (int i = 0; i < e->nsvc; i++){
         snprintf(m->ens.svc[i].label, sizeof m->ens.svc[i].label, "%s", e->svc[i].label);
         m->ens.svc[i].sls = e->svc[i].sls;
+        m->ens.svc[i].pty = e->svc[i].pty;
     }
     build_figs(m);
     return 0;

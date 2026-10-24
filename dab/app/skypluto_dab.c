@@ -224,9 +224,10 @@ static void mux_to_ens(const mux_conf *c, dab_ensemble *e){
         e->svc[i].prot_level = c->s[i].prot;
         e->svc[i].sls = c->s[i].sls;
         e->svc[i].mp2 = c->s[i].mp2;
+        e->svc[i].pty = c->s[i].pty;
     }
 }
-// the same services in the same sub-channels (only labels, slideshow flags or the test tone differ)
+// the same services in the same sub-channels (only labels, slideshow flags, programme types or the test tone differ)
 static int same_structure(const mux_conf *a, const mux_conf *b){
     if (a->n != b->n) return 0;
     for (int i = 0; i < a->n; i++){

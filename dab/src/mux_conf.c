@@ -88,10 +88,10 @@ int mux_parse(const char *text, mux_conf *c, char *err, size_t errlen){
             snprintf(c->label, sizeof c->label, "%s", val);
         } else if (!strcmp(key, "svc")){
             if (c->n >= MUX_MAX_SVC) FAIL("at most %d services", MUX_MAX_SVC);
-            char f[7][40];
+            char f[8][40];
             int nf = 0;
             const char *q = val;
-            while (nf < 7){
+            while (nf < 8){
                 size_t m = strcspn(q, ";");
                 if (m >= sizeof f[0]) FAIL("line %d: field too long", lineno);
                 memcpy(f[nf], q, m);
@@ -101,7 +101,7 @@ int mux_parse(const char *text, mux_conf *c, char *err, size_t errlen){
                 if (*q != ';') break;
                 q++;
             }
-            if (nf != 6 && nf != 7) FAIL("line %d: svc=source;SId;label;kbit/s;protection;slideshow[;codec]", lineno);
+            if (nf < 6) FAIL("line %d: svc=source;SId;label;kbit/s;protection;slideshow[;codec[;pty]]", lineno);
             mux_service *s = &c->s[c->n];
             if (!strcmp(f[0], "i2s")) s->src = MUX_SRC_I2S;
             else if (!strncmp(f[0], "tone:", 5)){
@@ -122,8 +122,15 @@ int mux_parse(const char *text, mux_conf *c, char *err, size_t errlen){
             s->prot = parse_prot(f[4]);
             s->sls = atoi(f[5]) ? 1 : 0;
             if (!s->prot) FAIL("service %d: protection 1A..4A or 1B..4B", c->n + 1);
-            if (nf == 7 && strcmp(f[6], "aac") && strcmp(f[6], "mp2")) FAIL("service %d: codec aac or mp2", c->n + 1);
-            s->mp2 = nf == 7 && !strcmp(f[6], "mp2");
+            const char *codec = nf >= 7 ? f[6] : "";
+            if (*codec && strcmp(codec, "-") && strcmp(codec, "aac") && strcmp(codec, "mp2"))
+                FAIL("service %d: codec aac or mp2", c->n + 1);
+            s->mp2 = !strcmp(codec, "mp2");
+            s->pty = 0;
+            if (nf == 8 && f[7][0]){
+                s->pty = (int)strtol(f[7], &e, 10);
+                if (*e || s->pty < 0 || s->pty > 31) FAIL("service %d: programme type 0..31", c->n + 1);
+            }
             if (s->mp2 && s->src == MUX_SRC_ZMQ)
                 FAIL("service %d: a ZeroMQ service is DAB+ (AAC); MP2 is only for the service encoded here", c->n + 1);
             if (s->mp2 && s->kbps != 112 && s->kbps != 128 && s->kbps != 160 && s->kbps != 192)
@@ -174,8 +181,13 @@ int mux_format(const mux_conf *c, char *out, size_t outlen){
         if (s->src == MUX_SRC_ZMQ) snprintf(src, sizeof src, "zmq:%d", s->port);
         else if (s->src == MUX_SRC_TONE) snprintf(src, sizeof src, "tone:%d", s->tone_hz);
         else snprintf(src, sizeof src, "i2s");
+        char tail[16] = "";
+        if (s->pty > 0)
+            snprintf(tail, sizeof tail, ";%s;%d", s->mp2 ? "mp2" : "aac", s->pty);
+        else if (s->mp2)
+            snprintf(tail, sizeof tail, ";mp2");
         r = snprintf(out + n, outlen - n, "svc=%s;%04X;%s;%d;%s;%d%s\n", src, s->sid, s->label, s->kbps,
-                     pr[(s->prot >= 1 && s->prot <= 8) ? s->prot : 3], s->sls, s->mp2 ? ";mp2" : "");
+                     pr[(s->prot >= 1 && s->prot <= 8) ? s->prot : 3], s->sls, tail);
         if (r < 0 || (size_t)r >= outlen - n) return -1;
         n += (size_t)r;
     }

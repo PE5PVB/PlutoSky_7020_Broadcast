@@ -19,6 +19,7 @@ typedef struct {
     int      sls;                          // 1: the PAD carries a MOT slideshow (signalled in FIG 0/13, else radios do not
                                            // show it)
     int      mp2;                          // 1: MPEG-1 Layer II audio (DAB, ASCTy 0) instead of DAB+ (ASCTy 63)
+    int      pty;                          // programme type 0..31 (FIG 0/17, international table), 0 = none
 } dab_service;
 
 typedef struct {
@@ -55,7 +56,7 @@ void     dab_mod_set_phases_only(dab_mod *m, int on);
 // Returns 0, or -1: a change is still pending, or nothing changes, or it does not fit.
 int      dab_mod_reconfigure(dab_mod *m, const dab_ensemble *next, int at_cif);
 int      dab_mod_cif_count(const dab_mod *m);                 // the count of the next CIF pushed (0..4999)
-// labels and slideshow flags of the same services (same order and SIds): at once, no reconfiguration
+// labels, slideshow flags and programme types of the same services (same order and SIds): at once, no reconfiguration
 int      dab_mod_set_meta(dab_mod *m, const dab_ensemble *e);
 // capacity units used by the sub-channels (of 864)
 int      dab_mod_cu_used(const dab_mod *m);
