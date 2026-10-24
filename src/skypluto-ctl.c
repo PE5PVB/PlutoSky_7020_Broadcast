@@ -1513,7 +1513,11 @@ static void handle(char *line){
             tx_str(rb); return;
         }
         if (!strcmp(cmd,"?DAB")){
-            if (!dab_mode){ tx_str("m=FM\n"); return; }
+            if (!dab_mode){                                   // FM: the layout's bitrate and codec of the service encoded here, for the encoder's menus
+                int li = mux_local(&dmux); char rb[64];
+                if (li < 0) snprintf(rb, sizeof rb, "m=FM\n"); else snprintf(rb, sizeof rb, "m=FM br=%d cod=%s\n", dmux.s[li].kbps, dmux.s[li].mp2 ? "mp2" : "aac");
+                tx_str(rb); return;
+            }
             char sl[700] = ""; FILE *sf = fopen(DAB_STATUS, "r");
             if (sf){ if (!fgets(sl, sizeof sl, sf)) sl[0] = 0; fclose(sf); }
             sl[strcspn(sl, "\r\n")] = 0;
