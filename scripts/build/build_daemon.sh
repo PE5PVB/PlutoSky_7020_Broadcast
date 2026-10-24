@@ -15,7 +15,7 @@ mkdir -p "$OUT"
 for f in skypluto-ctl.c skypluto-mask.c web_index.h; do tr -d '\r' < "$HERE/src/$f" > "$OUT/$f"; done
 # the DAB multiplex layout and the EPG planner + SPI encoder, shared with skypluto-dab
 for f in mux_conf.c mux_conf.h epg_plan.c epg_plan.h dab_spi.c dab_spi.h; do tr -d '\r' < "$HERE/dab/src/$f" > "$OUT/$f"; done
-$GCC -O2 -Wall -Wno-unused-variable -o "$OUT/skypluto-ctl" "$OUT/skypluto-ctl.c" "$OUT/mux_conf.c" "$OUT/epg_plan.c" "$OUT/dab_spi.c" -lm -lpthread
-$GCC -O3 -mcpu=cortex-a9 -mfpu=neon -ffast-math -Wall -o "$OUT/skypluto-mask" "$OUT/skypluto-mask.c" -lm -lpthread
+$GCC -O2 -s -Wall -Wno-unused-variable -o "$OUT/skypluto-ctl" "$OUT/skypluto-ctl.c" "$OUT/mux_conf.c" "$OUT/epg_plan.c" "$OUT/dab_spi.c" -lm -lpthread
+$GCC -O3 -s -mcpu=cortex-a9 -mfpu=neon -ffast-math -Wall -o "$OUT/skypluto-mask" "$OUT/skypluto-mask.c" -lm -lpthread
 ls -l "$OUT/skypluto-ctl" "$OUT/skypluto-mask"
 md5sum "$OUT/skypluto-ctl" "$OUT/skypluto-mask"

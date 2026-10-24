@@ -11,7 +11,7 @@ PY      ?= python3
 all: $(BUILD)/test_sf $(BUILD)/test_spi $(BUILD)/test_mdct $(BUILD)/enc_file $(BUILD)/dab_tx_file $(BUILD)/skypluto-dab
 
 $(BUILD)/skypluto-dab: app/skypluto_dab.c $(wildcard src/*.h) $(OBJ) | $(BUILD)
-	$(CC) $(CFLAGS) $(filter %.c %.o,$^) -o $@ $(LDLIBS) -lpthread
+	$(CC) $(CFLAGS) $(LDFLAGS) $(filter %.c %.o,$^) -o $@ $(LDLIBS) -lpthread
 
 $(BUILD)/dab_tx_file: tests/dab_tx_file.c $(OBJ) | $(BUILD)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
