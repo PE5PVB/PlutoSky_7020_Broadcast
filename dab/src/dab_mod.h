@@ -16,6 +16,7 @@ typedef struct {
     int      prot_level;                   // 1..4 = EEP-1A..4A (3A = rate 1/2, the usual one), 5..8 = EEP-1B..4B (bitrate a multiple of 32)
     int      pty;                          // programme type (0 = none)
     int      sls;                          // 1: the PAD carries a MOT slideshow (signalled in FIG 0/13, else radios do not show it)
+    int      mp2;                          // 1: MPEG-1 Layer II audio (DAB, ASCTy 0) instead of DAB+ (ASCTy 63)
 } dab_service;
 
 typedef struct {

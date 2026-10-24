@@ -126,6 +126,7 @@ static void rs_run(float *out, int n, double ratio){
 }
 
 // ---- DLS from a file (re-read when it changes) ---------------------------------------------------------------------------------
+static char g_dls_text[129];               // the current DLS, for a new encoder after a change of codec
 static void dls_poll(dabplus_enc *enc){
     static struct timespec last; static int have = 0;
     struct stat st;
@@ -134,7 +135,7 @@ static void dls_poll(dabplus_enc *enc){
     FILE *f = fopen(o_dlsfile, "rb"); if (!f) return;
     char buf[129]; size_t n = fread(buf, 1, 128, f); fclose(f); buf[n] = 0;
     while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
-    dabplus_enc_set_dls(enc, buf, 15);
+    dabplus_enc_set_dls(enc, buf, 15); snprintf(g_dls_text, sizeof g_dls_text, "%s", buf);
     last = st.st_mtim; have = 1;
     if (o_verbose) fprintf(stderr, "DLS: %s\n", buf);
 }
@@ -178,7 +179,7 @@ static void mux_to_ens(const mux_conf *c, dab_ensemble *e){
     e->nsvc = c->n;
     for (int i = 0; i < c->n; i++){
         e->svc[i].sid = (uint16_t)c->s[i].sid; snprintf(e->svc[i].label, sizeof e->svc[i].label, "%s", c->s[i].label);
-        e->svc[i].bitrate = c->s[i].kbps; e->svc[i].prot_level = c->s[i].prot; e->svc[i].sls = c->s[i].sls;
+        e->svc[i].bitrate = c->s[i].kbps; e->svc[i].prot_level = c->s[i].prot; e->svc[i].sls = c->s[i].sls; e->svc[i].mp2 = c->s[i].mp2;
     }
 }
 // the same services in the same sub-channels (only labels, slideshow flags or the test tone differ)
@@ -186,7 +187,7 @@ static int same_structure(const mux_conf *a, const mux_conf *b){
     if (a->n != b->n) return 0;
     for (int i = 0; i < a->n; i++){
         const mux_service *x = &a->s[i], *y = &b->s[i];
-        if (x->src != y->src || x->port != y->port || x->sid != y->sid || x->kbps != y->kbps || x->prot != y->prot) return 0;
+        if (x->src != y->src || x->port != y->port || x->sid != y->sid || x->kbps != y->kbps || x->prot != y->prot || x->mp2 != y->mp2) return 0;
     }
     return 1;
 }
@@ -205,9 +206,17 @@ static void silent_superframe(int kbps, uint8_t *out){
     else memset(out, 0, (size_t)(120 * kbps / 8));
     dabplus_enc_close(e); free(z);
 }
-// the encoder of the service encoded here, at its bitrate
-static int local_encoder(int kbps){
-    if (!g_enc){ g_cfg = (dabplus_cfg){ kbps, 1, 0, 0, 1 }; g_enc = dabplus_enc_open(&g_cfg, 0); if (o_dls && g_enc) dabplus_enc_set_dls(g_enc, o_dls, 15); return g_enc ? 0 : -1; }
+// the encoder of the service encoded here, at its bitrate and codec (AAC for DAB+, MPEG-1 Layer II for DAB); a change of codec makes a
+// new encoder, which takes over the DLS (a slide being sent starts again with the next one)
+static int local_encoder(int kbps, int mp2){
+    if (g_enc && dabplus_enc_is_mp2(g_enc) != mp2){ dabplus_enc_close(g_enc); g_enc = NULL; }
+    if (!g_enc){
+        g_cfg = (dabplus_cfg){ kbps, 1, 0, 0, 1 };
+        g_enc = mp2 ? dabplus_enc_open_mp2(kbps) : dabplus_enc_open(&g_cfg, 0);
+        if (!g_enc) return -1;
+        if (g_dls_text[0]) dabplus_enc_set_dls(g_enc, g_dls_text, 15); else if (o_dls) dabplus_enc_set_dls(g_enc, o_dls, 15);
+        return 0;
+    }
     if (g_cfg.bitrate_kbps == kbps) return 0;
     if (dabplus_enc_set_bitrate(g_enc, kbps)) return -1;
     g_cfg.bitrate_kbps = kbps; return 0;
@@ -271,7 +280,7 @@ static void log_mux(const char *what, const mux_conf *c){
     static const char *const pr[9] = { "", "1A", "2A", "3A", "4A", "1B", "2B", "3B", "4B" };
     for (int i = 0; i < c->n; i++){
         const mux_service *s = &c->s[i];
-        fprintf(stderr, "    %d: %04X \"%s\" %d kbit/s %s%s, ", i + 1, s->sid, s->label, s->kbps, pr[s->prot], s->sls ? " slideshow" : "");
+        fprintf(stderr, "    %d: %04X \"%s\" %d kbit/s %s%s%s, ", i + 1, s->sid, s->label, s->kbps, pr[s->prot], s->mp2 ? " MP2" : "", s->sls ? " slideshow" : "");
         if (s->src == MUX_SRC_ZMQ) fprintf(stderr, "ZeroMQ port %d\n", s->port);
         else if (s->src == MUX_SRC_TONE) fprintf(stderr, "test tone %d Hz\n", s->tone_hz);
         else fprintf(stderr, "I2S input\n");
@@ -320,7 +329,7 @@ static void apply_switch(void){
     g_mux = g_next;
     pthread_mutex_unlock(&g_rt_lock);
     int nl = mux_local(&g_mux);
-    if (nl >= 0 && local_encoder(g_mux.s[nl].kbps)) fprintf(stderr, "the local encoder could not change to %d kbit/s\n", g_mux.s[nl].kbps);
+    if (nl >= 0 && local_encoder(g_mux.s[nl].kbps, g_mux.s[nl].mp2)) fprintf(stderr, "the local encoder could not change to %d kbit/s %s\n", g_mux.s[nl].kbps, g_mux.s[nl].mp2 ? "MP2" : "AAC");
     g_local = nl; g_tone = tone_of(&g_mux, g_local); g_chg_cif = -1;
     log_mux("reconfiguration done", &g_mux);
 }
@@ -551,7 +560,7 @@ int main(int argc, char **argv){
         }
     }
     g_local = mux_local(&g_mux); g_tone = tone_of(&g_mux, g_local);
-    if (g_local >= 0 && local_encoder(g_mux.s[g_local].kbps)){ fprintf(stderr, "encoder: bad configuration\n"); return 2; }
+    if (g_local >= 0 && local_encoder(g_mux.s[g_local].kbps, g_mux.s[g_local].mp2)){ fprintf(stderr, "encoder: bad configuration\n"); return 2; }
     for (int i = 0; i < g_mux.n; i++) if (g_mux.s[i].src == MUX_SRC_ZMQ && !g_rt[i].x) g_rt[i].x = open_stream(&g_mux.s[i]);
     dab_ensemble ens; mux_to_ens(&g_mux, &ens);
     g_mod = dab_mod_open(&ens);

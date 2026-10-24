@@ -10,6 +10,10 @@ typedef struct dabplus_enc dabplus_enc;
 
 // cfg->sbr and cfg->ps must be 0 (AAC-LC); bandwidth_hz <= 0 picks a default for the bitrate
 dabplus_enc *dabplus_enc_open(const dabplus_cfg *cfg, int bandwidth_hz);
+// the same encoder interface for DAB (MPEG-1 Layer II, 48 kHz stereo, 112..192 kbit/s): a "super frame" is then 5 MP2 frames
+// (120 ms, 15 x kbit/s bytes), with the same PAD (DLS, slideshow). dabplus_enc_last_aus() and dabplus_enc_asc() do not apply.
+dabplus_enc *dabplus_enc_open_mp2(int kbps);
+int          dabplus_enc_is_mp2(const dabplus_enc *e);
 void         dabplus_enc_close(dabplus_enc *e);
 // another bitrate from the next super frame on (a fresh AAC encoder: the first frame after it starts from silence). 0 = ok.
 int          dabplus_enc_set_bitrate(dabplus_enc *e, int kbps);

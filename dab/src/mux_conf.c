@@ -50,9 +50,9 @@ int mux_parse(const char *text, mux_conf *c, char *err, size_t errlen){
         else if (!strcmp(key, "label")){ if (!label_ok(val)) FAIL("ensemble label: 1..16 printable characters"); snprintf(c->label, sizeof c->label, "%s", val); }
         else if (!strcmp(key, "svc")){
             if (c->n >= MUX_MAX_SVC) FAIL("at most %d services", MUX_MAX_SVC);
-            char f[6][40]; int nf = 0; const char *q = val;
-            while (nf < 6){ size_t m = strcspn(q, ";"); if (m >= sizeof f[0]) FAIL("line %d: field too long", lineno); memcpy(f[nf], q, m); f[nf][m] = 0; nf++; q += m; if (*q != ';') break; q++; }
-            if (nf != 6) FAIL("line %d: svc=source;SId;label;kbit/s;protection;slideshow", lineno);
+            char f[7][40]; int nf = 0; const char *q = val;
+            while (nf < 7){ size_t m = strcspn(q, ";"); if (m >= sizeof f[0]) FAIL("line %d: field too long", lineno); memcpy(f[nf], q, m); f[nf][m] = 0; nf++; q += m; if (*q != ';') break; q++; }
+            if (nf != 6 && nf != 7) FAIL("line %d: svc=source;SId;label;kbit/s;protection;slideshow[;codec]", lineno);
             mux_service *s = &c->s[c->n];
             if (!strcmp(f[0], "i2s")) s->src = MUX_SRC_I2S;
             else if (!strncmp(f[0], "tone:", 5)){ s->src = MUX_SRC_TONE; s->tone_hz = atoi(f[0] + 5); if (s->tone_hz < 20 || s->tone_hz > 10000) FAIL("service %d: tone 20..10000 Hz", c->n + 1); }
@@ -64,6 +64,10 @@ int mux_parse(const char *text, mux_conf *c, char *err, size_t errlen){
             snprintf(s->label, sizeof s->label, "%s", f[2]);
             s->kbps = atoi(f[3]); s->prot = parse_prot(f[4]); s->sls = atoi(f[5]) ? 1 : 0;
             if (!s->prot) FAIL("service %d: protection 1A..4A or 1B..4B", c->n + 1);
+            if (nf == 7 && strcmp(f[6], "aac") && strcmp(f[6], "mp2")) FAIL("service %d: codec aac or mp2", c->n + 1);
+            s->mp2 = nf == 7 && !strcmp(f[6], "mp2");
+            if (s->mp2 && s->src == MUX_SRC_ZMQ) FAIL("service %d: a ZeroMQ service is DAB+ (AAC); MP2 is only for the service encoded here", c->n + 1);
+            if (s->mp2 && s->kbps != 112 && s->kbps != 128 && s->kbps != 160 && s->kbps != 192) FAIL("service %d: MP2 stereo takes 112, 128, 160 or 192 kbit/s", c->n + 1);
             if (s->kbps > 192 || mux_cu(s->kbps, s->prot) < 0) FAIL("service %d: %d kbit/s is not possible with %s (8..192, %s)", c->n + 1, s->kbps, f[4], s->prot > 4 ? "multiple of 32 for EEP-B" : "multiple of 8");
             c->n++;
         } else FAIL("line %d: unknown key '%s'", lineno, key);
@@ -101,7 +105,8 @@ int mux_format(const mux_conf *c, char *out, size_t outlen){
         if (s->src == MUX_SRC_ZMQ) snprintf(src, sizeof src, "zmq:%d", s->port);
         else if (s->src == MUX_SRC_TONE) snprintf(src, sizeof src, "tone:%d", s->tone_hz);
         else snprintf(src, sizeof src, "i2s");
-        r = snprintf(out + n, outlen - n, "svc=%s;%04X;%s;%d;%s;%d\n", src, s->sid, s->label, s->kbps, pr[(s->prot >= 1 && s->prot <= 8) ? s->prot : 3], s->sls);
+        r = snprintf(out + n, outlen - n, "svc=%s;%04X;%s;%d;%s;%d%s\n", src, s->sid, s->label, s->kbps, pr[(s->prot >= 1 && s->prot <= 8) ? s->prot : 3], s->sls,
+                     s->mp2 ? ";mp2" : "");
         if (r < 0 || (size_t)r >= outlen - n) return -1;
         n += (size_t)r;
     }

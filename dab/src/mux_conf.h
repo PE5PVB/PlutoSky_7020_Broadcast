@@ -6,10 +6,11 @@
 //   ecc=E3                           extended country code (hex)
 //   lto=2                            local time offset in half hours
 //   svc=i2s;8F01;PicoAudio;192;3A;0              one line per service, in sub-channel order:
-//   svc=zmq:2491;8F02;MPB RADIO 1;128;3A;1         source;SId;label;kbit/s;protection;slideshow
+//   svc=zmq:2491;8F02;MPB RADIO 1;128;3A;1         source;SId;label;kbit/s;protection;slideshow[;codec]
 //
 // source: i2s (the stereo I2S input, encoded here), tone:<Hz> (a test tone, encoded here), zmq:<port> (DAB+ super frames from
 // ODR-AudioEnc over ZeroMQ, passed on unchanged). At most one service is encoded here (i2s or tone).
+// codec (optional, only for the service encoded here): aac (DAB+, the default) or mp2 (DAB, MPEG-1 Layer II, 112..192 kbit/s).
 // protection: 1A..4A (EEP-A, any multiple of 8 kbit/s) or 1B..4B (EEP-B, multiples of 32 kbit/s). Capacity: 864 CU.
 #ifndef MUX_CONF_H
 #define MUX_CONF_H
@@ -25,6 +26,7 @@ typedef struct {
     char label[17];
     int kbps, prot;            // prot 1..4 = EEP-1A..4A, 5..8 = EEP-1B..4B
     int sls;
+    int mp2;                   // 1: encoded as MPEG-1 Layer II (DAB) instead of AAC (DAB+)
 } mux_service;
 
 typedef struct {

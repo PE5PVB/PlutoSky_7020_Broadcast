@@ -121,7 +121,7 @@ static void figs_subch(dab_mod *m, const subch *sc, int nsvc, int cn){
         f[0] = (uint8_t)((0 << 5) | (p - 1)); fig_add(m, f, p);
     }
 }
-// FIG 0/2 service organisation: one DAB+ audio component per service
+// FIG 0/2 service organisation: one audio component per service (DAB+ or MPEG-1 Layer II)
 static void figs_service(dab_mod *m, const dab_ensemble *e, int cn){
     uint8_t f[32]; int p;
     for (int i = 0; i < e->nsvc; ){
@@ -129,7 +129,7 @@ static void figs_service(dab_mod *m, const dab_ensemble *e, int cn){
         while (i < e->nsvc && p + 5 <= 30){
             f[p++] = (uint8_t)(e->svc[i].sid >> 8); f[p++] = (uint8_t)e->svc[i].sid;
             f[p++] = 0x01;                                      // local 0, CAId 0, 1 component
-            f[p++] = (uint8_t)((0 << 6) | 63);                  // TMId 00 (MSC stream audio), ASCTy 63 (DAB+)
+            f[p++] = (uint8_t)((0 << 6) | (e->svc[i].mp2 ? 0 : 63));   // TMId 00 (MSC stream audio), ASCTy 63 (DAB+) or 0 (DAB, MPEG-1 Layer II)
             f[p++] = (uint8_t)((i << 2) | 0x02);                // SubChId, primary, no CA
             i++;
         }
@@ -376,7 +376,7 @@ int dab_mod_reconfigure(dab_mod *m, const dab_ensemble *next, int at_cif){
         cu += ns[i].cu_size;
         if (i >= m->ens.nsvc) continue;
         if (ns[i].bitrate != m->sc[i].bitrate || ns[i].prot != m->sc[i].prot || ns[i].cu_start != m->sc[i].cu_start) flags |= 1;
-        if (next->svc[i].sid != m->ens.svc[i].sid) flags |= 2;
+        if (next->svc[i].sid != m->ens.svc[i].sid || next->svc[i].mp2 != m->ens.svc[i].mp2) flags |= 2;   // the codec is in FIG 0/2
     }
     if (cu > 864 || !flags) goto fail;
     memcpy(m->next_sc, ns, sizeof ns); m->next_ens = *next; m->next_cu = cu;

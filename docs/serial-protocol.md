@@ -201,14 +201,15 @@ encoder and builds the multiplex; the FPGA does the OFDM. The DAB settings are n
 |---|---|---|
 | `M FM` / `M DAB` | default `FM` | the mode. `M DAB`: TX bandwidth at least 3 MHz for the session (the FM value comes back with `M FM`), mask monitor, ALC and LO nulling pause (they measure an FM carrier), the program starts and is restarted if it stops. `ERR nobit` = bitstream without DAB, `ERR nodab` = `/mnt/jffs2/skypluto-dab` missing, `ERR band` = the frequency is not in Band III (174–240 MHz; send `F <channel>` first). An `F` outside Band III while in DAB mode switches to FM by itself (an encoder that does not know `M`) |
 | `DBR <kbit/s>` | 32 … 192, multiple of 8 | bitrate of the service encoded on the Pluto (stored in the layout) |
+| `DCO aac` / `DCO mp2` | `aac` | its codec: DAB+ (AAC) or classic DAB (MPEG-1 Audio Layer II, stereo, 112, 128, 160 or 192 kbit/s; `ERR range` when the bitrate does not suit it). Radios without DAB+ play only the latter. Goes through a reconfiguration |
 | `DSV <text>` | 1 … 16 ASCII characters, no `;` | its service label |
 | `DEN <text>` | 1 … 16 ASCII characters, no `;` | the ensemble label |
 | `DSI <hex>` | 4 hex digits, not used by another service | its service identifier |
 | `DLS <text>` | up to 128 bytes, UTF-8 | dynamic label (the successor of RDS RadioText); changes without interruption |
 | `DTN <Hz>` | 0 … 10000; `0` | test tone (left Hz, right 1.5 × Hz, −12 dBFS) instead of the I2S input; `0` = I2S |
-| `?DAB` | | `m=FM`, or `m=DAB br=96 src=i2s run=1 rs=0 fifo=7712 uf=0 rst=0 aud=11600 ppm=+12 sil=0 cpu=31`: `run` program running, `rs` restarts by the daemon, `fifo` OFDM FIFO words (~7700 = full), `uf` underflows, `rst` OFDM restarts, `aud` audio buffer (samples), `ppm` the clock correction toward the I2S source, `sil` super frames sent silent (no audio), `cpu` % of one core; with the slideshow on for the service encoded here also `sls=<slides>/<current>/<1 while being sent>` (the slides are uploaded through the web interface, /mnt/jffs2/sls) |
+| `?DAB` | | `m=FM`, or `m=DAB br=96 cod=aac src=i2s run=1 rs=0 fifo=7712 uf=0 rst=0 aud=11600 ppm=+12 sil=0 cpu=31`: `run` program running, `rs` restarts by the daemon, `fifo` OFDM FIFO words (~7700 = full), `uf` underflows, `rst` OFDM restarts, `aud` audio buffer (samples), `ppm` the clock correction toward the I2S source, `sil` super frames sent silent (no audio), `cpu` % of one core; with the slideshow on for the service encoded here also `sls=<slides>/<current>/<1 while being sent>` (the slides are uploaded through the web interface, /mnt/jffs2/sls) |
 
-In DAB mode label changes (`DSV`, `DEN`, the web interface) take effect at once. Everything else (`DBR`, `DSI`, services added or removed, protection) goes through a multiplex reconfiguration as receivers
+In DAB mode label changes (`DSV`, `DEN`, the web interface) take effect at once. Everything else (`DBR`, `DCO`, `DSI`, services added or removed, protection) goes through a multiplex reconfiguration as receivers
 expect it (EN 300 401 6.5): it is announced in the FIC (FIG 0/0 change flags and occurrence, the next sub-channel/service
 organisation with C/N = next) and takes effect 3 s later at a super frame boundary; receivers follow without retuning, with
 a short gap in the audio at the switch. One change at a time: a value sent while one is pending is taken up after it (only
@@ -218,7 +219,9 @@ power of the FM carrier setting, and the DAB ensemble lies about 16 dB below it 
 
 **The multiplex layout.** What goes on the air is one layout, stored in `/mnt/jffs2/dab-mux.conf` and edited in the web
 interface (tab DAB, `GET`/`POST /api/mux`): the ensemble (label, EId) and up to 8 services, each with a source, SId, label,
-bitrate, protection (EEP-1A..4A, or 1B..4B for multiples of 32 kbit/s) and a slideshow flag (FIG 0/13). Sources: `i2s` (the
+bitrate, protection (EEP-1A..4A, or 1B..4B for multiples of 32 kbit/s), a slideshow flag (FIG 0/13) and, for the service encoded
+on the Pluto, the codec (`svc=…;<slideshow>;mp2` for MPEG-1 Layer II, ASCTy 0 in FIG 0/2; AAC/DAB+ when the field is absent). The
+MP2 frames carry the ISO CRC and the DAB end of frame (X-PAD, ScF-CRC left 0, F-PAD) with the same DLS and slideshow as DAB+. Sources: `i2s` (the
 encoder's stereo I2S, encoded on the Pluto), `tone:<Hz>`, or `zmq:<port>`: complete DAB+ super frames (with their PAD) as
 ODR-AudioEnc sends them over ZeroMQ (`odr-audioenc … -o tcp://<pluto>:<port>`; ZMTP 3, NULL security, no CURVE), passed on
 unchanged. At most one service is encoded on the Pluto; the sum must fit in 864 CU. `DBR`, `DSV` and `DSI` change the service

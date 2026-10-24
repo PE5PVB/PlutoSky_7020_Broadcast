@@ -1498,8 +1498,8 @@ static void handle(char *line){
             if (sf){ if (!fgets(sl, sizeof sl, sf)) sl[0] = 0; fclose(sf); }
             sl[strcspn(sl, "\r\n")] = 0;
             int li = mux_local(&dmux); static char rb[800];
-            snprintf(rb, sizeof rb, "m=DAB br=%d src=%s run=%d rs=%d%s%s\n", li >= 0 ? dmux.s[li].kbps : 0, li < 0 ? "none" : (dab_tone || dmux.s[li].src == MUX_SRC_TONE) ? "tone" : "i2s",
-                     dab_pid > 0 && sl[0] ? 1 : 0, dab_restarts, sl[0] ? " " : "", sl);
+            snprintf(rb, sizeof rb, "m=DAB br=%d cod=%s src=%s run=%d rs=%d%s%s\n", li >= 0 ? dmux.s[li].kbps : 0, li >= 0 && dmux.s[li].mp2 ? "mp2" : "aac",
+                     li < 0 ? "none" : (dab_tone || dmux.s[li].src == MUX_SRC_TONE) ? "tone" : "i2s", dab_pid > 0 && sl[0] ? 1 : 0, dab_restarts, sl[0] ? " " : "", sl);
             tx_str(rb); return;
         }
         if (!strcmp(cmd,"?RD")){
@@ -1962,7 +1962,8 @@ static void handle(char *line){
     // DBR <kbit/s> (32..192, multiple of 8, a multiple of 32 with EEP-B), DSV <service label>, DSI <service id, 4 hex digits>: the
     // service encoded here (ERR nolocal when the layout has none); DEN <ensemble label> (1..16 ASCII characters). They change the layout
     // (stored): labels at once, bitrate and SId through an announced reconfiguration. DLS <text> (up to 128 bytes, UTF-8): its dynamic label.
-    if (!strcmp(cmd,"DBR") || !strcmp(cmd,"DSV") || !strcmp(cmd,"DSI") || !strcmp(cmd,"DEN")){
+    // DCO aac|mp2: its codec, DAB+ (AAC) or DAB (MPEG-1 Layer II, 112/128/160/192 kbit/s; ERR range when the bitrate does not suit it).
+    if (!strcmp(cmd,"DBR") || !strcmp(cmd,"DSV") || !strcmp(cmd,"DSI") || !strcmp(cmd,"DEN") || !strcmp(cmd,"DCO")){
         mux_conf c = dmux; int li = mux_local(&c); char err[160];
         if (!strcmp(cmd,"DEN")){
             if (!dab_label_ok(arg)){ tx_str("ERR range\n"); return; }
@@ -1970,6 +1971,7 @@ static void handle(char *line){
         } else {
             if (li < 0){ tx_str("ERR nolocal\n"); return; }
             if (!strcmp(cmd,"DBR")){ int v = atoi(arg); if (v < 32 || v > 192 || v % 8){ tx_str("ERR range\n"); return; } c.s[li].kbps = v; }
+            else if (!strcmp(cmd,"DCO")){ if (strcmp(arg, "aac") && strcmp(arg, "mp2")){ tx_str("ERR range\n"); return; } c.s[li].mp2 = !strcmp(arg, "mp2"); }
             else if (!strcmp(cmd,"DSV")){ if (!dab_label_ok(arg)){ tx_str("ERR range\n"); return; } snprintf(c.s[li].label, sizeof c.s[li].label, "%s", arg); }
             else { char *e; unsigned long v = strtoul(arg, &e, 16); if (e == arg || *e || strlen(arg) != 4 || v == 0){ tx_str("ERR range\n"); return; } c.s[li].sid = (unsigned)v; }
         }
