@@ -8,13 +8,16 @@
 // The transmission runs on the FPGA's sample clock (the AD9361), the audio on the I2S master's clock (the Pico). The two
 // drift apart, so the audio goes through a polyphase resampler whose ratio is steered by the latency of the audio.
 //
-//   skypluto-dab -m mux.conf [-t DLS file] [-S status file] [-g gain 0..3] [-L level] [-T Hz] [-v]
+//   skypluto-dab -m mux.conf [-t DLS file] [-P slideshow dir] [-S status file] [-g gain 0..3] [-L level] [-T Hz] [-v]
 //   -m file: the multiplex layout, re-read when it changes: labels at once, everything else (services added or removed,
 //            bitrate, protection, SId, source) through an announced multiplex reconfiguration ~3 s later, so receivers follow
 //            without retuning; a service that keeps SId, bitrate and protection runs on without a gap
 //   skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-i service id] [-x outside.conf] ...   (one service, no layout file)
 //   -t file: the DLS of the service encoded here (re-read when it changes)
-//   -S file: a status line once a second (fifo= uf= rst= aud= ppm= sil= cpu= and z<i>= per outside service), read by skypluto-ctl
+//   -P dir:  the slideshow of the service encoded here: images 1.jpg .. 8.jpg (or .png) sent in turn in the PAD, a new or changed
+//            one first; dir/sls.conf may hold int=<seconds> between the starts of two slides (default 20). Only while the
+//            service has the slideshow flag in the layout (that is what announces it in FIG 0/13).
+//   -S file: a status line once a second (fifo= uf= rst= aud= ppm= sil= cpu= sls= and z<i>= per outside service), read by skypluto-ctl
 //   -T Hz:   test tone for the service encoded here (left Hz, right 1.5 x Hz, -12 dBFS) instead of the I2S input
 //   skypluto-dab -f in.f32 -o phases.bin [-p ppm] [-n seconds] [-X recorded.zmq] [-R next.conf -W seconds] ...   (simulation on a
 //   PC: no hardware; -X feeds every outside service from a recording, -R moves another layout onto the -m file at that time)
@@ -23,6 +26,7 @@
 // read = status ([13:0] OFDM FIFO level, [16] underflow, [17] CDC FIFO full), 0x6C read = audio sample {L16, R16} (pops),
 // 0x70 = audio samples waiting, 0x08 = carrier level (16 bit, 65535 = x1), 0x00 bit 0 = enable.
 #include "../src/dabplus_enc.h"
+#include "../src/dab_mot.h"
 #include "../src/dab_mod.h"
 #include "../src/ext_stream.h"
 #include "../src/mux_conf.h"
@@ -69,6 +73,7 @@ static unsigned ph_fill(void){ return atomic_load(&ph_w) - atomic_load(&ph_r); }
 // ---- configuration and state ---------------------------------------------------------------------------------------------------
 static int   o_kbps = 96, o_gain = 1, o_level = -1, o_verbose = 0;
 static const char *o_svc = "PlutoSky", *o_ens = "PlutoSky DAB", *o_dls = NULL, *o_dlsfile = NULL, *o_status = NULL, *o_extconf = NULL;
+static const char *o_slsdir = NULL;
 static const char *o_muxfile = NULL, *o_simstream = NULL, *o_simnext = NULL; static double o_simnext_t = 0;
 static unsigned o_sid = 0x8F01;
 static const char *o_simin = NULL, *o_simout = NULL;
@@ -208,6 +213,59 @@ static int local_encoder(int kbps){
     g_cfg.bitrate_kbps = kbps; return 0;
 }
 
+// ---- slideshow of the service encoded here (-P dir) ------------------------------------------------------------------------------
+#define SLS_MAX 8
+static int g_sls_type[SLS_MAX + 1];                 // per slide 1..8: 0 none, DAB_MOT_JFIF or DAB_MOT_PNG
+static struct timespec g_sls_mt[SLS_MAX + 1];
+static int g_sls_cur = 0, g_sls_prio = 0, g_sls_int = 20, g_sls_count = 0;
+static long g_sls_sf = 1L << 30, g_sls_scan = 0;    // super frames since the current slide started, since the last scan
+static unsigned g_sls_tid = 0; static int g_sls_init = 0;
+static void sls_rescan(void){
+    g_sls_count = 0;
+    for (int n = 1; n <= SLS_MAX; n++){
+        char fn[300]; struct stat st; int ty = 0;
+        snprintf(fn, sizeof fn, "%s/%d.jpg", o_slsdir, n);
+        if (!stat(fn, &st)) ty = DAB_MOT_JFIF;
+        else { snprintf(fn, sizeof fn, "%s/%d.png", o_slsdir, n); if (!stat(fn, &st)) ty = DAB_MOT_PNG; }
+        if (ty){
+            g_sls_count++;
+            if (ty != g_sls_type[n] || st.st_mtim.tv_sec != g_sls_mt[n].tv_sec || st.st_mtim.tv_nsec != g_sls_mt[n].tv_nsec){
+                if (g_sls_init) g_sls_prio = n;                                 // new or replaced (not at the start): next on the air
+                if (n == g_sls_cur && g_enc) dabplus_enc_slide_abort(g_enc);
+                g_sls_mt[n] = st.st_mtim;
+            }
+        } else if (n == g_sls_cur && g_sls_type[n] && g_enc) dabplus_enc_slide_abort(g_enc);   // removed while on the air
+        g_sls_type[n] = ty;
+    }
+    g_sls_init = 1;
+    char fn[300]; snprintf(fn, sizeof fn, "%s/sls.conf", o_slsdir);
+    FILE *f = fopen(fn, "r");
+    if (f){ char l[64]; while (fgets(l, sizeof l, f)) if (!strncmp(l, "int=", 4)){ int v = atoi(l + 4); if (v >= 5 && v <= 3600) g_sls_int = v; } fclose(f); }
+}
+// once per super frame, before the local service is encoded
+static void sls_poll(void){
+    if (!o_slsdir || g_local < 0 || !g_enc) return;
+    if (!g_mux.s[g_local].sls){ if (dabplus_enc_slide_busy(g_enc)) dabplus_enc_slide_abort(g_enc); return; }
+    if (!g_sls_tid) g_sls_tid = (unsigned)time(NULL) & 0xFFFF;
+    if (g_sls_scan-- <= 0){ sls_rescan(); g_sls_scan = 16; }            // about every 2 s
+    g_sls_sf++;
+    if (dabplus_enc_slide_busy(g_enc) || !g_sls_count) return;
+    if (!g_sls_prio && g_sls_sf * 120 < g_sls_int * 1000L) return;
+    int n = g_sls_prio;
+    if (!n || !g_sls_type[n]){ n = g_sls_cur; do n = n % SLS_MAX + 1; while (!g_sls_type[n]); }
+    g_sls_prio = 0; g_sls_sf = 0; g_sls_cur = n;
+    char fn[300]; snprintf(fn, sizeof fn, "%s/%d.%s", o_slsdir, n, g_sls_type[n] == DAB_MOT_PNG ? "png" : "jpg");
+    static uint8_t img[DAB_MOT_MAX_BODY + 1];
+    FILE *f = fopen(fn, "rb"); if (!f) return;
+    int len = (int)fread(img, 1, sizeof img, f); fclose(f);
+    if (len < 1 || len > DAB_MOT_MAX_BODY){ if (o_verbose) fprintf(stderr, "slide %d: %d bytes, not sent\n", n, len); return; }
+    g_sls_tid = (g_sls_tid + 1) & 0xFFFF; if (!g_sls_tid) g_sls_tid = 1;
+    char name[32]; snprintf(name, sizeof name, "slide%d.%s", n, g_sls_type[n] == DAB_MOT_PNG ? "png" : "jpg");
+    if (dabplus_enc_set_slide(g_enc, img, len, g_sls_type[n], name, g_sls_tid)) fprintf(stderr, "slide %d: could not be queued\n", n);
+    else if (o_verbose) fprintf(stderr, "slide %d: %d bytes, transport id %u, about %d s on the air\n", n, len, g_sls_tid,
+                                (len + 200) / (dabplus_enc_slide_rate(g_enc) > 0 ? dabplus_enc_slide_rate(g_enc) : 1) + 1);
+}
+
 static void log_mux(const char *what, const mux_conf *c){
     fprintf(stderr, "%s: \"%s\" %04X, %d service(s), %d of 864 CU\n", what, c->label, c->eid, c->n, mux_cu_total(c));
     static const char *const pr[9] = { "", "1A", "2A", "3A", "4A", "1B", "2B", "3B", "4B" };
@@ -303,6 +361,7 @@ static int produce_superframe(void){
     if (g_chg_cif >= 0 && dab_mod_cif_count(g_mod) == g_chg_cif) apply_switch();   // this super frame is the first one of the new layout
     if (g_local >= 0){
         dls_poll(g_enc);
+        sls_poll();
         if (dabplus_enc_superframe(g_enc, g_pcm, g_sf)) return -1;
     }
     const uint8_t *src[MUX_MAX_SVC];
@@ -426,14 +485,14 @@ static void on_signal(int sig){ (void)sig; g_stop = 1; }
 
 static void usage(void){
     fprintf(stderr,
-        "skypluto-dab -m mux.conf [-t DLS file] [-S status file] [-g gain 0..3] [-L level] [-T tone Hz] [-v]\n"
+        "skypluto-dab -m mux.conf [-t DLS file] [-P slideshow dir] [-S status file] [-g gain 0..3] [-L level] [-T tone Hz] [-v]\n"
         "skypluto-dab [-b kbit/s] [-s service] [-e ensemble] [-i service id hex] [-d DLS text] [-x outside.conf] ...   (without a layout file)\n"
         "skypluto-dab -f in.f32 -o phases.bin [-p audio clock ppm] [-n seconds] [-X recorded.zmq] ...   (simulation, no hardware)\n");
 }
 
 int main(int argc, char **argv){
     int c;
-    while ((c = getopt(argc, argv, "m:b:s:e:i:d:t:x:X:R:W:g:L:T:S:vf:o:p:n:h")) != -1){
+    while ((c = getopt(argc, argv, "m:b:s:e:i:d:t:P:x:X:R:W:g:L:T:S:vf:o:p:n:h")) != -1){
         switch (c){
         case 'm': o_muxfile = optarg; break;
         case 'b': o_kbps = atoi(optarg); break;
@@ -441,6 +500,7 @@ int main(int argc, char **argv){
         case 'e': o_ens = optarg; break;
         case 'd': o_dls = optarg; break;
         case 't': o_dlsfile = optarg; break;
+        case 'P': o_slsdir = optarg; break;
         case 'g': o_gain = atoi(optarg) & 3; break;
         case 'L': o_level = atoi(optarg); break;
         case 'T': o_tone = atof(optarg); break;
@@ -565,6 +625,7 @@ int main(int argc, char **argv){
                 fprintf(sf, "fifo=%u uf=%u rst=%u aud=%u ppm=%+.0f sil=%u cpu=%.0f svc=%d cu=%d", rd(R_PHASE) & 0x3FFF, atomic_load(&st_underflow), atomic_load(&st_resets),
                         aud_fill(), g_ppm_now, atomic_load(&st_silence), 100 * (g_t_enc + g_t_mod) / t, g_mux.n, mux_cu_total(&g_mux));
                 if (g_chg_cif >= 0) fprintf(sf, " chg=%d", g_chg_cif);
+                if (o_slsdir && g_local >= 0 && g_mux.s[g_local].sls) fprintf(sf, " sls=%d/%d/%d", g_sls_count, g_sls_cur, g_enc && dabplus_enc_slide_busy(g_enc));
                 print_streams(sf, 0);
                 fputc('\n', sf);
                 fclose(sf); rename(tmp, o_status);

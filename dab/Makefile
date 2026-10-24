@@ -4,7 +4,7 @@ CC      ?= gcc
 CFLAGS  ?= -O2 -g -Wall -Wextra -std=gnu11
 LDLIBS  += -lm
 BUILD   := build
-SRC     := src/dab_crc.c src/dab_rs.c src/dabplus_sf.c src/aac_mdct.c src/aac_huff_tab.c src/aac_enc.c src/dabplus_enc.c src/dab_mod.c src/dab_pad.c src/zmtp_sub.c src/ext_stream.c src/mux_conf.c
+SRC     := src/dab_crc.c src/dab_rs.c src/dabplus_sf.c src/aac_mdct.c src/aac_huff_tab.c src/aac_enc.c src/dabplus_enc.c src/dab_mod.c src/dab_pad.c src/dab_mot.c src/zmtp_sub.c src/ext_stream.c src/mux_conf.c
 OBJ     := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 PY      ?= python3
 

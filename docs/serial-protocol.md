@@ -199,7 +199,7 @@ encoder and builds the multiplex; the FPGA does the OFDM. The DAB settings are n
 | `DSI <hex>` | 4 hex digits, not used by another service | its service identifier |
 | `DLS <text>` | up to 128 bytes, UTF-8 | dynamic label (the successor of RDS RadioText); changes without interruption |
 | `DTN <Hz>` | 0 … 10000; `0` | test tone (left Hz, right 1.5 × Hz, −12 dBFS) instead of the I2S input; `0` = I2S |
-| `?DAB` | | `m=FM`, or `m=DAB br=96 src=i2s run=1 rs=0 fifo=7712 uf=0 rst=0 aud=11600 ppm=+12 sil=0 cpu=31`: `run` program running, `rs` restarts by the daemon, `fifo` OFDM FIFO words (~7700 = full), `uf` underflows, `rst` OFDM restarts, `aud` audio buffer (samples), `ppm` the clock correction toward the I2S source, `sil` super frames sent silent (no audio), `cpu` % of one core |
+| `?DAB` | | `m=FM`, or `m=DAB br=96 src=i2s run=1 rs=0 fifo=7712 uf=0 rst=0 aud=11600 ppm=+12 sil=0 cpu=31`: `run` program running, `rs` restarts by the daemon, `fifo` OFDM FIFO words (~7700 = full), `uf` underflows, `rst` OFDM restarts, `aud` audio buffer (samples), `ppm` the clock correction toward the I2S source, `sil` super frames sent silent (no audio), `cpu` % of one core; with the slideshow on for the service encoded here also `sls=<slides>/<current>/<1 while being sent>` (the slides are uploaded through the web interface, /mnt/jffs2/sls) |
 
 In DAB mode label changes (`DSV`, `DEN`, the web interface) take effect at once. Everything else (`DBR`, `DSI`, services added or removed, protection) goes through a multiplex reconfiguration as receivers
 expect it (EN 300 401 6.5): it is announced in the FIC (FIG 0/0 change flags and occurrence, the next sub-channel/service

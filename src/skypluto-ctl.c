@@ -42,6 +42,7 @@
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -1253,6 +1254,7 @@ static void set_level(double dbm){
 #define DAB_MUX     "/mnt/jffs2/dab-mux.conf"
 #define DAB_EXT     "/mnt/jffs2/dab-ext.conf"   // older form of one outside service: taken into the layout once, then renamed
 #define DAB_DLS     "/tmp/dab_dls.txt"
+#define DAB_SLS     "/mnt/jffs2/sls"            // the slideshow of the service encoded here
 #define DAB_STATUS  "/tmp/dab_status"
 #define DAB_LOG     "/tmp/dab.log"
 #define DAB_TB_KHZ  3000
@@ -1335,6 +1337,67 @@ static void tb_set_now(int khz){
         cal_hold = 1; cal_pending = 1; cal_due = mono(); cal_failed = 0; cal_fail = 0; cal_force = 1;
     }
 }
+// ---- slideshow of the service encoded here: images 1..8 in DAB_SLS (<n>.jpg or <n>.png), sent in turn by skypluto-dab -P ----
+// The web interface scales and compresses before uploading (320 x 240 JPEG); here only the type, the size and the room in the
+// jffs2 are checked: at most SLS_ONE per slide and SLS_ALL together, and SLS_KEEP must stay free for the settings files.
+#define SLS_ONE   (50 * 1024)
+#define SLS_ALL   (200 * 1024)
+#define SLS_KEEP  (96 * 1024)
+static long sls_size(int n, const char **ext){
+    static const char *const ex[2] = { "jpg", "png" };
+    for (int k = 0; k < 2; k++){
+        char fn[64]; struct stat st; snprintf(fn, sizeof fn, "%s/%d.%s", DAB_SLS, n, ex[k]);
+        if (!stat(fn, &st)){ if (ext) *ext = ex[k]; return (long)st.st_size; }
+    }
+    return 0;
+}
+static long fs_free(const char *path){ struct statvfs v; return statvfs(path, &v) ? -1 : (long)v.f_bavail * (long)v.f_frsize; }
+static int sls_interval(void){
+    int v = 20; FILE *f = fopen(DAB_SLS "/sls.conf", "r");
+    if (f){ char l[64]; while (fgets(l, sizeof l, f)) if (!strncmp(l, "int=", 4)) v = atoi(l + 4); fclose(f); }
+    return v;
+}
+// GET /api/sls -> {"size":[8 sizes, 0 = empty],"type":["jpg",...],"int":<s>,"free":<bytes jffs2>,"all":<bytes allowed together>,"one":<per slide>}
+static int sls_json(char *o, int cap){
+    int n = snprintf(o, (size_t)cap, "{\"size\":[");
+    for (int i = 1; i <= 8; i++) n += snprintf(o + n, (size_t)(cap - n), "%s%ld", i > 1 ? "," : "", sls_size(i, NULL));
+    n += snprintf(o + n, (size_t)(cap - n), "],\"type\":[");
+    for (int i = 1; i <= 8; i++){ const char *e = ""; sls_size(i, &e); n += snprintf(o + n, (size_t)(cap - n), "%s\"%s\"", i > 1 ? "," : "", e); }
+    n += snprintf(o + n, (size_t)(cap - n), "],\"int\":%d,\"free\":%ld,\"all\":%d,\"one\":%d}", sls_interval(), fs_free("/mnt/jffs2"), SLS_ALL, SLS_ONE);
+    return n;
+}
+// store slide n (1..8) from an upload; returns NULL or the reason it was refused
+static const char *sls_store(int n, const uint8_t *d, int len){
+    if (n < 1 || n > 8) return "slide 1..8";
+    int png = len > 8 && !memcmp(d, "\x89PNG\r\n\x1a\n", 8), jpg = len > 3 && d[0] == 0xFF && d[1] == 0xD8 && d[2] == 0xFF;
+    if (!png && !jpg) return "not a JPEG or PNG image";
+    if (len > SLS_ONE) return "larger than 50 kB";
+    long others = 0; for (int i = 1; i <= 8; i++) if (i != n) others += sls_size(i, NULL);
+    if (others + len > SLS_ALL) return "the slides together would exceed 200 kB";
+    long fr = fs_free("/mnt/jffs2");
+    if (fr >= 0 && fr + sls_size(n, NULL) - len < SLS_KEEP) return "not enough room in the Pluto's flash";
+    mkdir(DAB_SLS, 0755);
+    char tmp[64], fn[64], old[64];
+    snprintf(tmp, sizeof tmp, "%s/.new", DAB_SLS); snprintf(fn, sizeof fn, "%s/%d.%s", DAB_SLS, n, png ? "png" : "jpg");
+    snprintf(old, sizeof old, "%s/%d.%s", DAB_SLS, n, png ? "jpg" : "png");
+    FILE *f = fopen(tmp, "wb"); if (!f) return "could not be written";
+    int ok = fwrite(d, 1, (size_t)len, f) == (size_t)len; ok &= fclose(f) == 0;
+    if (!ok || rename(tmp, fn)){ unlink(tmp); return "could not be written"; }
+    unlink(old);                                                    // the same slide in the other format
+    return NULL;
+}
+static void sls_delete(int n){
+    char fn[64];
+    snprintf(fn, sizeof fn, "%s/%d.jpg", DAB_SLS, n); unlink(fn);
+    snprintf(fn, sizeof fn, "%s/%d.png", DAB_SLS, n); unlink(fn);
+}
+static const char *sls_set_interval(int s){
+    if (s < 5 || s > 3600) return "interval 5..3600 s";
+    mkdir(DAB_SLS, 0755);
+    FILE *f = fopen(DAB_SLS "/sls.conf.new", "w"); if (!f) return "could not be written";
+    fprintf(f, "int=%d\n", s); fclose(f);
+    return rename(DAB_SLS "/sls.conf.new", DAB_SLS "/sls.conf") ? "could not be written" : NULL;
+}
 static void dab_start(void){
     char tone[12]; snprintf(tone, sizeof tone, "%d", dab_tone);
     { FILE *df = fopen(DAB_DLS, "a"); if (df) fclose(df); }       // the program reads the DLS from this file (empty = none)
@@ -1345,7 +1408,7 @@ static void dab_start(void){
         prctl(PR_SET_PDEATHSIG, SIGTERM);                         // the daemon ends: the program ends too and leaves the exciter in FM
         struct sched_param sp; sp.sched_priority = 0; sched_setscheduler(0, SCHED_OTHER, &sp);   // not the daemon's real-time class
         int lf = open(DAB_LOG, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (lf >= 0){ dup2(lf, 2); close(lf); }
-        execl(DAB_BIN, DAB_BIN, "-v", "-m", DAB_MUX, "-t", DAB_DLS, "-S", DAB_STATUS, "-T", tone, (char *)NULL);
+        execl(DAB_BIN, DAB_BIN, "-v", "-m", DAB_MUX, "-t", DAB_DLS, "-P", DAB_SLS, "-S", DAB_STATUS, "-T", tone, (char *)NULL);
         _exit(127);
     }
     if (p < 0){ dab_next = mono() + 2.0; return; }
@@ -2020,7 +2083,7 @@ static void handle(char *line){
 #include "web_index.h"
 #define WEB_PORT 80
 #define WEB_CONF "/mnt/jffs2/skypluto-web.conf"          // optional: password=<password>; without file/password the interface is open (like the Pluto itself)
-struct wconn { int fd; double t; int len; char buf[3072]; };
+struct wconn { int fd; double t; int len; char buf[SLS_ONE + 4096]; };   // room for a slide upload
 static struct wconn wc[4];
 static int    wfd = -1; static double w_retry = 0.0;
 static char   wpass[64] = ""; static char wtok[4][33]; static int wtn = 0; static double wconf_t = -100.0;
@@ -2067,8 +2130,10 @@ static void web_handle(struct wconn *c){
     int clen = 0; { const char *p = strcasestr(c->buf, "Content-Length:"); if (p) clen = atoi(p + 15); }
     if (clen < 0){ web_send(c->fd, 400, "text/plain", "bad request", 11, NULL); close(c->fd); c->fd = -1; return; }
     char *body = hend + 4; int have = c->len - (int)(body - c->buf);
+    const int up = !strncmp(path, "/api/sls/", 9);                     // a slide upload: the only large body
+    if (up && clen > SLS_ONE){ web_send(c->fd, 200, "text/plain", "ERR larger than 50 kB", 21, NULL); close(c->fd); c->fd = -1; return; }
     if (clen > have) return;                                            // body not complete yet
-    if (clen > 1500) clen = 1500;                                       // a multiplex layout (/api/mux) is the largest body
+    if (!up && clen > 1500) clen = 1500;                                // otherwise a multiplex layout (/api/mux) is the largest body
     body[clen] = 0;
     char cookie[512] = ""; { const char *p = strcasestr(c->buf, "Cookie:"); if (p){ p += 7; while (*p == ' ') p++; size_t i = 0; while (*p && *p != '\r' && i < sizeof cookie - 1) cookie[i++] = *p++; cookie[i] = 0; } }
     int xrw = strcasestr(c->buf, "X-Requested-With: skypluto") != NULL;
@@ -2143,6 +2208,27 @@ static void web_handle(struct wconn *c){
                     else snprintf(r, sizeof r, "OK %d services, %d of 864 CU%s", nc.n, mux_cu_total(&nc), dab_mode ? "" : " (DAB is off: takes effect with M DAB)");
                 }
                 web_send(c->fd, 200, "text/plain; charset=utf-8", r, strlen(r), NULL);
+            }
+        }
+        // the slideshow of the service encoded here: GET /api/sls (list), GET /api/sls/<n> (the image),
+        // POST /api/sls/<n> <image> (store), POST /api/sls/<n>/del, POST /api/sls/int <seconds>
+        else if (!strcmp(path, "/api/sls") && !post){ int n = sls_json(out, (int)sizeof out); web_send(c->fd, 200, "application/json", out, (size_t)n, NULL); }
+        else if (!strncmp(path, "/api/sls/", 9)){
+            const char *a = path + 9; int n = atoi(a); const char *r = NULL; char rb[160];
+            if (!post && n >= 1 && n <= 8){
+                const char *e = NULL; long sz = sls_size(n, &e);
+                char fn[64]; snprintf(fn, sizeof fn, "%s/%d.%s", DAB_SLS, n, e ? e : "jpg");
+                FILE *f = sz > 0 && sz <= SLS_ONE ? fopen(fn, "rb") : NULL;
+                if (!f) web_send(c->fd, 404, "text/plain", "no slide", 8, NULL);
+                else { static char ib[SLS_ONE]; size_t m = fread(ib, 1, sizeof ib, f); fclose(f); web_send(c->fd, 200, e && !strcmp(e, "png") ? "image/png" : "image/jpeg", ib, m, NULL); }
+            }
+            else if (!post || !xrw) web_send(c->fd, 403, "text/plain", "no", 2, NULL);
+            else {
+                if (!strncmp(a, "int", 3)) r = sls_set_interval(atoi(body));
+                else if (n >= 1 && n <= 8 && strstr(a, "/del")) sls_delete(n);
+                else r = sls_store(n, (const uint8_t *)body, clen);
+                if (r) snprintf(rb, sizeof rb, "ERR %s", r); else snprintf(rb, sizeof rb, "OK");
+                web_send(c->fd, 200, "text/plain; charset=utf-8", rb, strlen(rb), NULL);
             }
         }
         else if (!post && !strcmp(path, "/api/ir.csv")){

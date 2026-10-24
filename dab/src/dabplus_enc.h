@@ -21,5 +21,11 @@ int          dabplus_enc_last_aus(const dabplus_enc *e, const uint8_t **au, int 
 int          dabplus_enc_asc(const dabplus_enc *e, uint8_t asc[2]);
 // dynamic label text (DLS), up to 128 bytes; charset 0 = EBU Latin, 15 = UTF-8
 void         dabplus_enc_set_dls(dabplus_enc *e, const char *text, int charset);
+// slideshow: send one image (subtype DAB_MOT_JFIF or DAB_MOT_PNG) in the PAD, shown at once; busy while it is being sent;
+// rate = slideshow bytes per second (data groups including their overhead)
+int          dabplus_enc_set_slide(dabplus_enc *e, const uint8_t *img, int len, int subtype, const char *name, unsigned tid);
+int          dabplus_enc_slide_busy(const dabplus_enc *e);
+void         dabplus_enc_slide_abort(dabplus_enc *e);
+int          dabplus_enc_slide_rate(const dabplus_enc *e);
 
 #endif
