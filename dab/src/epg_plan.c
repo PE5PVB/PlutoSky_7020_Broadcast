@@ -43,7 +43,7 @@ static int parse_date(const char *s, int *days){
 static void fmt_date(char *o, size_t n, long long days){
     int y, mo, d;
     epg_ymd(days, &y, &mo, &d);
-    snprintf(o, n, "%04d-%02d-%02d", y, mo, d);
+    snprintf(o, n, "%04u-%02u-%02u", (unsigned)y % 10000u, (unsigned)mo % 100u, (unsigned)d % 100u);
 }
 static long long floor_div(long long a, long long b) { return a >= 0 ? a / b : -((-a + b - 1) / b); }
 
@@ -87,7 +87,7 @@ static int utf8_chars(const char *s){
 // the long name cut to max characters: at the last space when that keeps at least half, else hard
 static void cut_name(char *out, int size, const char *name, int max){
     if (utf8_chars(name) <= max){
-        snprintf(out, (size_t)size, "%s", name);
+        dab_spi_utf8_cut(out, size, name, max);
         return;
     }
     int n = dab_spi_utf8_cut(out, size, name, max);
@@ -100,7 +100,7 @@ static void cut_name(char *out, int size, const char *name, int max){
     while (n > 0 && out[n - 1] == ' ') out[--n] = 0;
 }
 void epg_medium(const epg_entry *e, char *out, int size){
-    if (e->mname[0]) snprintf(out, (size_t)size, "%s", e->mname);
+    if (e->mname[0]) dab_spi_utf8_cut(out, size, e->mname, EPG_MED_CHARS);
     else cut_name(out, size, e->lname, EPG_MED_CHARS);
 }
 void epg_short(const epg_entry *e, char *out, int size){

@@ -116,6 +116,8 @@ make -C dab                        # builds the library and the test programs (g
 make -C dab test                   # MDCT test and super frame test (Reed-Solomon via reedsolo)
 tests/check_chain.sh in.f32        # dab_tx_file → welle-cli
 tests/check_app.sh [ppm] [s]       # skypluto-dab in simulation mode → FPGA model → welle-cli
+tests/check_spi.sh [s]             # EPG + slideshow + DLS in the PAD: PAD decoded by tests/check_spi.py, welle-cli for audio/DLS/slides
+python3 tests/check_spi.py <dir>   # decode the SPI objects of an EPG directory (index + *.bin) to XML-like text
 python3 hdl/check_hdl.py build/ph.bin 2         # OFDM block against the model (iverilog)
 TOP=1 python3 hdl/check_hdl.py build/ph.bin 2   # the whole exciter in DAB mode (tb_dab_top.v)
 build/test_mdct                    # fast MDCT against the direct definition
@@ -151,7 +153,10 @@ during the test. `dab-test.sh <f> i2s` uses the I2S input (stereo 48 kHz) instea
 | `src/dabplus_enc.*` | PCM → super frames, distribution of the budget over the AUs; the same interface for MPEG-1 Layer II |
 | `src/mp2_enc.*` | MPEG-1 Layer II encoder for DAB (48 kHz stereo; the DAB layout allows 112..192 kbit/s): psychoacoustic model 1 (ISO/IEC 11172-3 D.1), audio bandwidth 15 kHz at 192 kbit/s down to 12 kHz at 112, allocation hysteresis against "birdies", ScF-CRC (TS 103 466 B.3, one frame of delay) |
 | `src/dab_pad.*` | Dynamic Label (DLS) in variable-size X-PAD, as a data stream element in the AU (or at the end of an MP2 frame) |
-| `src/dab_mot.*` | MOT slideshow in X-PAD (one image at a time) *(added after 2026-10-22)* |
+| `src/dab_mot.*` | MOT slideshow in X-PAD (header mode, one image at a time) *(added after 2026-10-22)*; MOT directory mode carousel for the EPG (`dab_motdir`, see section 8) |
+| `src/dab_spi.*` | SPI (EPG) binary encoding, ETSI TS 102 371 basic profile: SI and PI objects, timePoint, bearerURI, MOT parameters ScopeStart/End/ID |
+| `src/epg_plan.*` | the EPG planner (file format, rules, expansion per local day, generation of the objects + index, JSON for the web interface); also compiled into `skypluto-ctl` |
+| `tests/test_spi.c`, `tests/check_spi.py`, `tests/check_spi.sh` | SPI against the annex C examples of TS 102 371, planner rules; independent Python decoder of the objects and of the PAD (X-PAD, data groups, MOT directory, slideshow, DLS); end-to-end test with welle-cli |
 | `src/dab_mod.*` | DAB mode I: FIC (FIG 0/0, 0/1, 0/2, 0/9, 0/13, 1/0, 1/1), EEP-A and EEP-B, multiplex reconfiguration, energy dispersal, convolutional code, time and frequency interleaving, DQPSK, OFDM (IFFT 2048) → IQ 2.048 MS/s, or the phase words for the FPGA |
 | `src/mux_conf.*` | the multiplex layout file (parser/writer), shared with `src/skypluto-ctl.c` *(added after 2026-10-22)* |
 | `src/ext_stream.*`, `src/zmtp_sub.*` | services from ODR-AudioEnc over ZeroMQ: own ZMTP 3.0 SUB endpoint (no libzmq), jitter buffer *(added after 2026-10-22)* |
@@ -169,7 +174,46 @@ during the test. `dab-test.sh <f> i2s` uses the I2S input (stereo 48 kHz) instea
 - ETSI TS 102 563 — DAB+ audio (super frame, RS, fire code, CRC).
 - ETSI EN 300 401 — DAB (FIC, MSC, channel coding, OFDM, PAD).
 - ETSI EN 301 234, ETSI TS 101 499 — MOT and SlideShow.
+- ETSI TS 102 371 (V3.3.1), ETSI TS 102 818 — SPI (EPG): binary encoding and transport, XML semantics.
 - ISO/IEC 14496-3 — MPEG-4 Audio (AAC).
 - ISO/IEC 11172-3 — MPEG-1 Audio (Layer II).
 - RFC 23/ZMTP — ZeroMQ Message Transport Protocol 3.0.
 - vo-aacenc (VisualOn/Android, Apache-2.0) — source of the Huffman tables, see `NOTICE`.
+
+## 8. Programme guide (EPG, DAB SPI basic profile) *(added 2026-10-24)*
+
+**Planner and objects.** `skypluto-ctl` keeps the planner in `/mnt/jffs2/epg.conf` (format in `src/epg_plan.h` and
+`docs/serial-protocol.md` 4b; edited in the web interface, `GET`/`POST /api/epg`) and expands it into today's and tomorrow's
+programmes (local days: UTC + the layout's LTO, the offset the encoder sends; no time zone database). From them it builds
+in `/tmp/epg/` (RAM) the SPI objects of ETSI TS 102 371, basic profile: one SI object (ensemble ECC + EId, short/medium
+name, every service with short/medium name and its `dab:` bearer) and one PI object per service and day (schedule version,
+scope start/stop + serviceScope, programmes with shortId, mediumName, longName, location/time in UTC with the LTO and the
+duration, mediaDescription/shortDescription), and an `index` listing them with their MOT parameters. Generated after every
+edit, at local midnight, when the layout or the clock changes, at start; each generation has a new version. Only with a valid
+clock (2025 or later, as for FIG 0/10). Sizes: SI ~80–120 bytes, PI ~60–90 bytes per programme with a short description (a
+16 kB object holds well over 100 programmes; beyond that descriptions and then the last programmes are left out).
+
+**Transport.** `skypluto-dab -E /tmp/epg` sends the objects as a **MOT directory-mode carousel** (EN 301 234 7.2: directory
+in data groups of type 6, uncompressed, header information sorted by ContentName with `SortedHeaderInformation`;
+ContentName UTF-8, ContentType 7/0 (SI) and 7/1 (PI) with ScopeStart/ScopeEnd/ScopeID; bodies in data groups of type 4,
+segments of 1013 bytes) in the **X-PAD of the service encoded here**, on **X-PAD application types 16/17** (the first pair
+of the user-defined range 16–30; 12/13 stay with the slideshow, EN 300 401 7.4.3). **FIG 0/13** announces it next to the
+slideshow: user application type 0x007 (SPI), X-PAD AppTy 16, DSCTy 60 (MOT), user application data = profile list `01`
+(basic); only while the index lists objects. A turn of the carousel is: directory, SI, PI objects; a new turn starts at
+most every 30 s, and inside a longer turn the directory and the SI come again every 60 s (TS 102 371 6.6). An unchanged
+object keeps its TransportId, the directory gets a new one with every change, and a change starts a new turn at once.
+
+**PAD share.** Each audio frame carries at most one MOT piece (the slideshow's piece size: 8–48 bytes depending on the
+bitrate) besides the DLS segment in the first frame of a super frame. Every third frame's piece belongs to the EPG while
+the carousel has something to send; the other frames (and the EPG's frames while it is idle) go to the slideshow. So the
+DLS is untouched, slides keep at least two thirds of their rate, and the PAD (taken from the audio) is never larger than
+with the slideshow alone. At 96 kbit/s (32-byte pieces, 50 frames/s) the EPG moves ~530 bytes/s while it sends: a turn of
+one service (SI + two PI objects, ~1.1 kB of data groups) takes ~2 s, eight services with full days (~40 kB) about 80 s.
+
+**Tests.** `make test` runs `test_spi` (the binary examples of TS 102 371 annex C byte for byte, timePoint, extended
+lengths, planner rules) and `tests/check_spi.py` on the generated objects (an independent decoder written from the
+standard: objects to XML-like text, checks against the index and the basic-profile limits). `tests/check_spi.sh` runs
+skypluto-dab in simulation with EPG, slideshow and DLS, records the PAD of every audio frame (`-D`), demultiplexes the
+X-PAD, reassembles and checks the data groups (CRC), the MOT directory and every object (byte-identical with the files),
+the slides and the DLS, and decodes the transmission with welle-cli (audio, DLS, slides). welle.io does not decode the
+SPI; AbracaDABra does (from X-PAD, with SPI switched on in its settings) — not yet checked on the air.
