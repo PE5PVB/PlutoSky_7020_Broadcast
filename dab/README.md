@@ -149,7 +149,7 @@ during the test. `dab-test.sh <f> i2s` uses the I2S input (stereo 48 kHz) instea
 | `src/aac_huff_tab.*` | code books (generated, see `NOTICE`) |
 | `src/bitwriter.h` | MSB-first bit writer |
 | `src/dabplus_enc.*` | PCM → super frames, distribution of the budget over the AUs; the same interface for MPEG-1 Layer II |
-| `src/mp2_enc.*` | MPEG-1 Layer II encoder for DAB (48 kHz stereo; the DAB layout allows 112..192 kbit/s) *(added after 2026-10-22)* |
+| `src/mp2_enc.*` | MPEG-1 Layer II encoder for DAB (48 kHz stereo; the DAB layout allows 112..192 kbit/s): psychoacoustic model 1 (ISO/IEC 11172-3 D.1), audio bandwidth 15 kHz at 192 kbit/s down to 12 kHz at 112, allocation hysteresis against "birdies", ScF-CRC (TS 103 466 B.3, one frame of delay) |
 | `src/dab_pad.*` | Dynamic Label (DLS) in variable-size X-PAD, as a data stream element in the AU (or at the end of an MP2 frame) |
 | `src/dab_mot.*` | MOT slideshow in X-PAD (one image at a time) *(added after 2026-10-22)* |
 | `src/dab_mod.*` | DAB mode I: FIC (FIG 0/0, 0/1, 0/2, 0/9, 0/13, 1/0, 1/1), EEP-A and EEP-B, multiplex reconfiguration, energy dispersal, convolutional code, time and frequency interleaving, DQPSK, OFDM (IFFT 2048) → IQ 2.048 MS/s, or the phase words for the FPGA |

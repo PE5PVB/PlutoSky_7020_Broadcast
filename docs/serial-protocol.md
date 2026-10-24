@@ -239,7 +239,7 @@ power of the FM carrier setting, and the DAB ensemble lies about 16 dB below it 
 interface (tab DAB, `GET`/`POST /api/mux`): the ensemble (label, EId) and up to 8 services, each with a source, SId, label,
 bitrate, protection (EEP-1A..4A, or 1B..4B for multiples of 32 kbit/s), a slideshow flag (FIG 0/13) and, for the service encoded
 on the Pluto, the codec (`svc=…;<slideshow>;mp2` for MPEG-1 Layer II, ASCTy 0 in FIG 0/2; AAC/DAB+ when the field is absent). The
-MP2 frames carry the ISO CRC and the DAB end of frame (X-PAD, ScF-CRC left 0, F-PAD) with the same DLS and slideshow as DAB+. Sources: `i2s` (the
+MP2 frames carry the ISO CRC and the DAB end of frame (X-PAD, ScF-CRC of the next frame's scale factors, F-PAD) with the same DLS and slideshow as DAB+. Sources: `i2s` (the
 encoder's stereo I2S, encoded on the Pluto), `tone:<Hz>`, or `zmq:<port>`: complete DAB+ super frames (with their PAD) as
 ODR-AudioEnc sends them over ZeroMQ (`odr-audioenc … -o tcp://<pluto>:<port>`; ZMTP 3, NULL security, no CURVE), passed on
 unchanged. At most one service is encoded on the Pluto; the sum must fit in 864 CU. `DBR`, `DSV` and `DSI` change the service

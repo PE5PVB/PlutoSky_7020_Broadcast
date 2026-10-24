@@ -17,7 +17,9 @@ void    mp2enc_close(mp2enc *e);
 int     mp2enc_valid_kbps(int kbps);
 // Encode one frame: pcm = MP2_FRAME stereo samples, interleaved, full scale +-1.0. pad = the PAD as dab_xpad_build() makes it
 // (X-PAD in transmission order followed by the 2 F-PAD bytes), padlen its length; 0 = no X-PAD (F-PAD 00 00).
-// Writes exactly 3 * kbps bytes to out; returns that number, or -1.
+// Writes exactly 3 * kbps bytes to out; returns that number, or -1. The frame written is the one encoded at the PREVIOUS call
+// (a silent one at the first): its ScF-CRC protects the scale factors of the frame that follows it (TS 103 466, B.3), so the
+// encoder holds one frame (24 ms) back.
 int     mp2enc_frame(mp2enc *e, const float *pcm, const uint8_t *pad, int padlen, uint8_t *out);
 
 #endif
