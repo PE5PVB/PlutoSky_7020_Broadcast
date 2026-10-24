@@ -1439,18 +1439,27 @@ static void dab_poll(double now){
 static void dab_restart(void){ if (dab_mode){ dab_stop(); dab_next = mono() + 0.2; } }
 static int dab_label_ok(const char *s){ size_t n = strlen(s); if (n < 1 || n > 16) return 0; for (; *s; s++) if (*s < 0x20 || *s > 0x7E || *s == ';') return 0; return 1; }
 
+// CRC-8/SMBUS (poly 0x07, init 0x00, not reflected, no final XOR) of a line's characters: the '#hh' check sum
+static unsigned crc8_line(const char *s, const char *end){
+    unsigned c = 0;
+    for (; s < end; s++){ c ^= (unsigned char)*s; for (int b = 0; b < 8; b++) c = (c & 0x80) ? ((c << 1) ^ 0x07) & 0xFF : (c << 1) & 0xFF; }
+    return c;
+}
 static void handle(char *line){
     while (*line==' '||*line=='\t') line++;
     if (*line==0) return;
-    // optional check sum as in NMEA: "<command>*hh", hh = XOR of all characters before the '*' in hex. A line that carries one
-    // and does not match is refused (ERR crc): a bit error in a text (a label, DLS) or a digit cannot be seen otherwise.
+    // optional check sum: "<command>*hh", hh = XOR of all characters before the '*' in hex (as in NMEA), or "<command>#hh", hh =
+    // CRC-8/SMBUS of those characters (catches what the XOR misses: the same bit flipped in two characters, as cross-talk on the line
+    // does). A line that carries one and does not match is refused (ERR crc): a bit error in a text (a label, DLS) or a digit cannot be
+    // seen otherwise.
     // Once the encoder has sent one line with a valid sum on the UART, its lines without one are refused as well: those are
     // pieces of damaged lines (a lone "E" or "D"). The TCP console (out_fd >= 0) and the web interface (-2) never need a sum.
     static int uart_sums = 0; int summed = 0;
-    { char *star = strrchr(line, '*'); size_t n = strlen(line);
-      if (star && line + n - star == 3 && isxdigit((unsigned char)star[1]) && isxdigit((unsigned char)star[2])){
+    { size_t n = strlen(line); char *star = n >= 3 ? line + n - 3 : NULL;
+      if (star && (*star == '*' || *star == '#') && isxdigit((unsigned char)star[1]) && isxdigit((unsigned char)star[2])){
           unsigned want = (unsigned)strtoul(star + 1, NULL, 16), x = 0;
-          for (const char *c = line; c < star; c++) x ^= (unsigned char)*c;
+          if (*star == '#') x = crc8_line(line, star);
+          else for (const char *c = line; c < star; c++) x ^= (unsigned char)*c;
           if (x != want){ fprintf(stderr, "   !! regel '%s': controlesom klopt niet, genegeerd\n", line); fflush(stderr); tx_str("ERR crc\n"); return; }
           *star = 0; while (star > line && (star[-1] == ' ' || star[-1] == '\t')) *--star = 0;
           summed = 1; if (out_fd == -1 && !uart_sums){ uart_sums = 1; fprintf(stderr, "   -> de encoder stuurt controlesommen: regels zonder som worden voortaan geweigerd\n"); fflush(stderr); }

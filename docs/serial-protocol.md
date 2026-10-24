@@ -62,7 +62,14 @@ One line per command, one line per reply. Unknown command → `ERR parse`; unkno
 nothing; send it again. Lines without a sum are accepted as before. A bit error on the link can otherwise turn a label
 into another one or a digit of `F` into another frequency, which no range check can see. Values that are always checked
 anyway: `E`/`B`/`G`/`CT`/`NULLAUTO` take only `0` or `1`, the numeric commands only a well-formed number (else `ERR range`).
-A DLS text that itself ends in `*` and two hex digits must carry a sum.
+A DLS text that itself ends in `*` or `#` and two hex digits must carry a sum.
+
+**Check sum CRC-8 (preferred).** Instead of `*hh` a line may end in `#hh`: the CRC-8/SMBUS of all characters before the `#`
+(polynomial 0x07, initial value 0x00, not reflected, no final XOR). Test vectors: `123456789` → `F4`, `E 1#7F`, `?S#84`,
+`DSV PicoAudio#EC`. The XOR misses errors that flip the same bit in two characters, which is what cross-talk on the line tends to
+do (`DSV RicoAwdio` has the same XOR as `DSV PicoAudio`, `02`, but CRC `32` instead of `EC`); the CRC catches every error of 1 to 3
+bits and every such pair. Both forms are accepted, line by line; once the encoder has sent one line with a valid sum of either kind,
+its lines without a sum are refused.
 
 **Reply before execution.** `E`, `F` and `P` are answered with `OK` immediately (within a few ms) and only then executed: the execution
 (`iio_attr` to the AD9361) takes 130–280 ms, especially when the mask monitor loads the CPU, and that would otherwise approach the 300 ms timeout. Consequence:
