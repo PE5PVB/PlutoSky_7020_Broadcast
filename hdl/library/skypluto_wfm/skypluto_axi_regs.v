@@ -39,9 +39,12 @@
 //   0x6C DAB_AUDIO     {left[23:8], right[23:8]} of the oldest I2S frame (DAB mode only); every read pops one   RO
 //   0x70 DAB_AUDCNT    number of audio frames waiting in that FIFO (0..1024)                              RO
 //   -- mask controller (skypluto_maskctl) --
-//   0x74 MASK_CTRL     [0]=mask control on, [1]=clear its statistics (pulse, reads 0)                     RW (default 0)
-//   0x78 MASK_THR      write: threshold [27:0] for skirt bin [31:28] (0..15 = 78..168 kHz); read: blocks limited since clear
-//   0x7C MASK_STAT     [4:0] last gain step, [9:5] largest step, [23:16] overruns, [31:24] blocks without a result   RO
+//   0x74 MASK_CTRL     write: [0]=mask control on, [1]=clear its statistics (pulse); read: diagnostics of the first block without
+//                      a result since a clear: [31:24] block the conditioner expected, [23:16] block at the head of the result
+//                      FIFO, [15] FIFO empty; [12:8] the conditioner's state at its last watchdog reset; [7:0] the block at its limiter now
+//   0x78 MASK_THR      write: threshold [27:0] for skirt bin [31:28] (0..15 = 78..168 kHz); read: [31:24] block under evaluation,
+//                      [23:16] block of the newest sample in the mask controller, [15:0] blocks limited since clear
+//   0x7C MASK_STAT     [4:0] last gain step, [9:5] largest step, [15:10] resyncs, [23:16] overruns, [31:24] blocks without a result
 // =============================================================================
 `timescale 1ns/1ps
 
@@ -120,7 +123,8 @@ module skypluto_axi_regs #(
     output reg                      mthr_we = 1'b0,   // pulse: threshold mthr_data[27:0] for bin mthr_data[31:28]
     output reg         [31:0]       mthr_data = 32'd0,
     input  wire        [31:0]       st_mlim,          // blocks limited
-    input  wire        [31:0]       st_mstat          // {misses, overruns, 6'd0, max step, last step}
+    input  wire        [31:0]       st_mstat,         // {misses, overruns, resyncs, max step, last step}
+    input  wire        [31:0]       st_mdbg           // diagnostics, see 0x74
 );
 
     localparam [31:0] MAGIC = 32'h57464D32;
@@ -250,7 +254,7 @@ module skypluto_axi_regs #(
                     5'h17: s_axi_rdata <= reg_qs;
                     5'h18: s_axi_rdata <= reg_chf;
                     5'h19: s_axi_rdata <= reg_dab;
-                    5'h1D: s_axi_rdata <= reg_mask;
+                    5'h1D: s_axi_rdata <= st_mdbg;
                     5'h1E: s_axi_rdata <= st_mlim;
                     5'h1F: s_axi_rdata <= st_mstat;
                     5'h1A: s_axi_rdata <= dab_status;

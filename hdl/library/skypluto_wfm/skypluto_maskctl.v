@@ -42,7 +42,8 @@ module skypluto_maskctl (
     output reg  [4:0]         max_q,         // largest step since clr
     output reg  [4:0]         last_q,
     output reg  [15:0]        overruns,      // blocks whose samples were overwritten before their turn (step 31 sent)
-    output reg  [15:0]        resyncs        // breaks in the sample numbering (a reset of the conditioner)
+    output reg  [15:0]        resyncs,       // breaks in the sample numbering (a reset of the conditioner)
+    output wire [15:0]        dbg_blk        // diagnostics: {block under evaluation, block of the newest sample}
 );
     `include "skypluto_maskctl_tabs.vh"
 
@@ -82,7 +83,9 @@ module skypluto_maskctl (
                 s_rd <= 1'b1; in_wait <= 1'b1;
                 xr[tag[7:0]] <= s_data[23:0];
                 rcv <= tag;
-                if (!synced || tag != rcv + 1'b1) begin      // first sample or a break: restart at the next block start
+                // the same number again: the conditioner's watchdog cut a pull short and it sends that sample again (it replaces
+                // the stored one); any other jump is a break: restart at the next block start
+                if (!synced || (tag != rcv + 1'b1 && tag != rcv)) begin
                     synced <= 1'b1;
                     if (synced) resyncs <= resyncs + 1'b1;
                     rs_b14 <= (tag[5:0] == 6'd0) ? tag : {tag[13:6] + 1'b1, 6'd0};
@@ -152,6 +155,7 @@ module skypluto_maskctl (
     reg  signed [23:0] p_re, p_im;
     reg  [47:0] p_pw;
 
+    assign dbg_blk = {ev_b14[13:6], rcv[13:6]};
     wire [13:0] lag   = rcv - ev_b14;                       // samples received beyond the block start
     wire        ready = have_b && !mac_busy && !lag[13] && lag >= 14'd95;
     wire        stale = have_b && !lag[13] && lag >= 14'd200; // the ring (256) could be overwritten during the evaluation

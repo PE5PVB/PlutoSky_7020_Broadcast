@@ -9,9 +9,13 @@
 module tb_mask_top;
     localparam real FS = 192187.5;
     localparam real TRD = 81.380;            // l_clk 12.288 MHz
-    real bhalf; initial bhalf = 1e9 / (FS * 64.0) / 2.0;
-    integer MS = 40;
-    initial if ($value$plusargs("MS=%d", MS)) ;
+    real bhalf;
+    integer MS = 40, FSDIV = 1;              // +FSDIV=4: the I2S at 48 kHz (as the encoder sends in DAB mode: the conditioner holds)
+    initial begin
+        if ($value$plusargs("MS=%d", MS)) ;
+        if ($value$plusargs("FSDIV=%d", FSDIV)) ;
+        bhalf = 1e9 / (FS / FSDIV * 64.0) / 2.0;
+    end
 
     localparam integer MAXN = 400000;
     reg [23:0] xs [0:MAXN-1];
@@ -54,8 +58,13 @@ module tb_mask_top;
         .s_axi_araddr(7'd0), .s_axi_arvalid(1'b0), .s_axi_arready(arr),
         .s_axi_rdata(rd), .s_axi_rresp(rr), .s_axi_rvalid(rv), .s_axi_rready(1'b1),
         .rx1_i_in(16'sd0), .rx1_q_in(16'sd0), .rx1_i_out(), .rx1_q_out());
+    integer MSON = 0;                        // +MSON=<ms>: mask control off until then (as switched on at run time)
+    initial if ($value$plusargs("MSON=%d", MSON)) ;
     initial begin
-        force dut.mask_en_a = 1'b1;
+        force dut.mask_en_a = (MSON == 0);
+        if (MSON > 0) begin #(MSON * 1000000.0); force dut.mask_en_a = 1'b1; end
+    end
+    initial begin
         force dut.lim_en_axi = 1'b0;
         #1; force dut.kdev_axi = kdev;
     end
@@ -64,9 +73,25 @@ module tb_mask_top;
     initial begin fx = $fopen("mt_xf.txt", "w"); fres = $fopen("mt_res.txt", "w"); fg = $fopen("mt_greq.txt", "w"); end
     always @(posedge l_clk) begin
         if (dut.u_sc.ms_wr) $fdisplay(fx, "%0d %0d", dut.u_sc.ms_data[37:24], $signed(dut.u_sc.ms_data[23:0]));
-        if (dut.u_sc.st == 5'd9) $fdisplay(fg, "%0d %0d", dut.u_sc.cidx, dut.u_sc.greq);       // S_BLK: g_req of c is final
+        if (dut.u_sc.st == 5'd9) $fdisplay(fg, "%0d %0d", dut.u_sc.ctag, dut.u_sc.greq);       // S_BLK: g_req of c is final
     end
     always @(posedge s_clk) if (dut.u_mc.r_wr) $fdisplay(fres, "%0d %0d", dut.u_mc.r_data[12:5], dut.u_mc.r_data[4:0]);
+    initial forever begin
+        #10000000.0;
+        $display("t=%0d ms: mask_miss=%0d overruns=%0d resyncs=%0d blocks limited=%0d fidx=%0d cidx=%0d", $time / 1000000000,
+                 dut.u_sc.mask_miss, dut.u_mc.overruns, dut.u_mc.resyncs, dut.u_mc.lim_blocks, dut.u_sc.fidx, dut.u_sc.ctag);
+    end
+    // +WDINJ=<n>: about every n-th pull the conditioner's watchdog fires right after the sample went to the mask controller
+    // (S_MQ), as seen on the hardware; the numbering must survive it (mask_miss stays small, no lasting misses)
+    integer WDINJ = 0, wd_n = 0;
+    initial if ($value$plusargs("WDINJ=%d", WDINJ)) ;
+    always @(negedge l_clk)
+        if (WDINJ > 0 && dut.u_sc.st == 5'd20 && ($urandom % WDINJ) == 0) begin dut.u_sc.wdc = 9'd400; wd_n = wd_n + 1; end
+    // +FJUMP=<ms>: at that time the sample number jumps by 1000 (as an l_clk glitch could do on the hardware): after a few blocks
+    // the mask steps must match again (mask_miss stops growing)
+    integer FJUMP = 0;
+    initial if ($value$plusargs("FJUMP=%d", FJUMP)) ;
+    initial if (FJUMP > 0) begin #(FJUMP * 1000000.0); @(negedge l_clk); dut.u_sc.fidx = dut.u_sc.fidx + 14'd1000; end
     integer TRB = -1;
     initial if ($value$plusargs("TRB=%d", TRB)) ;
     always @(posedge s_clk)
@@ -82,6 +107,7 @@ module tb_mask_top;
         #300;
         for (i = 0; i < 16; i = i + 1) dut.u_mc.thr[i] = th[i];
         #(MS * 1000000.0);
+        $display("watchdog injections: %0d", wd_n);
         $display("tb_mask_top: mask_miss=%0d overruns=%0d resyncs=%0d blocks limited=%0d max step=%0d, wd_fsm=%0d",
                  dut.u_sc.mask_miss, dut.u_mc.overruns, dut.u_mc.resyncs, dut.u_mc.lim_blocks, dut.u_mc.max_q, dut.u_sc.wd_fsm);
         $fclose(fx); $fclose(fres); $fclose(fg);
