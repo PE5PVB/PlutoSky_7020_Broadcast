@@ -216,4 +216,5 @@ standard: objects to XML-like text, checks against the index and the basic-profi
 skypluto-dab in simulation with EPG, slideshow and DLS, records the PAD of every audio frame (`-D`), demultiplexes the
 X-PAD, reassembles and checks the data groups (CRC), the MOT directory and every object (byte-identical with the files),
 the slides and the DLS, and decodes the transmission with welle-cli (audio, DLS, slides). welle.io does not decode the
-SPI; AbracaDABra does (from X-PAD, with SPI switched on in its settings) — not yet checked on the air.
+SPI; AbracaDABra does (from X-PAD, with SPI switched on in its settings). Checked on the air on 2026-10-24: the
+programme guide of both services (the one encoded here and the zmq service) shows up on a receiver.
