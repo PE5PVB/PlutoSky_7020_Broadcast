@@ -46,6 +46,8 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <sys/statvfs.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -543,9 +545,38 @@ static void bs_set(int pct, const char *txt){
     bs_pct = pct;
     snprintf(bs_txt, sizeof bs_txt, "%s", txt);
 }
+// The UART's receive FIFO in the FPGA holds 16 bytes = 1.4 ms at 115200 baud, and the main loop can be busy longer than that
+// (a calibration step, the mask monitor, file I/O), so characters of a long line were lost. A thread empties the FIFO every
+// 0.2 ms into a ring of its own; the main loop takes the bytes from the ring (rx_byte). The thread also clears a hardware
+// overflow and counts it (uart_ovf; logged at most once a minute when it moved).
+static uint8_t rx_ring[4096];
+static atomic_uint rx_wp, rx_rp, uart_ovf;
+static void *rx_thread(void *arg){
+    (void)arg;
+    for (;;){
+        uint32_t r;
+        while ((r = rd(U_RX)) & 0x100){
+            unsigned w = atomic_load(&rx_wp);
+            if (w - atomic_load(&rx_rp) < sizeof rx_ring){
+                rx_ring[w % sizeof rx_ring] = (uint8_t)r;
+                atomic_store(&rx_wp, w + 1);
+            }
+        }
+        if (rd(U_ST) & 0x8){
+            wr(U_CLR, 1);  // clear an RX overflow
+            atomic_fetch_add(&uart_ovf, 1);
+        }
+        usleep(200);
+    }
+    return NULL;
+}
 static int rx_byte(void){
-    uint32_t r = rd(U_RX);
-    return (r & 0x100) ? (int)(r & 0xFF) : -1;
+    unsigned rp = atomic_load(&rx_rp);
+    if (rp == atomic_load(&rx_wp))
+        return -1;
+    int b = rx_ring[rp % sizeof rx_ring];
+    atomic_store(&rx_rp, rp + 1);
+    return b;
 }
 
 // =============================================================================
@@ -2657,14 +2688,23 @@ static unsigned crc32_buf(unsigned c, const uint8_t *d, size_t n){
         c = tab[(c ^ *d++) & 0xFF] ^ (c >> 8);
     return ~c;
 }
-// CRC-32 of slide n, 0 when the slot is empty
+// CRC-32 of slide n, 0 when the slot is empty. Kept per slot and computed again only when the file changed (size or
+// modification time): reading all slides at every ?SLS blocked the main loop for tens of ms, longer than the 16-byte receive
+// FIFO of the UART lasts, and characters of the encoder's lines were lost.
 static unsigned sls_crc(int n){
+    static unsigned c_crc[9];
+    static long c_size[9];
+    static struct timespec c_mt[9];
     const char *e = NULL;
     long sz = sls_size(n, &e);
-    if (sz <= 0)
+    if (sz <= 0 || n < 1 || n > 8)
         return 0;
     char fn[64];
     snprintf(fn, sizeof fn, "%s/%d.%s", DAB_SLS, n, e);
+    struct stat st;
+    if (stat(fn, &st) == 0 && st.st_size == c_size[n] && st.st_mtim.tv_sec == c_mt[n].tv_sec &&
+        st.st_mtim.tv_nsec == c_mt[n].tv_nsec && c_crc[n])
+        return c_crc[n];
     FILE *f = fopen(fn, "rb");
     if (!f)
         return 0;
@@ -2674,6 +2714,11 @@ static unsigned sls_crc(int n){
     while ((m = fread(b, 1, sizeof b, f)) > 0)
         c = crc32_buf(c, b, m);
     fclose(f);
+    if (stat(fn, &st) == 0){
+        c_size[n] = (long)st.st_size;
+        c_mt[n] = st.st_mtim;
+        c_crc[n] = c;
+    }
     return c;
 }
 static const char *sls_set_interval(int s){
@@ -5310,6 +5355,15 @@ int main(int argc, char **argv){
     signal(SIGUSR2, on_usr2);
     t_start = mono();
     wr(U_CLR, 1);
+    {
+        pthread_t th;
+        if (pthread_create(&th, NULL, rx_thread, NULL) == 0)
+            pthread_detach(th);
+        else {
+            perror("uart thread");
+            return 1;
+        }
+    }
     while (rx_byte() >= 0){
         // drain the UART
     }
@@ -5434,8 +5488,17 @@ int main(int argc, char **argv){
             else
                 idx = 0;
         }
-        if (rd(U_ST) & 0x8)
-            wr(U_CLR, 1);  // clear an RX overflow
+        {  // hardware receive overflows (the thread clears them): log when the count moved, at most once a minute
+            static unsigned ovf_logged = 0;
+            static double ovf_t = 0;
+            unsigned o = atomic_load(&uart_ovf);
+            if (o != ovf_logged && mono() - ovf_t > 60.0){
+                fprintf(stderr, "   !! UART receive overflow (%u in total)\n", o);
+                fflush(stderr);
+                ovf_logged = o;
+                ovf_t = mono();
+            }
+        }
         double now = mono();
         // boot status steps for the Pico splash screen
         if (bs_phase < 3 && now - bs_t0 >= (bs_phase == 0 ? 0.4 : bs_phase == 1 ? 1.4 : 2.4)){
