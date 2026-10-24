@@ -24,13 +24,25 @@ module tb_dab_top;
         bc <= (bc == 63) ? 0 : bc + 1;
     end
 
+    // ---- optional disturbances (+GLITCH=<ns between spikes>): 3 ns spikes on BCLK and DATA at pseudo-random moments, like ringing
+    // or coupling on the header wires; the exciter's input filter has to ignore them (define NOFILT to see what they do without it)
+    reg gb = 1'b0, gd = 1'b0; integer gper = 0, gseed = 7;
+    initial if ($value$plusargs("GLITCH=%d", gper) && gper > 0) forever begin
+        #(gper / 2 + ($unsigned($random(gseed)) % gper)); gb = 1'b1; #3 gb = 1'b0;
+        #(gper / 3); gd = 1'b1; #3 gd = 1'b0;
+    end
+    wire bclk_p = bclk ^ gb, sd_p = sd ^ gd;
+`ifdef NOFILT
+    defparam dut.I2S_FILT = 0;
+`endif
+
     // ---- DUT ----------------------------------------------------------------------------------------------------------------------
     reg [6:0] awaddr = 0, araddr = 0; reg awvalid = 0, wvalid = 0, arvalid = 0; reg [31:0] wdata = 0;
     wire awready, wready, bvalid, arready, rvalid; wire [1:0] bresp, rresp; wire [31:0] rdata;
     wire signed [15:0] i_out, q_out;
     skypluto_wfm_exciter #(.LUT_FILE("../../hdl/library/skypluto_wfm/data/sine_lut.mem")) dut (
         .l_clk(l_clk), .l_clk_resetn(rstn),
-        .i2s_in_bclk(bclk), .i2s_in_lrclk(lr), .i2s_in_data(sd),
+        .i2s_in_bclk(bclk_p), .i2s_in_lrclk(lr), .i2s_in_data(sd_p),
         .dac_enable_i0(1'b1), .i_out(i_out), .q_out(q_out),
         .s_axi_aclk(s_clk), .s_axi_aresetn(rstn),
         .s_axi_awaddr(awaddr), .s_axi_awvalid(awvalid), .s_axi_awready(awready),

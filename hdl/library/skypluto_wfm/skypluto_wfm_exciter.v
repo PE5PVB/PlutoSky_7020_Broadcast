@@ -29,7 +29,8 @@ module skypluto_wfm_exciter #(
     parameter integer FIFO_AW    = 6,
     parameter        [FRAC-1:0] STEP = 24'd262400,    // 192,187.5 Hz -> l_clk. Confirmed on the radio: audio pitch
                                                        // is CORRECT with this value.
-    parameter         LUT_FILE   = "sine_lut.mem"
+    parameter         LUT_FILE   = "sine_lut.mem",
+    parameter integer I2S_FILT   = 1                  // 1: the I2S pins are sampled on s_axi_aclk and filtered (see below); 0: BCLK clocks directly
 )(
     input  wire                 l_clk,
     input  wire                 l_clk_resetn,
@@ -69,6 +70,33 @@ module skypluto_wfm_exciter #(
     output wire signed [15:0]   rx1_q_out
 );
 
+    // ---- I2S input conditioning ---------------------------------------------------------------------------------------------------
+    // BCLK used to clock the I2S logic straight from its pin. A short disturbance on that pin (ringing, coupling from activity on the
+    // board: measured as corrupt frames in the rhythm of the DAB super frames, 120 ms) then counts as an extra bit and shifts the rest
+    // of the word. Now all three pins are sampled on s_axi_aclk (100 MHz, two synchronizer flip-flops) and a level is only taken over
+    // once it has been seen on 3 samples in a row (>= 20..30 ns): shorter spikes are ignored. The filtered BCLK, through a BUFG, clocks
+    // the I2S domain as before; LRCLK and DATA pass through the same delay, so they keep their position against it (they change on the
+    // falling BCLK edge, half a period away from the rising edge that samples them). Fits BCLK up to 12.288 MHz (192 kHz x 64): 40 ns
+    // half period = at least 4 samples.
+    wire bclk_c, ws_c, sd_c;
+    generate if (I2S_FILT) begin : g_i2sf
+        (* ASYNC_REG = "TRUE" *) reg [2:0] is0 = 3'd0, is1 = 3'd0;    // {bclk, ws, sd}
+        reg [2:0] is2 = 3'd0, is3 = 3'd0, isf = 3'd0;
+        wire [2:0] stable = ~((is1 ^ is2) | (is2 ^ is3));               // per pin: the last 3 samples agree
+        always @(posedge s_axi_aclk) begin
+            is0 <= {i2s_in_bclk, i2s_in_lrclk, i2s_in_data}; is1 <= is0; is2 <= is1; is3 <= is2;
+            isf <= (isf & ~stable) | (is1 & stable);
+        end
+`ifdef __ICARUS__
+        assign bclk_c = isf[2];
+`else
+        BUFG u_bclk_buf (.I(isf[2]), .O(bclk_c));
+`endif
+        assign ws_c = isf[1]; assign sd_c = isf[0];
+    end else begin : g_i2sd
+        assign bclk_c = i2s_in_bclk; assign ws_c = i2s_in_lrclk; assign sd_c = i2s_in_data;
+    end endgenerate
+
     // ---- reset-synchronizers --------------------------------------------------
     reg [1:0] lrst_sync = 2'b11;
     always @(posedge l_clk or negedge l_clk_resetn)
@@ -76,7 +104,7 @@ module skypluto_wfm_exciter #(
     wire l_rst = lrst_sync[1];
 
     reg [1:0] brst_sync = 2'b11;
-    always @(posedge i2s_in_bclk or negedge l_clk_resetn)
+    always @(posedge bclk_c or negedge l_clk_resetn)
         if (!l_clk_resetn) brst_sync <= 2'b11; else brst_sync <= {brst_sync[0], 1'b0};
     wire b_rst = brst_sync[1];
 
@@ -149,9 +177,9 @@ module skypluto_wfm_exciter #(
     wire                 i2s_valid;
     wire [7:0] i2s_fmt_slot, i2s_fmt_bits; wire [1:0] i2s_fmt_mode;
     reg [15:0] ic_b0 = 0, ic_b1 = 0;
-    always @(posedge i2s_in_bclk) begin ic_b0 <= i2s_ctrl_axi; ic_b1 <= ic_b0; end    // static; 2 flip-flops suffice
+    always @(posedge bclk_c) begin ic_b0 <= i2s_ctrl_axi; ic_b1 <= ic_b0; end    // static; 2 flip-flops suffice
     skypluto_i2s_rx #(.DATA_W(DW), .WS_TO_MSB(1)) u_i2s (
-        .bclk(i2s_in_bclk), .ws(i2s_in_lrclk), .sd(i2s_in_data),
+        .bclk(bclk_c), .ws(ws_c), .sd(sd_c),
         .left(i2s_left), .right(i2s_right), .valid(i2s_valid),
         .man_en(ic_b1[0]), .man_mode(ic_b1[2:1]), .man_bits(ic_b1[15:8]),
         .fmt_slot(i2s_fmt_slot), .fmt_bits(i2s_fmt_bits), .fmt_mode(i2s_fmt_mode)
@@ -168,7 +196,7 @@ module skypluto_wfm_exciter #(
     wire signed [DW-1:0] fifo_rdata;
     wire [FIFO_AW:0]     fifo_count, fifo_wrpos;
     skypluto_async_fifo #(.DW(DW), .AW(FIFO_AW)) u_fifo (
-        .wr_clk(i2s_in_bclk), .wr_rst(b_rst), .wr_en(i2s_valid & ~fifo_full),
+        .wr_clk(bclk_c), .wr_rst(b_rst), .wr_en(i2s_valid & ~fifo_full),
         .wr_data(i2s_left), .wr_full(fifo_full),
         .rd_clk(l_clk), .rd_rst(l_rst), .rd_en(USE_SC ? sc_up_rd : ups_fifo_rd),
         .rd_data(fifo_rdata), .rd_empty(fifo_empty), .rd_count(fifo_count), .wr_pos(fifo_wrpos)
@@ -224,10 +252,10 @@ module skypluto_wfm_exciter #(
     (* ASYNC_REG = "TRUE" *) reg ie_l0 = 0, ie_l1 = 0, ie_b0 = 0, ie_b1 = 0;
     (* ASYNC_REG = "TRUE" *) reg [23:0] it_b0 = 24'h0F5C28, it_b1 = 24'h0F5C28;
     always @(posedge l_clk)       begin ie_l0 <= imp_en_axi; ie_l1 <= ie_l0; end
-    always @(posedge i2s_in_bclk) begin ie_b0 <= imp_en_axi; ie_b1 <= ie_b0; it_b0 <= imp_thr_axi; it_b1 <= it_b0; end
+    always @(posedge bclk_c) begin ie_b0 <= imp_en_axi; ie_b1 <= ie_b0; it_b0 <= imp_thr_axi; it_b1 <= it_b0; end
     wire [23:0] imp_abs_left = i2s_left[DW-1] ? ~i2s_left[23:0] : i2s_left[23:0];
     reg imp_tog_b = 0;
-    always @(posedge i2s_in_bclk) if (i2s_valid && ie_b1 && (imp_abs_left > it_b1)) imp_tog_b <= ~imp_tog_b;
+    always @(posedge bclk_c) if (i2s_valid && ie_b1 && (imp_abs_left > it_b1)) imp_tog_b <= ~imp_tog_b;
     (* ASYNC_REG = "TRUE" *) reg ih0 = 0, ih1 = 0; reg ih2 = 0;
     reg [31:0] imp_stamp = 0, imp_count = 0;
     always @(posedge l_clk) begin
@@ -250,10 +278,10 @@ module skypluto_wfm_exciter #(
     reg  [23:0] d_last_left = 0, d_peak_b = 0;
     reg  [31:0] d_frames = 0, d_wcnt = 0;
     wire [23:0] d_abs_left = i2s_left[DW-1] ? ~i2s_left[23:0] : i2s_left[23:0];
-    always @(posedge i2s_in_bclk) begin
-        d_sd_q <= i2s_in_data; d_ws_q <= i2s_in_lrclk;
-        if (d_sd_q != i2s_in_data)   d_sd_edges <= d_sd_edges + 1'b1;
-        if (d_ws_q != i2s_in_lrclk)  d_ws_edges <= d_ws_edges + 1'b1;
+    always @(posedge bclk_c) begin
+        d_sd_q <= sd_c; d_ws_q <= ws_c;
+        if (d_sd_q != sd_c)   d_sd_edges <= d_sd_edges + 1'b1;
+        if (d_ws_q != ws_c)  d_ws_edges <= d_ws_edges + 1'b1;
         if (i2s_valid) begin
             d_last_left <= i2s_left[23:0]; d_frames <= d_frames + 1'b1;
             if (d_abs_left > d_peak_b) d_peak_b <= d_abs_left;
@@ -296,7 +324,7 @@ module skypluto_wfm_exciter #(
         w_seq, {8'd0, w_out_q}, {8'd0, w_out_c},                             // 21 = window sequence number, 20 = peak after limiter (q), 19 = peak at modulator input (comp), 20 ms
         sc_dbg_wd, sc_dbg_state, ups_dbg_state,                              // 18 = watchdog {wd_idle,wd_fsm}, 17 = conditioner state, 16 = interp state
         ups_ovf, ups_take, d_hb,                                             // 15 = interp overflow pulses, 14 = samples taken, 13 = l_clk heartbeat
-        32'hB1D00020,                                                        // 12 = build id (identifies the bitstream)
+        32'hB1D00021,                                                        // 12 = build id (identifies the bitstream)
         ups_sat,                {8'd0, d_pk_comp},                           // 11 = FIR saturations, 10 = peak |interp output|
         {8'd0, d_pk_q},         sc_dbg_nz,                                   // 9 = peak |conditioner output|, 8 = x_new != 0 (count)
         sc_dbg_pops,            sc_dbg_pulls,                                // 7 = FIFO pops, 6 = pulls
@@ -346,10 +374,10 @@ module skypluto_wfm_exciter #(
     assign dab_status_a = dst1;
     // audio for the ARM's AAC encoder: {left[23:8], right[23:8]} per stereo frame, only in DAB mode
     (* ASYNC_REG = "TRUE" *) reg dm_b0 = 0, dm_b1 = 0;
-    always @(posedge i2s_in_bclk) begin dm_b0 <= dab_ctrl_a[0]; dm_b1 <= dm_b0; end
+    always @(posedge bclk_c) begin dm_b0 <= dab_ctrl_a[0]; dm_b1 <= dm_b0; end
     wire aud_full, aud_empty; wire [10:0] aud_cnt, aud_wpos;
     skypluto_async_fifo_bram #(.DW(32), .AW(10)) u_audfifo (
-        .wr_clk(i2s_in_bclk), .wr_rst(b_rst), .wr_en(i2s_valid & dm_b1 & ~aud_full),
+        .wr_clk(bclk_c), .wr_rst(b_rst), .wr_en(i2s_valid & dm_b1 & ~aud_full),
         .wr_data({i2s_left[DW-1 -: 16], i2s_right[DW-1 -: 16]}), .wr_full(aud_full),
         .rd_clk(s_axi_aclk), .rd_rst(a_rst), .rd_en(aud_rd_a & ~aud_empty), .rd_data(aud_data_a), .rd_empty(aud_empty),
         .rd_count(aud_cnt), .wr_pos(aud_wpos)

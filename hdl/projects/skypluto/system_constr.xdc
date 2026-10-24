@@ -95,13 +95,8 @@ set_property  -dict {PACKAGE_PIN  V10  IOSTANDARD LVCMOS33} [get_ports i2s_in_da
 # PULLUP: keeps the line idle-high when nothing drives it (otherwise U9 floats -> false RX start bits).
 set_property  -dict {PACKAGE_PIN  U9   IOSTANDARD LVCMOS33 PULLTYPE PULLUP} [get_ports uart_pin]  ;# JP5-9
 
-# BCLK (12.288 MHz nominal) as clock; lands on a non-clock-capable pin ->
-# disable the dedicated clock route (allowed at this low speed).
-create_clock -period 81.380 -name i2s_bclk [get_ports i2s_in_bclk]
-set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets -of_objects [get_ports i2s_in_bclk]]
-
-# The I2S clock domain is asynchronous to all other clocks (CDC via async FIFO).
-set_clock_groups -asynchronous -group [get_clocks -include_generated_clocks i2s_bclk]
+# The I2S pins are sampled on sys_cpu_clk and filtered inside the exciter (build B1D00021 on); the filtered BCLK clocks the I2S
+# domain through a BUFG. Its clock definition and clock group are in skypluto_late.xdc (the BUFG must exist first).
 
 # The bit-map enable flag is written by software in the AXI clock domain and
 # read in the AD9361 datapath domain, so it is a clock-domain crossing. That

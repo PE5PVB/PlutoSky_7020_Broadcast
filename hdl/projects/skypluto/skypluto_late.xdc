@@ -29,3 +29,11 @@ set_clock_groups -asynchronous \
 set wfm_cells [get_cells -hierarchical -filter {NAME =~ "*system_i/wfm/inst/*"}]
 set_multicycle_path 6 -setup -from [get_clocks rx_clk] -to $wfm_cells
 set_multicycle_path 5 -hold  -from [get_clocks rx_clk] -to $wfm_cells
+
+# -----------------------------------------------------------------------------
+# I2S: the filtered BCLK (exciter u_bclk_buf, a BUFG fed from a sys_cpu_clk flip-flop) is the clock of the I2S domain, at most
+# 12.288 MHz (192 kHz x 64). The domain is asynchronous to all other clocks (CDC via async FIFOs and 2-flop synchronizers); LRCLK and
+# DATA reach it from sys_cpu_clk flip-flops that change half a BCLK period away from the edge that samples them.
+# -----------------------------------------------------------------------------
+create_clock -period 81.380 -name i2s_bclk [get_pins -hierarchical -filter {NAME =~ "*u_bclk_buf/O"}]
+set_clock_groups -asynchronous -group [get_clocks i2s_bclk]

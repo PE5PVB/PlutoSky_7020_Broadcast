@@ -21,12 +21,12 @@ if os.environ.get('TOP') == '1':
     for f in ('skypluto_dab_ofdm.v', 'skypluto_dab_twiddle.vh', 'skypluto_dab_interp_coefs.vh'):
         assert open(os.path.join(HERE, f), 'rb').read() == open(os.path.join(LIB, f), 'rb').read(), f + ' differs from the library copy'
     srcs = [os.path.join(HERE, 'tb_dab_top.v')] + sorted(os.path.join(LIB, f) for f in os.listdir(LIB) if f.endswith('.v'))
-    subprocess.run(['iverilog', '-g2012', '-I', LIB, '-o', os.path.join(d, 'tb.vvp')] + srcs, check=True)
+    subprocess.run(['iverilog', '-g2012', '-I', LIB] + os.environ.get('IVDEF', '').split() + ['-o', os.path.join(d, 'tb.vvp')] + srcs, check=True)
 else:
     subprocess.run(['iverilog', '-g2012', '-I', HERE, '-o', os.path.join(d, 'tb.vvp'), os.path.join(HERE, 'tb_dab_ofdm.v'),
                     os.path.join(HERE, 'skypluto_dab_ofdm.v')], check=True)
 subprocess.run(['vvp', '-n', os.path.join(d, 'tb.vvp'), '+WORDS=' + os.path.join(d, 'w.hex'), '+X=' + os.path.join(d, 'x.txt'),
-                '+Y=' + os.path.join(d, 'y.txt'), '+NCLK=%d' % nclk], check=True, cwd=HERE)
+                '+Y=' + os.path.join(d, 'y.txt'), '+NCLK=%d' % nclk] + os.environ.get('VVPARGS', '').split(), check=True, cwd=HERE)
 hx = np.loadtxt(os.path.join(d, 'x.txt'), dtype=np.int64)
 hy = np.loadtxt(os.path.join(d, 'y.txt'), dtype=np.int64)
 mr, mi = M.frames_2048(w)
