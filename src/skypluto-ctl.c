@@ -2502,7 +2502,7 @@ static void tb_set_now(int khz){
 // Images 1..8 in DAB_SLS (<n>.jpg or <n>.png), sent in turn by skypluto-dab -P. The web interface scales and compresses
 // before uploading (320 x 240 JPEG); here only the type, the size and the room in the jffs2 are checked: at most SLS_ONE per
 // slide and SLS_ALL together, and SLS_KEEP must stay free for the settings files.
-#define SLS_ONE  (50 * 1024)
+#define SLS_ONE  (48 * 1024)
 #define SLS_ALL  (200 * 1024)
 #define SLS_KEEP (96 * 1024)
 // size of slide n (0 = none); *ext (optional) gets its file type
@@ -2552,6 +2552,7 @@ static int sls_json(char *o, int cap){
                   fs_free("/mnt/jffs2"), SLS_ALL, SLS_ONE);
     return n;
 }
+static void sls_bump(void);
 // store slide n (1..8) from an upload; returns NULL or the reason it was refused
 static const char *sls_store(int n, const uint8_t *d, int len){
     if (n < 1 || n > 8)
@@ -2560,7 +2561,7 @@ static const char *sls_store(int n, const uint8_t *d, int len){
     if (!png && !jpg)
         return "not a JPEG or PNG image";
     if (len > SLS_ONE)
-        return "larger than 50 kB";
+        return "larger than 48 kB";
     long others = 0;
     for (int i = 1; i <= 8; i++)
         if (i != n)
@@ -2585,14 +2586,95 @@ static const char *sls_store(int n, const uint8_t *d, int len){
         return "could not be written";
     }
     unlink(old);  // the same slide in the other format
+    sls_bump();
     return NULL;
 }
 static void sls_delete(int n){
     char fn[64];
+    int had = sls_size(n, NULL) > 0;
     snprintf(fn, sizeof fn, "%s/%d.jpg", DAB_SLS, n);
     unlink(fn);
     snprintf(fn, sizeof fn, "%s/%d.png", DAB_SLS, n);
     unlink(fn);
+    if (had)
+        sls_bump();
+}
+// Generation counter and store id (DAB_SLS/sls.meta), for the encoder that keeps a copy of the slides: the generation goes up
+// with every store or delete (web interface or serial line); the id is chosen afresh whenever the store starts empty (a new
+// installation or a lost jffs2), so the encoder knows to put its copies back.
+static unsigned sls_gen = 0, sls_id = 0;
+static int sls_meta_loaded = 0;
+static void sls_meta_save(void){
+    mkdir(DAB_SLS, 0755);
+    FILE *f = fopen(DAB_SLS "/sls.meta.new", "w");
+    if (!f)
+        return;
+    fprintf(f, "gen=%u\nid=%08X\n", sls_gen, sls_id);
+    if (fclose(f) == 0)
+        rename(DAB_SLS "/sls.meta.new", DAB_SLS "/sls.meta");
+}
+static void sls_meta_load(void){
+    if (sls_meta_loaded)
+        return;
+    sls_meta_loaded = 1;
+    FILE *f = fopen(DAB_SLS "/sls.meta", "r");
+    if (f){
+        char l[64];
+        while (fgets(l, sizeof l, f)){
+            if (!strncmp(l, "gen=", 4))
+                sls_gen = (unsigned)strtoul(l + 4, NULL, 10);
+            else if (!strncmp(l, "id=", 3))
+                sls_id = (unsigned)strtoul(l + 3, NULL, 16);
+        }
+        fclose(f);
+    }
+    if (!sls_id){  // no meta file: a new store
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        sls_id = ((unsigned)getpid() * 2654435761u) ^ (unsigned)ts.tv_nsec ^ ((unsigned)ts.tv_sec << 16);
+        if (!sls_id)
+            sls_id = 1;
+        sls_meta_save();
+    }
+}
+static void sls_bump(void){
+    sls_meta_load();
+    sls_gen++;
+    sls_meta_save();
+}
+// CRC-32 (IEEE 802.3, as zlib's crc32) of a buffer, continued from c (start with 0)
+static unsigned crc32_buf(unsigned c, const uint8_t *d, size_t n){
+    static unsigned tab[256];
+    if (!tab[1])
+        for (unsigned i = 0; i < 256; i++){
+            unsigned v = i;
+            for (int k = 0; k < 8; k++)
+                v = (v & 1) ? 0xEDB88320u ^ (v >> 1) : v >> 1;
+            tab[i] = v;
+        }
+    c = ~c;
+    while (n--)
+        c = tab[(c ^ *d++) & 0xFF] ^ (c >> 8);
+    return ~c;
+}
+// CRC-32 of slide n, 0 when the slot is empty
+static unsigned sls_crc(int n){
+    const char *e = NULL;
+    long sz = sls_size(n, &e);
+    if (sz <= 0)
+        return 0;
+    char fn[64];
+    snprintf(fn, sizeof fn, "%s/%d.%s", DAB_SLS, n, e);
+    FILE *f = fopen(fn, "rb");
+    if (!f)
+        return 0;
+    uint8_t b[4096];
+    unsigned c = 0;
+    size_t m;
+    while ((m = fread(b, 1, sizeof b, f)) > 0)
+        c = crc32_buf(c, b, m);
+    fclose(f);
+    return c;
 }
 static const char *sls_set_interval(int s){
     if (s < 5 || s > 3600)
@@ -2762,7 +2844,7 @@ static void handle(char *line){
         }
     }
     // queries and F repeat every poll cycle: do not log (ramdisk log)
-    if (line[0] != '?' && line[0] != 'F'){
+    if (line[0] != '?' && line[0] != 'F' && strncmp(line, "SLW ", 4) && strncmp(line, "SLR ", 4)){
         fprintf(stderr, "rx: %s%s\n", line, summed ? " [*]" : "");
         fflush(stderr);
     }
@@ -2832,6 +2914,7 @@ static void handle(char *line){
             return;
         }
         // ?SLS: the slideshow of the service encoded here: on=<flag in the layout> n=<slides> int=<s> kb=<kB together>
+        // g=<generation: up with every store or delete> id=<store id, new when the store starts empty> c=<CRC-32 of slide 1..8>
         // free=<kB in the flash> s=<size of slide 1..8 in bytes, 0 = empty, comma-separated>
         if (!strcmp(cmd, "?SLS")){
             int li = mux_local(&dmux), cnt = 0;
@@ -2844,9 +2927,13 @@ static void handle(char *line){
                 tot += v;
                 k += snprintf(sz + k, sizeof sz - (size_t)k, "%s%ld", i > 1 ? "," : "", v);
             }
-            char rb[240];
-            snprintf(rb, sizeof rb, "on=%d n=%d int=%d kb=%ld free=%ld s=%s\n", li >= 0 && dmux.s[li].sls, cnt, sls_interval(),
-                     (tot + 512) / 1024, fs_free("/mnt/jffs2") / 1024, sz);
+            char rb[400], cs[80];
+            int kc = 0;
+            for (int i = 1; i <= 8; i++)
+                kc += snprintf(cs + kc, sizeof cs - (size_t)kc, "%s%08X", i > 1 ? "," : "", sls_crc(i));
+            sls_meta_load();
+            snprintf(rb, sizeof rb, "on=%d n=%d int=%d kb=%ld free=%ld s=%s g=%u id=%08X c=%s\n", li >= 0 && dmux.s[li].sls, cnt,
+                     sls_interval(), (tot + 512) / 1024, fs_free("/mnt/jffs2") / 1024, sz, sls_gen, sls_id, cs);
             tx_str(rb);
             return;
         }
@@ -4086,6 +4173,169 @@ static void handle(char *line){
     // A change of only labels, slideshow flags or programme types goes on the air without a reconfiguration.
     // Answers OK, or ERR range when the result would not be a valid layout (CU, SId taken, two local services,
     // bitrate/codec ...).
+    // Slides over the serial line (the encoder keeps a copy and puts it back; works in FM and DAB mode):
+    //   SLR <n> <off> [<max>]              -> d=<base64 of up to max (192) bytes of slide n from off>#hh (CRC-8 as the lines
+    //                                         from the encoder); d=#hh (no data) at the end
+    //   SLB <n> <size> <crc32 hex> <jpg|png> start writing slide n -> OK / ERR full (no room) / ERR size / ERR range
+    //   SLW <off> <base64, up to 192 bytes>  the next piece -> OK / ERR off (wrong offset, too long, or no transfer)
+    //   SLE                                 -> OK when all bytes are there and the CRC-32 matches (then the slide is stored
+    //                                          as a whole, with a new generation) / ERR crc / ERR size / ERR off
+    //   SLD <n>                             -> OK (slide n removed)
+    // A transfer without SLW for 10 s is dropped.
+    if (!strcmp(cmd, "SLR") || !strcmp(cmd, "SLB") || !strcmp(cmd, "SLW") || !strcmp(cmd, "SLE") || !strcmp(cmd, "SLD")){
+        static uint8_t xb[SLS_ONE];
+        static int x_n = 0, x_size = 0, x_got = 0, x_png = 0;
+        static unsigned x_crc = 0;
+        static double x_t = 0;
+        static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        if (x_n && mono() - x_t > 10.0)
+            x_n = 0;  // abandoned
+        if (!strcmp(cmd, "SLR")){
+            int n = 0, mx = 192;
+            long off = -1;
+            int na = sscanf(arg, "%d %ld %d", &n, &off, &mx);
+            if (na < 2 || n < 1 || n > 8 || off < 0 || mx < 1 || mx > 192){
+                tx_str("ERR range\n");
+                return;
+            }
+            const char *e = NULL;
+            long sz = sls_size(n, &e);
+            uint8_t d[192];
+            size_t m = 0;
+            if (sz > 0 && off < sz){
+                char fn[64];
+                snprintf(fn, sizeof fn, "%s/%d.%s", DAB_SLS, n, e);
+                FILE *f = fopen(fn, "rb");
+                if (f){
+                    if (fseek(f, off, SEEK_SET) == 0)
+                        m = fread(d, 1, (size_t)mx, f);
+                    fclose(f);
+                }
+            }
+            char o[2 + 256 + 5];
+            int k = 0;
+            o[k++] = 'd';
+            o[k++] = '=';
+            for (size_t i = 0; i < m; i += 3){
+                unsigned v = (unsigned)d[i] << 16 | (i + 1 < m ? (unsigned)d[i + 1] << 8 : 0) | (i + 2 < m ? d[i + 2] : 0);
+                o[k++] = b64[(v >> 18) & 63];
+                o[k++] = b64[(v >> 12) & 63];
+                o[k++] = i + 1 < m ? b64[(v >> 6) & 63] : '=';
+                o[k++] = i + 2 < m ? b64[v & 63] : '=';
+            }
+            // with the same check sum as the encoder's lines: #hh = CRC-8/SMBUS of everything before the '#'
+            o[k] = 0;
+            snprintf(o + k, sizeof o - (size_t)k, "#%02X\n", crc8_line(o, o + k));
+            tx_str(o);
+            return;
+        }
+        if (!strcmp(cmd, "SLD")){
+            char *e;
+            long n = strtol(arg, &e, 10);
+            if (e == arg || *e || n < 1 || n > 8){
+                tx_str("ERR range\n");
+                return;
+            }
+            sls_delete((int)n);
+            tx_str("OK\n");
+            return;
+        }
+        if (!strcmp(cmd, "SLB")){
+            int n = 0, size = 0;
+            char crcs[16] = "", ty[8] = "";
+            if (sscanf(arg, "%d %d %15s %7s", &n, &size, crcs, ty) != 4 || n < 1 || n > 8 ||
+                (strcmp(ty, "jpg") && strcmp(ty, "png"))){
+                tx_str("ERR range\n");
+                return;
+            }
+            if (size < 8 || size > SLS_ONE){
+                tx_str("ERR size\n");
+                return;
+            }
+            long others = 0;
+            for (int i = 1; i <= 8; i++)
+                if (i != n)
+                    others += sls_size(i, NULL);
+            long fr = fs_free("/mnt/jffs2");
+            if (others + size > SLS_ALL || (fr >= 0 && fr + sls_size(n, NULL) - size < SLS_KEEP)){
+                tx_str("ERR full\n");
+                return;
+            }
+            x_n = n;
+            x_size = size;
+            x_got = 0;
+            x_png = !strcmp(ty, "png");
+            x_crc = (unsigned)strtoul(crcs, NULL, 16);
+            x_t = mono();
+            tx_str("OK\n");
+            return;
+        }
+        if (!strcmp(cmd, "SLW")){
+            char *e;
+            long off = strtol(arg, &e, 10);
+            if (!x_n || e == arg || *e != ' ' || off != x_got){
+                tx_str("ERR off\n");
+                return;
+            }
+            const char *s = e + 1;
+            uint8_t d[192];
+            int m = 0, bits = 0;
+            unsigned acc = 0;
+            for (; *s && *s != '='; s++){
+                const char *q = strchr(b64, *s);
+                if (!q || m >= (int)sizeof d){
+                    tx_str("ERR off\n");
+                    return;
+                }
+                acc = (acc << 6) | (unsigned)(q - b64);
+                bits += 6;
+                if (bits >= 8){
+                    bits -= 8;
+                    d[m++] = (uint8_t)(acc >> bits);
+                }
+            }
+            if (x_got + m > x_size){
+                tx_str("ERR off\n");
+                return;
+            }
+            memcpy(xb + x_got, d, (size_t)m);
+            x_got += m;
+            x_t = mono();
+            tx_str("OK\n");
+            return;
+        }
+        // SLE
+        if (!x_n){
+            tx_str("ERR off\n");
+            return;
+        }
+        int n = x_n;
+        x_n = 0;
+        if (x_got != x_size){
+            tx_str("ERR size\n");
+            return;
+        }
+        if (crc32_buf(0, xb, (size_t)x_size) != x_crc){
+            tx_str("ERR crc\n");
+            return;
+        }
+        int png = x_size > 8 && !memcmp(xb, "\x89PNG\r\n\x1a\n", 8);
+        if (png != x_png){
+            tx_str("ERR range\n");
+            return;
+        }
+        const char *why = sls_store(n, xb, x_size);
+        if (why){
+            fprintf(stderr, "   !! slide %d over the serial line: %s\n", n, why);
+            fflush(stderr);
+            tx_str(strstr(why, "room") || strstr(why, "exceed") ? "ERR full\n" : "ERR range\n");
+            return;
+        }
+        fprintf(stderr, "   -> slide %d stored over the serial line (%d bytes)\n", n, x_size);
+        fflush(stderr);
+        tx_str("OK\n");
+        return;
+    }
     if (!strcmp(cmd, "DSN")){
         int v = atoi(arg);
         const char *r = (v >= 5 && v <= 3600) ? sls_set_interval(v) : "range";
@@ -5077,7 +5327,7 @@ int main(int argc, char **argv){
     // only to that client. SOCK_CLOEXEC: the children (iio_readdev, mask tool) must not inherit the listening port,
     // otherwise the port stays busy after a daemon restart. If bind fails (e.g. still busy), it is retried every 5 s.
     int lfd = -1, cfd = -1;
-    char cline[192];
+    char cline[400];
     int cidx = 0;
     double lfd_retry = 0.0;
 
@@ -5087,7 +5337,7 @@ int main(int argc, char **argv){
     bs_set(55, "Besturing v" SW_VERSION);
     for (int i = 0; i < 4; i++)
         wc[i].fd = -1;
-    char line[192];
+    char line[400];
     int idx = 0;
     // ---- main loop: everything is polled, nothing blocks for long (sleeps 1 ms when nothing arrived) ----
     for (;;){
